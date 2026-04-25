@@ -226,6 +226,9 @@ async fn proxy_status(State(state): State<AppState>) -> Json<ApiResponse<ProxySt
 async fn containers_list(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<Vec<ContainerInfo>>> {
+    if state.docker.is_unavailable() {
+        return Json(ApiResponse::err("Docker manager unavailable"));
+    }
     match state.docker.list_containers().await {
         Ok(list) => Json(ApiResponse::ok(list)),
         Err(e) => Json(ApiResponse::err(e.to_string())),
@@ -243,6 +246,9 @@ async fn container_inspect(
     State(state): State<AppState>,
     Query(q): Query<ContainerNameQuery>,
 ) -> Json<ApiResponse<ContainerInspectResult>> {
+    if state.docker.is_unavailable() {
+        return Json(ApiResponse::err("Docker manager unavailable"));
+    }
     match state.docker.inspect_container(&q.name).await {
         Ok(detail) => Json(ApiResponse::ok(detail)),
         Err(e) => Json(ApiResponse::err(e.to_string())),
@@ -254,6 +260,9 @@ async fn container_create(
     State(state): State<AppState>,
     Json(req): Json<ContainerCreateRequest>,
 ) -> Json<ApiResponse<ContainerCreateResult>> {
+    if state.docker.is_unavailable() {
+        return Json(ApiResponse::err("Docker manager unavailable"));
+    }
     // Derive proxy and DNS addresses from the running subsystems.
     let proxy_addr = state.proxy.listen_addr.to_string();
     let dns_addr = {
@@ -275,6 +284,9 @@ async fn container_stop(
     State(state): State<AppState>,
     Json(req): Json<ContainerStopRequest>,
 ) -> Json<ApiResponse<ContainerStopResult>> {
+    if state.docker.is_unavailable() {
+        return Json(ApiResponse::err("Docker manager unavailable"));
+    }
     match state.docker.stop_container(&req.name, req.timeout).await {
         Ok(result) => Json(ApiResponse::ok(result)),
         Err(e) => Json(ApiResponse::err(e.to_string())),
@@ -286,6 +298,9 @@ async fn container_remove(
     State(state): State<AppState>,
     Json(req): Json<ContainerRemoveRequest>,
 ) -> Json<ApiResponse<ContainerRemoveResult>> {
+    if state.docker.is_unavailable() {
+        return Json(ApiResponse::err("Docker manager unavailable"));
+    }
     match state
         .docker
         .remove_container(&req.name, req.force.unwrap_or(false))
@@ -301,6 +316,9 @@ async fn container_pull(
     State(state): State<AppState>,
     Json(req): Json<ImagePullRequest>,
 ) -> Json<ApiResponse<ImagePullResult>> {
+    if state.docker.is_unavailable() {
+        return Json(ApiResponse::err("Docker manager unavailable"));
+    }
     match state.docker.pull_image(&req.image).await {
         Ok(result) => Json(ApiResponse::ok(result)),
         Err(e) => Json(ApiResponse::err(e.to_string())),

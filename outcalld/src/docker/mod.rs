@@ -59,7 +59,7 @@ pub enum ContainerEventKind {
 ///
 /// Wraps in an `Arc` so it can be shared across Axum handler tasks.
 pub struct DockerManager {
-    docker: Docker,
+    docker: Option<Docker>,
     /// Host path of the agent unix socket to bind-mount (read-only).
     pub agent_socket_host_path: String,
     /// Host path of the outcall-agent shim binary to bind-mount (read-only).
@@ -70,12 +70,23 @@ pub struct DockerManager {
 
 impl DockerManager {
     /// Connect to the local Docker Engine and start the event-monitoring task.
+    ///
+    /// Returns `Ok(None)` if Docker is unavailable — the daemon continues in
+    /// degraded mode. Container management endpoints will return 503.
     pub fn new(
         agent_socket_host_path: impl Into<String>,
         shim_host_path: impl Into<String>,
-    ) -> Result<Arc<Self>> {
-        let docker = Docker::connect_with_local_defaults()
-            .context("failed to connect to Docker — is the Docker daemon running?")?;
+    ) -> Result<Option<Arc<Self>>> {
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => {
+                info!("Docker Manager connected");
+                Some(d)
+            }
+            Err(e) => {
+                error!(error = %e, "Docker manager unavailable — continuing in degraded mode");
+                None
+            }
+        };
 
         let (event_tx, _) = broadcast::channel(64);
 
@@ -86,15 +97,32 @@ impl DockerManager {
             event_tx,
         });
 
-        // Spawn the background event watcher task.
-        tokio::spawn(event_watch_loop(mgr.docker.clone(), mgr.event_tx.clone()));
+        if let Some(ref docker) = mgr.docker {
+            tokio::spawn(event_watch_loop(docker.clone(), mgr.event_tx.clone()));
+        }
 
-        Ok(mgr)
+        Ok(Some(mgr))
     }
 
     /// Subscribe to container lifecycle events (for S009 rule cleanup).
     pub fn subscribe_events(&self) -> broadcast::Receiver<ContainerEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Create a DockerManager that reports as unavailable (for degraded mode).
+    pub fn new_unavailable() -> Self {
+        let (event_tx, _) = broadcast::channel(64);
+        Self {
+            docker: None,
+            agent_socket_host_path: String::new(),
+            shim_host_path: String::new(),
+            event_tx,
+        }
+    }
+
+    /// Returns `true` if Docker is unavailable (degraded mode).
+    pub fn is_unavailable(&self) -> bool {
+        self.docker.is_none()
     }
 
     // ── Container creation ─────────────────────────────────────────────────

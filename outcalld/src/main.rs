@@ -139,13 +139,20 @@ async fn linux_main(args: Args) -> Result<()> {
     }
 
     // Initialize Docker Manager (S008).
-    // bollard::Docker::connect_with_local_defaults() only creates the client — no network call.
-    // Actual Docker availability is checked lazily at endpoint call time.
-    let docker_manager = docker::DockerManager::new(
+    // EC-008 graceful degradation: unavailable Docker does NOT stop the daemon.
+    let docker_manager = match docker::DockerManager::new(
         &args.agent_socket_host_path,
         &args.shim_host_path,
-    )?;
-    info!("Docker Manager initialized");
+    )? {
+        Some(mgr) => {
+            info!("Docker Manager initialized");
+            mgr
+        }
+        None => {
+            info!("Docker Manager unavailable — continuing in degraded mode");
+            Arc::new(docker::DockerManager::new_unavailable())
+        }
+    };
 
     // Initialize Dynamic Rule Manager (S009) — subscribes to Docker death events.
     let dynamic_mgr = dynamic::DynamicRuleManager::new(docker_manager.clone());
