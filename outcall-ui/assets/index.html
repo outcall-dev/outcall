@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Outcall Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --surface2: #263248;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --green: #22c55e;
+      --red: #ef4444;
+      --yellow: #eab308;
+      --blue: #3b82f6;
+      --code: #f1f5f9;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; }
+    a { color: var(--blue); text-decoration: none; }
+
+    /* Header */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0.75rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .logo { font-size: 1rem; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: center; gap: 0.5rem; }
+    .logo-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .refresh-info { font-size: 0.75rem; color: var(--muted); }
+
+    /* Layout */
+    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+
+    /* Status grid */
+    .status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+
+    /* Cards */
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; }
+    .card-title {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 0.875rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .row { display: flex; justify-content: space-between; align-items: center; padding: 0.375rem 0; }
+    .row + .row { border-top: 1px solid rgba(51,65,85,0.6); }
+    .row-label { color: var(--muted); }
+    .row-value { font-weight: 500; text-align: right; }
+
+    /* Badges */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .badge::before { content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%; margin-right: 0.35rem; }
+    .up { background: rgba(34,197,94,0.12); color: var(--green); border: 1px solid rgba(34,197,94,0.2); }
+    .up::before { background: var(--green); }
+    .down { background: rgba(239,68,68,0.12); color: var(--red); border: 1px solid rgba(239,68,68,0.2); }
+    .down::before { background: var(--red); }
+    .inactive { background: rgba(148,163,184,0.1); color: var(--muted); border: 1px solid rgba(148,163,184,0.2); }
+    .inactive::before { background: var(--muted); }
+    .allow { background: rgba(34,197,94,0.12); color: var(--green); border: 1px solid rgba(34,197,94,0.2); }
+    .allow::before { background: var(--green); }
+    .block { background: rgba(239,68,68,0.12); color: var(--red); border: 1px solid rgba(239,68,68,0.2); }
+    .block::before { background: var(--red); }
+
+    /* Section */
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 1.5rem 0 0.75rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .section-title { font-weight: 600; font-size: 0.875rem; }
+    .section-meta { font-size: 0.75rem; color: var(--muted); }
+
+    /* Table */
+    .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      text-align: left;
+      padding: 0.625rem 1rem;
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      background: var(--surface2);
+      border-bottom: 1px solid var(--border);
+    }
+    td { padding: 0.625rem 1rem; border-bottom: 1px solid rgba(51,65,85,0.4); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+    code { font-family: 'Fira Code', 'Cascadia Code', 'Menlo', monospace; font-size: 0.8rem; background: rgba(148,163,184,0.1); padding: 0.1rem 0.35rem; border-radius: 3px; color: var(--code); }
+
+    .empty-row { padding: 2rem; text-align: center; color: var(--muted); font-size: 0.825rem; }
+
+    /* Spinner */
+    .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(148,163,184,0.3); border-top-color: var(--blue); border-radius: 50%; animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Error state */
+    .error-text { color: var(--red); font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo"><span class="logo-dot"></span>Outcall</div>
+    <span class="refresh-info" id="last-refresh"><span class="spinner"></span></span>
+  </header>
+  <main>
+
+    <!-- Status cards -->
+    <div class="status-grid">
+      <!-- Bridge -->
+      <div class="card">
+        <div class="card-title">Bridge</div>
+        <div class="row"><span class="row-label">Status</span><span class="row-value" id="bridge-status"><span class="spinner"></span></span></div>
+        <div class="row"><span class="row-label">Interface</span><span class="row-value" id="bridge-name">—</span></div>
+        <div class="row"><span class="row-label">Index</span><span class="row-value" id="bridge-index">—</span></div>
+        <div class="row"><span class="row-label">nftables</span><span class="row-value" id="bridge-nft">—</span></div>
+      </div>
+
+      <!-- DNS Filter -->
+      <div class="card">
+        <div class="card-title">DNS Filter</div>
+        <div class="row"><span class="row-label">Status</span><span class="row-value" id="dns-status"><span class="spinner"></span></span></div>
+        <div class="row"><span class="row-label">Listen</span><span class="row-value" id="dns-listen">—</span></div>
+        <div class="row"><span class="row-label">Upstreams</span><span class="row-value" id="dns-upstreams">—</span></div>
+        <div class="row"><span class="row-label">Cache</span><span class="row-value" id="dns-cache-count">—</span></div>
+        <div class="row"><span class="row-label">Queries</span><span class="row-value" id="dns-queries">—</span></div>
+      </div>
+
+      <!-- HTTP Proxy -->
+      <div class="card">
+        <div class="card-title">HTTP Proxy</div>
+        <div class="row"><span class="row-label">Status</span><span class="row-value" id="proxy-status"><span class="spinner"></span></span></div>
+        <div class="row"><span class="row-label">URL</span><span class="row-value" id="proxy-url">—</span></div>
+        <div class="row"><span class="row-label">Active conns</span><span class="row-value" id="proxy-conns">—</span></div>
+        <div class="row"><span class="row-label">Total requests</span><span class="row-value" id="proxy-total">—</span></div>
+        <div class="row"><span class="row-label">Blocked</span><span class="row-value" id="proxy-blocked">—</span></div>
+      </div>
+    </div>
+
+    <!-- Rules -->
+    <div class="section-header">
+      <span class="section-title">Rules</span>
+      <span class="section-meta" id="rules-meta"></span>
+    </div>
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Action</th>
+            <th>File</th>
+            <th>Condition</th>
+          </tr>
+        </thead>
+        <tbody id="rules-body">
+          <tr><td colspan="4" class="empty-row"><span class="spinner"></span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- DNS Cache -->
+    <div class="section-header">
+      <span class="section-title">DNS Cache</span>
+      <span class="section-meta" id="dns-cache-meta"></span>
+    </div>
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>Hostname</th>
+            <th>Type</th>
+            <th>TTL remaining</th>
+          </tr>
+        </thead>
+        <tbody id="dns-cache-body">
+          <tr><td colspan="3" class="empty-row"><span class="spinner"></span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+  </main>
+
+  <script>
+    const REFRESH_INTERVAL_MS = 5000;
+
+    function badgeUp(text) {
+      return `<span class="badge up">${text}</span>`;
+    }
+    function badgeDown(text) {
+      return `<span class="badge down">${text}</span>`;
+    }
+    function badgeInactive(text) {
+      return `<span class="badge inactive">${text}</span>`;
+    }
+    function badgeAllow() {
+      return `<span class="badge allow">allow</span>`;
+    }
+    function badgeBlock() {
+      return `<span class="badge block">block</span>`;
+    }
+
+    async function fetchAPI(path) {
+      const resp = await fetch(path, { cache: 'no-store' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const json = await resp.json();
+      if (!json.success) throw new Error(json.error || 'API error');
+      return json.data;
+    }
+
+    function setText(id, val) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = val;
+    }
+    function setHTML(id, val) {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = val;
+    }
+
+    async function fetchBridge() {
+      try {
+        const b = await fetchAPI('/api/v1/bridge');
+        setHTML('bridge-status', b.up ? badgeUp('up') : badgeDown('down'));
+        setText('bridge-name', b.name);
+        setText('bridge-index', b.index != null ? b.index : '—');
+        setHTML('bridge-nft', b.nftables_active ? badgeUp('active') : badgeDown('inactive'));
+      } catch (e) {
+        setHTML('bridge-status', `<span class="error-text">error: ${e.message}</span>`);
+      }
+    }
+
+    async function fetchDNS() {
+      try {
+        const d = await fetchAPI('/api/v1/dns');
+        if (d.running) {
+          setHTML('dns-status', badgeUp('active'));
+          setText('dns-listen', `${d.listen_address}:${d.listen_port}`);
+          setText('dns-upstreams', d.upstreams && d.upstreams.length ? d.upstreams.join(', ') : 'system');
+          setText('dns-cache-count', `${d.cache_entries} entries`);
+          setText('dns-queries', `${d.queries_total} total · ${d.queries_blocked} blocked`);
+        } else {
+          setHTML('dns-status', badgeInactive('inactive'));
+          setText('dns-listen', '—');
+          setText('dns-upstreams', '—');
+          setText('dns-cache-count', '—');
+          setText('dns-queries', '—');
+        }
+      } catch (e) {
+        setHTML('dns-status', `<span class="error-text">error: ${e.message}</span>`);
+      }
+    }
+
+    async function fetchProxy() {
+      try {
+        const p = await fetchAPI('/api/v1/proxy');
+        if (p.running) {
+          setHTML('proxy-status', badgeUp('active'));
+          setText('proxy-url', p.proxy_url);
+          setText('proxy-conns', p.active_connections);
+          setText('proxy-total', p.total_requests);
+          setText('proxy-blocked', p.total_blocked);
+        } else {
+          setHTML('proxy-status', badgeInactive('inactive'));
+          setText('proxy-url', '—');
+          setText('proxy-conns', '—');
+          setText('proxy-total', '—');
+          setText('proxy-blocked', '—');
+        }
+      } catch (e) {
+        setHTML('proxy-status', `<span class="error-text">error: ${e.message}</span>`);
+      }
+    }
+
+    async function fetchRules() {
+      try {
+        const rules = await fetchAPI('/api/v1/rules');
+        const meta = document.getElementById('rules-meta');
+        if (meta) meta.textContent = `${(rules || []).length} loaded`;
+        const tbody = document.getElementById('rules-body');
+        if (!rules || rules.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="4" class="empty-row">No rules loaded</td></tr>';
+          return;
+        }
+        tbody.innerHTML = rules.map(r => {
+          const actionBadge = r.action === 'allow' ? badgeAllow() :
+                              r.action === 'block' ? badgeBlock() :
+                              `<span class="badge inactive">${r.action}</span>`;
+          const desc = r.description || r.condition_preview || '';
+          return `<tr>
+            <td><code>${r.id}</code></td>
+            <td>${actionBadge}</td>
+            <td style="color:var(--muted);font-size:0.75rem"><code style="background:none;padding:0">${r.file}</code></td>
+            <td style="color:var(--muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${desc}">${desc}</td>
+          </tr>`;
+        }).join('');
+      } catch (e) {
+        const tbody = document.getElementById('rules-body');
+        tbody.innerHTML = `<tr><td colspan="4" class="empty-row error-text">Error loading rules: ${e.message}</td></tr>`;
+      }
+    }
+
+    async function fetchDNSCache() {
+      try {
+        const data = await fetchAPI('/api/v1/dns/cache?entries=true');
+        const entries = data.entries || [];
+        const stats = data.stats || {};
+        const meta = document.getElementById('dns-cache-meta');
+        if (meta && stats) {
+          const hitRate = (stats.hits + stats.misses > 0)
+            ? ((stats.hits / (stats.hits + stats.misses)) * 100).toFixed(1) + '% hit rate'
+            : '';
+          meta.textContent = `${stats.entries || 0} / ${stats.max_entries || 0} entries${hitRate ? ' · ' + hitRate : ''}`;
+        }
+        const tbody = document.getElementById('dns-cache-body');
+        if (entries.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="3" class="empty-row">Cache is empty</td></tr>';
+          return;
+        }
+        tbody.innerHTML = entries.map(e => `<tr>
+          <td>${e.hostname}</td>
+          <td><code>${e.record_type}</code></td>
+          <td>${e.ttl_remaining_secs}s</td>
+        </tr>`).join('');
+      } catch (e) {
+        const tbody = document.getElementById('dns-cache-body');
+        tbody.innerHTML = `<tr><td colspan="3" class="empty-row">${e.message.includes('inactive') ? 'DNS filter inactive' : 'Error: ' + e.message}</td></tr>`;
+      }
+    }
+
+    async function refresh() {
+      await Promise.allSettled([
+        fetchBridge(),
+        fetchDNS(),
+        fetchProxy(),
+        fetchRules(),
+        fetchDNSCache(),
+      ]);
+      const el = document.getElementById('last-refresh');
+      if (el) el.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    }
+
+    // Initial load + periodic refresh
+    refresh();
+    setInterval(refresh, REFRESH_INTERVAL_MS);
+  </script>
+</body>
+</html>

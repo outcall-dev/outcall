@@ -1,0 +1,16 @@
+FROM rust:1.95-bookworm
+
+# nftables + iproute2 for bridge/nft verification
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nftables \
+        iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+# Build the workspace (caches better if deps don't change)
+RUN cargo build --workspace
+
+# Default: run the bridge integration test
+CMD ["cargo", "test", "-p", "outcalld", "--test", "bridge_integration", "--", "--nocapture"]

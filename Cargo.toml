@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+    "outcalld",
+    "outcall",
+    "outcall-agent",
+    "outcall-api",
+    "outcall-ui",
+]
