@@ -67,10 +67,30 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     agent_timeout_secs: u64,
 
+    /// Sliding-window rate limit for agent permission checks, as `<count>/<seconds>`.
+    /// Example: `100/10` means 100 checks per 10-second window per container.
+    #[arg(long, default_value = "100/10")]
+    agent_perm_rate: String,
+
+    /// Sliding-window rate limit for agent rule submissions, as `<count>/<seconds>`.
+    /// Example: `10/60` means 10 submissions per 60-second window per container.
+    #[arg(long, default_value = "10/60")]
+    agent_rule_rate: String,
+
     /// CIDR block for outcall network /24 auto-allocation (S002-FR-029).
     /// Must be within RFC 1918 private space.
     #[arg(long, default_value = outcall_api::SUBNET_BLOCK)]
     subnet_block: String,
+}
+
+/// Parse a rate limit string of the form `<count>/<seconds>`.
+fn parse_rate(s: &str) -> (usize, std::time::Duration) {
+    let (count_s, window_s) = s
+        .split_once('/')
+        .unwrap_or((s, "1"));
+    let count = count_s.parse().unwrap_or(1);
+    let window = std::time::Duration::from_secs(window_s.parse().unwrap_or(1));
+    (count, window)
 }
 
 #[tokio::main]
@@ -185,10 +205,16 @@ async fn linux_main(args: Args) -> Result<()> {
     let agent_listener = tokio::net::UnixListener::bind(&args.agent_socket_host_path)?;
     info!(socket = %args.agent_socket_host_path, "agent API listening");
 
+    let (perm_count, perm_window) = parse_rate(&args.agent_perm_rate);
+    let (rule_count, rule_window) = parse_rate(&args.agent_rule_rate);
     let agent_app = agent_api::router(
         docker_manager.clone(),
         rule_engine.clone(),
         std::time::Duration::from_secs(args.agent_timeout_secs),
+        perm_count,
+        perm_window,
+        rule_count,
+        rule_window,
     );
 
     let agent_server = tokio::spawn(async move {

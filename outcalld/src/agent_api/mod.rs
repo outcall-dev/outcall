@@ -105,6 +105,10 @@ pub struct AgentState {
     rule_rate: Arc<Mutex<HashMap<String, SlidingWindow>>>,
     rule_requests: Arc<Mutex<HashMap<String, RuleRequestEntry>>>,
     eval_timeout: Duration,
+    perm_limit: usize,
+    perm_window: Duration,
+    rule_limit: usize,
+    rule_window: Duration,
 }
 
 // ── Router ─────────────────────────────────────────────────────────────────────
@@ -113,6 +117,10 @@ pub fn router(
     docker: Arc<DockerManager>,
     rules: Arc<RuleEngine>,
     eval_timeout: Duration,
+    perm_count: usize,
+    perm_window: Duration,
+    rule_count: usize,
+    rule_window: Duration,
 ) -> Router {
     let state = AgentState {
         docker,
@@ -123,6 +131,10 @@ pub fn router(
         rule_rate: Default::default(),
         rule_requests: Default::default(),
         eval_timeout,
+        perm_limit: perm_count,
+        perm_window,
+        rule_limit: rule_count,
+        rule_window,
     };
 
     Router::new()
@@ -270,12 +282,12 @@ async fn permissions_check(
         Err(resp) => return resp,
     };
 
-    // FR-014.a: 100 permission checks per 10-second window per container.
+    // FR-014.a: configurable sliding-window rate limit per container.
     {
         let mut rate = state.perm_rate.lock().await;
-        let limiter = rate
-            .entry(container_id.clone())
-            .or_insert_with(|| SlidingWindow::new(100, Duration::from_secs(10)));
+        let limiter = rate.entry(container_id.clone()).or_insert_with(|| {
+            SlidingWindow::new(state.perm_limit, state.perm_window)
+        });
         if !limiter.allow() {
             warn!(container_id = %container_id, "permission check: rate limited");
             let mut resp = (
@@ -339,12 +351,12 @@ async fn rule_request_submit(
         Err(resp) => return resp,
     };
 
-    // FR-014.b: 10 rule submissions per minute per container.
+    // FR-014.b: configurable sliding-window rate limit per container.
     {
         let mut rate = state.rule_rate.lock().await;
-        let limiter = rate
-            .entry(container_id.clone())
-            .or_insert_with(|| SlidingWindow::new(10, Duration::from_secs(60)));
+        let limiter = rate.entry(container_id.clone()).or_insert_with(|| {
+            SlidingWindow::new(state.rule_limit, state.rule_window)
+        });
         if !limiter.allow() {
             warn!(container_id = %container_id, "rule submit: rate limited");
             let mut resp = (
