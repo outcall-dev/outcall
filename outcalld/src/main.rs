@@ -127,13 +127,13 @@ async fn linux_main(args: Args) -> Result<()> {
         args.proxy_addr.parse().map_err(|e| anyhow::anyhow!("invalid --proxy-addr: {e}"))?,
     );
     if !args.no_proxy {
-        match proxy_server.start(rule_engine.clone()).await {
-            Ok(()) => info!(addr = %args.proxy_addr, "HTTP proxy started"),
-            Err(e) => {
-                // Non-fatal: daemon continues without HTTP proxy
-                tracing::error!("HTTP proxy failed to start: {e} — continuing without proxy");
-            }
+        if let Err(e) = proxy_server.start(rule_engine.clone()).await {
+            return Err(anyhow::anyhow!(
+                "HTTP proxy failed to bind {}: {e}. Set --no-proxy to run without the proxy.",
+                args.proxy_addr
+            ));
         }
+        info!(addr = %args.proxy_addr, "HTTP proxy started");
     } else {
         info!("HTTP proxy disabled (--no-proxy)");
     }
