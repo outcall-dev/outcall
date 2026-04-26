@@ -272,13 +272,15 @@ impl DnsHandler {
                     egress.ports.clone()
                 };
 
-                let destinations = extract_ipv4_destinations(records);
-                if destinations.is_empty() {
-                    debug!(%hostname, "direct_ip egress requested but no IPv4 DNS answers found");
+                let ipv4_destinations = extract_ipv4_destinations(records);
+                let ipv6_destinations = extract_ipv6_destinations(records);
+
+                if ipv4_destinations.is_empty() && ipv6_destinations.is_empty() {
+                    debug!(%hostname, "direct_ip egress requested but no DNS A or AAAA answers found");
                     return;
                 }
 
-                for dst in destinations {
+                for dst in ipv4_destinations {
                     for port in &ports {
                         let req = AllowRuleRequest {
                             container: container.clone(),
@@ -289,7 +291,23 @@ impl DnsHandler {
                         };
 
                         if let Err(e) = self.dynamic.insert_rule(req).await {
-                            warn!(%hostname, src = %src_ip, dst = %dst, port = *port, "failed to insert direct_ip allow rule: {e}");
+                            warn!(%hostname, src = %src_ip, dst = %dst, port = *port, "failed to insert direct_ip allow rule (IPv4): {e}");
+                        }
+                    }
+                }
+
+                for dst in ipv6_destinations {
+                    for port in &ports {
+                        let req = AllowRuleRequest {
+                            container: container.clone(),
+                            src_ip: src_ip.clone(),
+                            destination: dst.clone(),
+                            protocol: Some("tcp".to_string()),
+                            port: Some(*port),
+                        };
+
+                        if let Err(e) = self.dynamic.insert_rule(req).await {
+                            warn!(%hostname, src = %src_ip, dst = %dst, port = *port, "failed to insert direct_ip allow rule (IPv6): {e}");
                         }
                     }
                 }
@@ -409,6 +427,18 @@ fn extract_ipv4_destinations(records: &[Record]) -> Vec<String> {
     let mut out = Vec::new();
     for r in records {
         if let Some(RData::A(ip)) = r.data() {
+            out.push(ip.0.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn extract_ipv6_destinations(records: &[Record]) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in records {
+        if let Some(RData::AAAA(ip)) = r.data() {
             out.push(ip.0.to_string());
         }
     }
@@ -636,7 +666,7 @@ pub fn container_resolv_conf(gateway_ip: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn extract_ipv4_destinations_dedups_and_ignores_non_a_records() {
@@ -647,5 +677,37 @@ mod tests {
 
         let got = extract_ipv4_destinations(&[rec1, rec2, rec3]);
         assert_eq!(got, vec!["91.189.91.104", "91.189.92.19"]);
+    }
+
+    #[test]
+    fn extract_ipv6_destinations_dedups_and_ignores_non_aaaa_records() {
+        let name = Name::from_ascii("example.com.").expect("name");
+        let rec1 = Record::from_rdata(
+            name.clone(),
+            60,
+            RData::AAAA(hickory_proto::rr::rdata::AAAA(*Ipv6Addr::LOCALHOST)),
+        );
+        let rec2 = Record::from_rdata(
+            name.clone(),
+            60,
+            RData::AAAA(hickory_proto::rr::rdata::AAAA(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x1))),
+        );
+        let rec3 = Record::from_rdata(
+            name,
+            60,
+            RData::AAAA(hickory_proto::rr::rdata::AAAA(*Ipv6Addr::LOCALHOST)),
+        );
+
+        let got = extract_ipv6_destinations(&[rec1, rec2, rec3]);
+        assert_eq!(got, vec!["::1", "2001:db8::1"]);
+    }
+
+    #[test]
+    fn extract_ipv6_destinations_ignores_a_records() {
+        let name = Name::from_ascii("example.com.").expect("name");
+        let rec = Record::from_rdata(name, 60, RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(93, 184, 215, 14))));
+
+        let got = extract_ipv6_destinations(&[rec]);
+        assert!(got.is_empty());
     }
 }

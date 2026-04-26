@@ -246,10 +246,22 @@ async fn nft_insert(
     protocol: Option<&str>,
     port: Option<u16>,
 ) -> Result<u64> {
+    let is_ipv6 = is_ipv6_addr(dst_ip);
+    let ip_prefix = if is_ipv6 { "ip6" } else { "ip" };
+
+    // When emitting ip6 rules with an IPv4 source address, nftables requires
+    // IPv4-mapped IPv6 form (::ffff:x.x.x.x). Without this conversion, nft
+    // rejects "ip6 saddr 10.0.0.1" with "Could not resolve hostname".
+    let src_ip_str = if is_ipv6 && !is_ipv6_addr(src_ip) {
+        format!("::ffff:{src_ip}")
+    } else {
+        src_ip.to_string()
+    };
+
     // Build the match expression.
     let mut parts: Vec<String> = vec![
-        format!("ip saddr {src_ip}"),
-        format!("ip daddr {dst_ip}"),
+        format!("{ip_prefix} saddr {src_ip_str}"),
+        format!("{ip_prefix} daddr {dst_ip}"),
     ];
 
     match (protocol, port) {
@@ -340,7 +352,7 @@ fn parse_nft_handle(output: &str) -> Option<u64> {
 ///
 /// - IP address → returned as-is
 /// - CIDR → returned as-is
-/// - Hostname → resolved via DNS; first IPv4 address used
+/// - Hostname → resolved via DNS; first IPv4 address used; falls back to IPv6
 async fn resolve_destination(destination: &str) -> Result<String> {
     // If it looks like an IP or CIDR, use directly.
     if is_ip_or_cidr(destination) {
@@ -348,18 +360,26 @@ async fn resolve_destination(destination: &str) -> Result<String> {
     }
 
     // Hostname — resolve to IP.
-    let addrs = tokio::net::lookup_host(format!("{destination}:0"))
+    let addrs: Vec<_> = tokio::net::lookup_host(format!("{destination}:0"))
         .await
-        .with_context(|| format!("DNS resolution failed for \"{destination}\""))?;
+        .with_context(|| format!("DNS resolution failed for \"{destination}\""))?
+        .collect();
 
-    for addr in addrs {
+    for addr in &addrs {
         if addr.is_ipv4() {
             return Ok(addr.ip().to_string());
         }
     }
 
+    // No IPv4 found — try IPv6.
+    for addr in &addrs {
+        if addr.is_ipv6() {
+            return Ok(addr.ip().to_string());
+        }
+    }
+
     anyhow::bail!(
-        "no IPv4 address found for \"{destination}\" — nftables requires an IP address"
+        "no IP address found for \"{destination}\" — nftables requires an IP address"
     )
 }
 
@@ -380,6 +400,10 @@ fn is_ip_or_cidr(s: &str) -> bool {
         return parts.iter().all(|p| p.parse::<u8>().is_ok());
     }
     // IPv6 — starts with ':'
+    s.contains(':')
+}
+
+fn is_ipv6_addr(s: &str) -> bool {
     s.contains(':')
 }
 
@@ -439,6 +463,20 @@ mod tests {
         assert!(is_ip_or_cidr("192.168.0.0/24"));
         assert!(!is_ip_or_cidr("example.com"));
         assert!(!is_ip_or_cidr("github.com"));
+        assert!(is_ip_or_cidr("::1"));
+        assert!(is_ip_or_cidr("2001:db8::1"));
+        assert!(is_ip_or_cidr("fe80::1%eth0"));
+    }
+
+    #[test]
+    fn is_ipv6_addr_variants() {
+        assert!(is_ipv6_addr("::1"));
+        assert!(is_ipv6_addr("2001:db8::1"));
+        assert!(is_ipv6_addr("fe80::1%eth0"));
+        assert!(is_ipv6_addr("2001:470:0:284::1"));
+        assert!(!is_ipv6_addr("10.0.0.1"));
+        assert!(!is_ipv6_addr("192.168.0.0/24"));
+        assert!(!is_ipv6_addr("example.com"));
     }
 
     #[test]
