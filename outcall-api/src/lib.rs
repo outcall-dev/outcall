@@ -20,6 +20,12 @@ pub const DEFAULT_AGENT_SOCKET: &str = "/run/outcall/agent.sock";
 /// Default bridge interface name.
 pub const DEFAULT_BRIDGE_NAME: &str = "outcall0";
 
+/// Default directory for persistent daemon state.
+pub const DEFAULT_STATE_DIR: &str = "/var/lib/outcall";
+
+/// Default filename for the rule-requests persistence file.
+pub const RULE_REQUESTS_FILE: &str = "rule-requests.json";
+
 // ── Agent API types ──
 
 /// Action types the agent shim can request permission for.

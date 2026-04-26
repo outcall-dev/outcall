@@ -130,11 +130,34 @@ async fn linux_main(args: Args) -> Result<()> {
 
     let bridge = Arc::new(Mutex::new(mgr));
 
+    // Initialize Docker Manager (S008).
+    // EC-008 graceful degradation: unavailable Docker does NOT stop the daemon.
+    let docker_manager = match docker::DockerManager::new(
+        &args.agent_socket_host_path,
+        &args.shim_host_path,
+    )? {
+        Some(mgr) => {
+            info!("Docker Manager initialized");
+            mgr
+        }
+        None => {
+            info!("Docker Manager unavailable — continuing in degraded mode");
+            Arc::new(docker::DockerManager::new_unavailable())
+        }
+    };
+
+    // Initialize Dynamic Rule Manager (S009) — subscribes to Docker death events.
+    let dynamic_mgr = dynamic::DynamicRuleManager::new(docker_manager.clone());
+    info!("Dynamic Rule Manager initialized");
+
     // Initialize DNS filter (FR-003: Tokio task inside outcalld)
     let dns_listen: SocketAddr = format!("{}:{}", args.dns_listen, args.dns_port).parse()?;
     let upstreams = dns::parse_upstream_arg(&args.dns_upstream);
     let dns_server = dns::DnsServer::new(dns_listen, upstreams);
-    match dns_server.start(rule_engine.clone()).await {
+    match dns_server
+        .start(rule_engine.clone(), dynamic_mgr.clone())
+        .await
+    {
         Ok(()) => info!("DNS filter started on {dns_listen}"),
         Err(e) => {
             // EC-008: bind failure doesn't stop the daemon
@@ -157,26 +180,6 @@ async fn linux_main(args: Args) -> Result<()> {
     } else {
         info!("HTTP proxy disabled (--no-proxy)");
     }
-
-    // Initialize Docker Manager (S008).
-    // EC-008 graceful degradation: unavailable Docker does NOT stop the daemon.
-    let docker_manager = match docker::DockerManager::new(
-        &args.agent_socket_host_path,
-        &args.shim_host_path,
-    )? {
-        Some(mgr) => {
-            info!("Docker Manager initialized");
-            mgr
-        }
-        None => {
-            info!("Docker Manager unavailable — continuing in degraded mode");
-            Arc::new(docker::DockerManager::new_unavailable())
-        }
-    };
-
-    // Initialize Dynamic Rule Manager (S009) — subscribes to Docker death events.
-    let dynamic_mgr = dynamic::DynamicRuleManager::new(docker_manager.clone());
-    info!("Dynamic Rule Manager initialized");
 
     // Initialize Network Manager (S002).
     let network_mgr = network::NetworkManager::new(
@@ -207,6 +210,10 @@ async fn linux_main(args: Args) -> Result<()> {
 
     let (perm_count, perm_window) = parse_rate(&args.agent_perm_rate);
     let (rule_count, rule_window) = parse_rate(&args.agent_rule_rate);
+    // FR-010: path for rule-request queue persistence.
+    let rule_state_path = format!("{}/{}", outcall_api::DEFAULT_STATE_DIR, outcall_api::RULE_REQUESTS_FILE);
+    // Ensure the state directory exists before loading.
+    std::fs::create_dir_all(outcall_api::DEFAULT_STATE_DIR)?;
     let agent_app = agent_api::router(
         docker_manager.clone(),
         rule_engine.clone(),
@@ -215,6 +222,7 @@ async fn linux_main(args: Args) -> Result<()> {
         perm_window,
         rule_count,
         rule_window,
+        rule_state_path,
     );
 
     let agent_server = tokio::spawn(async move {

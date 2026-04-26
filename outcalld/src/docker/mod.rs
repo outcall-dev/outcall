@@ -138,6 +138,11 @@ impl DockerManager {
         proxy_addr: &str,
         dns_addr: &str,
     ) -> Result<ContainerCreateResult> {
+        let docker = self
+            .docker
+            .as_ref()
+            .context("Docker manager unavailable")?;
+
         let network_name = req
             .network
             .as_deref()
@@ -223,8 +228,7 @@ impl DockerManager {
             platform: None,
         };
 
-        let create_resp = self
-            .docker
+        let create_resp = docker
             .create_container(Some(options), config)
             .await
             .with_context(|| format!("failed to create container {container_name}"))?;
@@ -232,7 +236,7 @@ impl DockerManager {
         let container_id = create_resp.id.clone();
 
         // FR-011: start the container.
-        self.docker
+        docker
             .start_container(&container_id, None::<StartContainerOptions<&str>>)
             .await
             .with_context(|| format!("failed to start container {container_name}"))?;
@@ -254,8 +258,12 @@ impl DockerManager {
         name: &str,
         timeout: Option<i64>,
     ) -> Result<ContainerStopResult> {
+        let docker = self
+            .docker
+            .as_ref()
+            .context("Docker manager unavailable")?;
         let t = timeout.unwrap_or(DEFAULT_STOP_TIMEOUT_SECS);
-        self.docker
+        docker
             .stop_container(name, Some(StopContainerOptions { t }))
             .await
             .with_context(|| format!("failed to stop container {name}"))?;
@@ -273,7 +281,12 @@ impl DockerManager {
         name: &str,
         force: bool,
     ) -> Result<ContainerRemoveResult> {
-        self.docker
+        let docker = self
+            .docker
+            .as_ref()
+            .context("Docker manager unavailable")?;
+
+        docker
             .remove_container(
                 name,
                 Some(RemoveContainerOptions {
@@ -296,11 +309,15 @@ impl DockerManager {
 
     /// List all outcall-managed containers (identified by `managed-by=outcalld` label).
     pub async fn list_containers(&self) -> Result<Vec<ContainerInfo>> {
+        let docker = self
+            .docker
+            .as_ref()
+            .context("Docker manager unavailable")?;
+
         let mut filters = HashMap::new();
         filters.insert("label", vec!["managed-by=outcalld"]);
 
-        let containers = self
-            .docker
+        let containers = docker
             .list_containers(Some(ListContainersOptions {
                 all: true,
                 filters,
@@ -346,8 +363,12 @@ impl DockerManager {
 
     /// Inspect a single container by name (FR-015).
     pub async fn inspect_container(&self, name: &str) -> Result<ContainerInspectResult> {
-        let details = self
+        let docker = self
             .docker
+            .as_ref()
+            .context("Docker manager unavailable")?;
+
+        let details = docker
             .inspect_container(name, None)
             .await
             .with_context(|| format!("container \"{name}\" does not exist"))?;
@@ -419,8 +440,13 @@ impl DockerManager {
     /// Pull an image from a registry (FR-017).
     /// Returns `pulled: false` if the image was already present locally.
     pub async fn pull_image(&self, image: &str) -> Result<ImagePullResult> {
+        let docker = self
+            .docker
+            .as_ref()
+            .context("Docker manager unavailable")?;
+
         // Check if image exists locally first.
-        let already_present = self.docker.inspect_image(image).await.is_ok();
+        let already_present = docker.inspect_image(image).await.is_ok();
 
         // Pull regardless (Docker handles up-to-date detection).
         let (from_image, tag) = match image.rsplit_once(':') {
@@ -428,7 +454,7 @@ impl DockerManager {
             None => (image, "latest"),
         };
 
-        let mut stream = self.docker.create_image(
+        let mut stream = docker.create_image(
             Some(CreateImageOptions {
                 from_image,
                 tag,
@@ -456,11 +482,11 @@ impl DockerManager {
     /// Returns the container name on success, or `None` if the PID does not
     /// belong to a known managed container.
     pub async fn lookup_container_by_pid(&self, pid: u32) -> Option<String> {
+        let docker = self.docker.as_ref()?;
         let cgroup_content = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
         let container_id = extract_container_id_from_cgroup(&cgroup_content)?;
 
-        let details = self
-            .docker
+        let details = docker
             .inspect_container(
                 &container_id,
                 None::<bollard::container::InspectContainerOptions>,
@@ -478,11 +504,64 @@ impl DockerManager {
             .map(|n| n.trim_start_matches('/').to_string())
     }
 
+    pub async fn lookup_container_name_by_ip(&self, ip: &str) -> Option<String> {
+        let docker = self.docker.as_ref()?;
+
+        let mut filters = HashMap::new();
+        filters.insert("label", vec!["managed-by=outcalld"]);
+
+        let containers = docker
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                filters,
+                ..Default::default()
+            }))
+            .await
+            .ok()?;
+
+        for c in containers {
+            let Some(id) = c.id else {
+                continue;
+            };
+            let details = docker
+                .inspect_container(
+                    &id,
+                    None::<bollard::container::InspectContainerOptions>,
+                )
+                .await
+                .ok()?;
+
+            let matched = details
+                .network_settings
+                .as_ref()
+                .and_then(|ns| ns.networks.as_ref())
+                .map(|networks| {
+                    networks
+                        .values()
+                        .any(|n| n.ip_address.as_deref() == Some(ip))
+                })
+                .unwrap_or(false);
+
+            if matched {
+                return details
+                    .name
+                    .map(|n| n.trim_start_matches('/').to_string());
+            }
+        }
+
+        None
+    }
+
     // ── Internal helpers ──────────────────────────────────────────────────
 
     /// Check that the named network exists.
     async fn check_network(&self, network_name: &str) -> Result<()> {
-        self.docker
+        let docker = self
+            .docker
+            .as_ref()
+            .context("Docker manager unavailable")?;
+
+        docker
             .inspect_network(network_name, None::<bollard::network::InspectNetworkOptions<&str>>)
             .await
             .with_context(|| format!("network \"{network_name}\" does not exist"))?;
@@ -506,6 +585,17 @@ fn extract_container_id_from_cgroup(content: &str) -> Option<String> {
             if let Some((_, id_part)) = base.rsplit_once("docker-") {
                 if id_part.len() >= 12 && id_part.chars().take(12).all(|c| c.is_ascii_hexdigit()) {
                     return Some(id_part[..12].to_string());
+                }
+            }
+        }
+
+        // Docker Desktop (and some systemd/containerd setups) can produce cgroup v2 paths like:
+        //   "0::/../<64-hex>"
+        // Fall back to the last path segment if it looks like a container ID.
+        if let Some(path) = line.split(':').last() {
+            if let Some(last) = path.rsplit('/').next() {
+                if last.len() >= 12 && last.chars().take(12).all(|c| c.is_ascii_hexdigit()) {
+                    return Some(last[..12].to_string());
                 }
             }
         }

@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use super::model::{CompiledRule, RuleFile, RuleSet};
+use super::model::{CompiledRule, EgressSpec, RuleFile, RuleSet};
 
 /// The rule engine. Holds a hot-swappable compiled rule set.
 #[derive(Debug)]
@@ -142,6 +142,17 @@ impl RuleEngine {
             })
     }
 
+    /// Return the optional egress config for a specific rule.
+    pub async fn rule_egress(&self, id: &str) -> Option<EgressSpec> {
+        self.rule_set
+            .read()
+            .await
+            .rules
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| r.egress.clone())
+    }
+
     /// Validate a rule YAML string without modifying the engine's rule set.
     /// Returns `Ok(())` if the file parses and all CEL expressions compile.
     pub fn validate_rule_file(rule_yaml: &str) -> Result<(), String> {
@@ -260,6 +271,7 @@ fn load_and_compile(rules_dir: &str) -> Result<RuleSet> {
                 log: spec.log,
                 description: spec.description.clone(),
                 priority,
+                egress: spec.egress.clone(),
                 program,
             });
         }

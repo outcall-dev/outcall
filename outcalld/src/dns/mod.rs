@@ -23,7 +23,7 @@ use hickory_server::authority::MessageResponseBuilder;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo, ServerFuture};
 use lru::LruCache;
 use outcall_api::{
-    Decision, DnsCacheEntry, DnsCacheFlushResult, DnsCacheStats, DnsContext, DnsFilterStatus,
+    AllowRuleRequest, Decision, DnsCacheEntry, DnsCacheStats, DnsContext, DnsFilterStatus,
     EvalContext,
 };
 use tokio::net::{TcpListener, UdpSocket};
@@ -31,6 +31,8 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::rules::RuleEngine;
+use crate::dynamic::DynamicRuleManager;
+use crate::rules::model::EgressMode;
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -77,6 +79,7 @@ impl DnsCounters {
 
 struct DnsHandler {
     rule_engine: Arc<RuleEngine>,
+    dynamic: Arc<DynamicRuleManager>,
     resolver: TokioAsyncResolver,
     cache: Arc<Mutex<DnsLruCache>>,
     counters: Arc<DnsCounters>,
@@ -128,6 +131,11 @@ impl RequestHandler for DnsHandler {
             .matched_rule
             .as_deref()
             .unwrap_or("default-block");
+        let matched_egress = if let Some(rule_id) = eval_result.matched_rule.as_deref() {
+            self.rule_engine.rule_egress(rule_id).await
+        } else {
+            None
+        };
 
         match eval_result.decision {
             Decision::Block => {
@@ -216,6 +224,11 @@ impl RequestHandler for DnsHandler {
                             upstream_ms,
                             "DNS query allowed"
                         );
+
+                        self
+                            .apply_egress_policy(src, &hostname, &matched_egress, &records)
+                            .await;
+
                         self.send_answer(request, &records, &mut response_handle)
                             .await
                     }
@@ -230,6 +243,60 @@ impl RequestHandler for DnsHandler {
 }
 
 impl DnsHandler {
+    async fn apply_egress_policy(
+        &self,
+        src: SocketAddr,
+        hostname: &str,
+        egress: &Option<crate::rules::model::EgressSpec>,
+        records: &[Record],
+    ) {
+        let Some(egress) = egress else {
+            return;
+        };
+
+        match egress.mode {
+            EgressMode::Proxy => {
+                debug!(%hostname, "egress mode is proxy; no direct nft allow rules inserted");
+            }
+            EgressMode::DirectIp => {
+                let src_ip = src.ip().to_string();
+                let container = self
+                    .dynamic
+                    .container_name_for_ip(&src_ip)
+                    .await
+                    .unwrap_or_else(|| src_ip.clone());
+
+                let ports: Vec<u16> = if egress.ports.is_empty() {
+                    vec![80, 443]
+                } else {
+                    egress.ports.clone()
+                };
+
+                let destinations = extract_ipv4_destinations(records);
+                if destinations.is_empty() {
+                    debug!(%hostname, "direct_ip egress requested but no IPv4 DNS answers found");
+                    return;
+                }
+
+                for dst in destinations {
+                    for port in &ports {
+                        let req = AllowRuleRequest {
+                            container: container.clone(),
+                            src_ip: src_ip.clone(),
+                            destination: dst.clone(),
+                            protocol: Some("tcp".to_string()),
+                            port: Some(*port),
+                        };
+
+                        if let Err(e) = self.dynamic.insert_rule(req).await {
+                            warn!(%hostname, src = %src_ip, dst = %dst, port = *port, "failed to insert direct_ip allow rule: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn send_nxdomain<R: ResponseHandler>(
         &self,
         request: &Request,
@@ -338,6 +405,18 @@ fn check_rebinding(hostname: &str, records: &[Record]) {
     }
 }
 
+fn extract_ipv4_destinations(records: &[Record]) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in records {
+        if let Some(RData::A(ip)) = r.data() {
+            out.push(ip.0.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 // ── DnsServer ──────────────────────────────────────────────────────────────
 
 /// Public handle for the running DNS filter.
@@ -365,10 +444,15 @@ impl DnsServer {
     }
 
     /// Bind sockets and start serving. Returns when the server is running.
-    pub async fn start(self: &Arc<Self>, rule_engine: Arc<RuleEngine>) -> Result<()> {
+    pub async fn start(
+        self: &Arc<Self>,
+        rule_engine: Arc<RuleEngine>,
+        dynamic: Arc<DynamicRuleManager>,
+    ) -> Result<()> {
         let resolver = build_resolver(&self.upstreams)?;
         let handler = DnsHandler {
             rule_engine,
+            dynamic,
             resolver,
             cache: self.cache.clone(),
             counters: self.counters.clone(),
@@ -547,4 +631,21 @@ pub fn container_resolv_conf(gateway_ip: &str) -> String {
     format!(
         "# Generated by outcalld -- do not edit\nnameserver {gateway_ip}\noptions ndots:0\n"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn extract_ipv4_destinations_dedups_and_ignores_non_a_records() {
+        let name = Name::from_ascii("ports.ubuntu.com.").expect("name");
+        let rec1 = Record::from_rdata(name.clone(), 60, RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(91, 189, 91, 104))));
+        let rec2 = Record::from_rdata(name.clone(), 60, RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(91, 189, 92, 19))));
+        let rec3 = Record::from_rdata(name, 60, RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(91, 189, 91, 104))));
+
+        let got = extract_ipv4_destinations(&[rec1, rec2, rec3]);
+        assert_eq!(got, vec!["91.189.91.104", "91.189.92.19"]);
+    }
 }

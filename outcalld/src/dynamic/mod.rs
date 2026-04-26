@@ -49,6 +49,7 @@ struct DynState {
 
 pub struct DynamicRuleManager {
     state: Mutex<DynState>,
+    docker: Arc<DockerManager>,
 }
 
 impl DynamicRuleManager {
@@ -58,6 +59,7 @@ impl DynamicRuleManager {
             state: Mutex::new(DynState {
                 rules: HashMap::new(),
             }),
+            docker: docker.clone(),
         });
 
         // Background task: watch for container death events → clean up rules.
@@ -75,6 +77,22 @@ impl DynamicRuleManager {
     /// Returns the nftables handle of the newly inserted rule (FR-007).
     pub async fn insert_rule(&self, req: AllowRuleRequest) -> Result<AllowRuleResult> {
         let dst_ip = resolve_destination(&req.destination).await?;
+
+        {
+            let state = self.state.lock().await;
+            if let Some(existing) = state.rules.get(&req.container).and_then(|rules| {
+                rules.iter().find(|r| {
+                    r.src_ip == req.src_ip
+                        && r.destination == req.destination
+                        && r.protocol == req.protocol
+                        && r.port == req.port
+                })
+            }) {
+                return Ok(AllowRuleResult {
+                    nft_handle: existing.nft_handle,
+                });
+            }
+        }
 
         let handle = {
             // Serialize all nftables operations (FR-008).
@@ -107,6 +125,10 @@ impl DynamicRuleManager {
             .push(record);
 
         Ok(AllowRuleResult { nft_handle: handle })
+    }
+
+    pub async fn container_name_for_ip(&self, ip: &str) -> Option<String> {
+        self.docker.lookup_container_name_by_ip(ip).await
     }
 
     /// Remove all dynamic rules for a container (called on container death).

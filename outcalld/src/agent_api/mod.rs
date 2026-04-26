@@ -5,6 +5,7 @@
 //! is derived host-side from `SO_PEERCRED` — agents cannot self-identify.
 
 use std::collections::HashMap;
+use std::path::Path as StdPath;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -84,10 +86,10 @@ impl SlidingWindow {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RuleRequestEntry {
     container_id: String,
     /// Held verbatim for the host-side approval workflow (S004-FR-011).
-    #[allow(dead_code)]
     rule_file: String,
     status: RuleRequestStatus,
     reason: Option<String>,
@@ -104,6 +106,7 @@ pub struct AgentState {
     perm_rate: Arc<Mutex<HashMap<String, SlidingWindow>>>,
     rule_rate: Arc<Mutex<HashMap<String, SlidingWindow>>>,
     rule_requests: Arc<Mutex<HashMap<String, RuleRequestEntry>>>,
+    rule_state_path: String,
     eval_timeout: Duration,
     perm_limit: usize,
     perm_window: Duration,
@@ -121,7 +124,10 @@ pub fn router(
     perm_window: Duration,
     rule_count: usize,
     rule_window: Duration,
+    rule_state_path: String,
 ) -> Router {
+    // FR-010: load persisted rule requests from disk on startup.
+    let rule_requests = load_rule_requests(&rule_state_path);
     let state = AgentState {
         docker,
         rules,
@@ -129,7 +135,8 @@ pub fn router(
         container_tokens: Default::default(),
         perm_rate: Default::default(),
         rule_rate: Default::default(),
-        rule_requests: Default::default(),
+        rule_requests,
+        rule_state_path,
         eval_timeout,
         perm_limit: perm_count,
         perm_window,
@@ -144,6 +151,56 @@ pub fn router(
         .route("/v1/requests/rules/{id}", get(rule_request_status))
         .with_state(state)
         .layer(DefaultBodyLimit::max(65_536))
+}
+
+// ── Persistence ───────────────────────────────────────────────────────────────
+
+/// Load rule requests from the JSON state file, or return an empty map if the
+/// file does not exist or cannot be parsed.
+fn load_rule_requests(path: &str) -> Arc<Mutex<HashMap<String, RuleRequestEntry>>> {
+    let file_path = StdPath::new(path);
+    if file_path.exists() {
+        match std::fs::read_to_string(file_path) {
+            Ok(contents) => {
+                match serde_json::from_str::<HashMap<String, RuleRequestEntry>>(&contents) {
+                    Ok(map) => {
+                        info!(path = %path, count = map.len(), "loaded rule requests from disk");
+                        return Arc::new(Mutex::new(map));
+                    }
+                    Err(e) => {
+                        warn!(path = %path, error = %e, "failed to parse rule requests file, starting fresh");
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(path = %path, error = %e, "failed to read rule requests file, starting fresh");
+            }
+        }
+    }
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Persist the rule requests map to the JSON state file.
+async fn persist_rule_requests(state_path: &str, map: &HashMap<String, RuleRequestEntry>) {
+    let file_path = StdPath::new(state_path);
+    if let Some(parent) = file_path.parent() {
+        if !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!(path = %parent.display(), error = %e, "failed to create state directory");
+                return;
+            }
+        }
+    }
+    let json = match serde_json::to_string_pretty(map) {
+        Ok(j) => j,
+        Err(e) => {
+            warn!(error = %e, "failed to serialize rule requests");
+            return;
+        }
+    };
+    if let Err(e) = tokio::fs::write(file_path, json).await {
+        warn!(path = %state_path, error = %e, "failed to write rule requests file");
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -389,15 +446,18 @@ async fn rule_request_submit(
         reason: None,
     };
 
-    state.rule_requests.lock().await.insert(
-        request_id,
-        RuleRequestEntry {
-            container_id: container_id.clone(),
-            rule_file: req.rule_file,
-            status: RuleRequestStatus::Pending,
-            reason: None,
-        },
-    );
+    let entry = RuleRequestEntry {
+        container_id: container_id.clone(),
+        rule_file: req.rule_file,
+        status: RuleRequestStatus::Pending,
+        reason: None,
+    };
+    {
+        let mut requests = state.rule_requests.lock().await;
+        requests.insert(request_id.clone(), entry);
+        // FR-010: persist to disk after every write.
+        persist_rule_requests(&state.rule_state_path, &requests).await;
+    }
 
     info!(container_id = %container_id, "rule request submitted");
     (StatusCode::CREATED, Json(ApiResponse::ok(response))).into_response()

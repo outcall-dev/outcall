@@ -6,6 +6,20 @@ use serde::{Deserialize, Serialize};
 
 use outcall_api::RuleAction;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressMode {
+    Proxy,
+    DirectIp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EgressSpec {
+    pub mode: EgressMode,
+    #[serde(default)]
+    pub ports: Vec<u16>,
+}
+
 /// Top-level structure of a rule YAML file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuleFile {
@@ -37,6 +51,8 @@ pub struct RuleSpec {
     pub priority: Option<i32>,
     /// Enrich hook configuration (only valid when action = enrich).
     pub enrich: Option<EnrichSpec>,
+    /// Optional egress handling for DNS allow rules.
+    pub egress: Option<EgressSpec>,
 }
 
 /// Configuration for an enrich hook script.
@@ -59,6 +75,7 @@ pub struct CompiledRule {
     pub log: bool,
     pub description: Option<String>,
     pub priority: i32,
+    pub egress: Option<EgressSpec>,
     pub program: cel_interpreter::Program,
 }
 
@@ -66,4 +83,28 @@ pub struct CompiledRule {
 #[derive(Debug, Default)]
 pub struct RuleSet {
     pub rules: Vec<CompiledRule>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_rule_with_direct_ip_egress() {
+        let yaml = r#"
+version: "1"
+rules:
+  - id: allow-dns-ubuntu
+    condition: 'dns.query == "ports.ubuntu.com"'
+    action: allow
+    egress:
+      mode: direct_ip
+      ports: [80, 443]
+"#;
+
+        let parsed: RuleFile = serde_yaml::from_str(yaml).expect("rule file should parse");
+        let egress = parsed.rules[0].egress.as_ref().expect("egress should exist");
+        assert_eq!(egress.mode, EgressMode::DirectIp);
+        assert_eq!(egress.ports, vec![80, 443]);
+    }
 }
