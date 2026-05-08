@@ -1,0 +1,132 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: outcall-dev/outcall
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            platform: linux/arm64
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            platform: darwin/amd64
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            platform: darwin/arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: target
+
+      - name: Build release
+        run: |
+          cargo build --release --workspace --target ${{ matrix.target }}
+          strip target/${{ matrix.target }}/release/outcall 2>/dev/null || true
+          strip target/${{ matrix.target }}/release/outcalld 2>/dev/null || true
+
+      - name: Package
+        run: |
+          mkdir -p release/${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/outcall release/${{ matrix.target }}/outcall
+          cp target/${{ matrix.target }}/release/outcalld release/${{ matrix.target }}/outcalld
+          cp README.md release/${{ matrix.target }}/ || true
+
+          if [ "${{ matrix.runner }}" = "ubuntu-latest" ]; then
+            docker build -f Dockerfile.test -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+          fi
+
+      - name: Generate SHA256
+        run: |
+          cd release/${{ matrix.target }}
+          sha256sum outcall outcalld > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ env.upload_url }}
+          asset_path: release/${{ matrix.target }}.tar.gz
+          asset_name: outcall-${{ matrix.target }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload SHA256SUMS
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ env.upload_url }}
+          asset_path: release/${{ matrix.target }}/SHA256SUMS.txt
+          asset_name: SHA256SUMS-${{ matrix.target }}.txt
+          asset_content_type: text/plain
+
+  container:
+    name: container image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.test
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

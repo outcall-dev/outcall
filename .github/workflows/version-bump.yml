@@ -1,0 +1,71 @@
+name: Version Bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get current version
+        id: current
+        run: |
+          version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "//g' | sed 's/"//g' | tr -d ' ')
+          echo "current=$version" >> $GITHUB_OUTPUT
+
+      - name: Compute new version
+        env:
+          VERSION_TYPE: ${{ github.event.inputs.version_type }}
+          CURRENT: ${{ steps.current.outputs.current }}
+        id: bump
+        run: |
+          IFS='.' read -r major minor patch <<< "$CURRENT"
+          case "$VERSION_TYPE" in
+            major) new_major=$((major + 1)); new_minor=0; new_patch=0 ;;
+            minor) new_major=$major; new_minor=$((minor + 1)); new_patch=0 ;;
+            patch) new_major=$major; new_minor=$minor; new_patch=$((patch + 1)) ;;
+          esac
+          new_version="${new_major}.${new_minor}.${new_patch}"
+          echo "new_version=$new_version" >> $GITHUB_OUTPUT
+
+      - name: Create bumped branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "bump/${{ steps.bump.outputs.new_version }}"
+
+      - name: Update Cargo.toml
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ steps.bump.outputs.new_version }}"/' Cargo.toml
+          git add Cargo.toml
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.new_version }}"
+
+      - name: Push branch
+        run: |
+          git push origin "bump/${{ steps.bump.outputs.new_version }}"
+
+      - name: Create PR
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+        run: |
+          gh pr create \
+            --title "chore: bump version to $NEW_VERSION" \
+            --body "Version bump PR for v$NEW_VERSION. Will trigger tag-on-merge on merge to main." \
+            --base main \
+            --head "bump/$NEW_VERSION"
