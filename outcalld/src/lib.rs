@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod rules;
 
 #[cfg(target_os = "linux")]

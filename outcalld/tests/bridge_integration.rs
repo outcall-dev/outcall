@@ -1,4 +1,6 @@
-//! Integration test for the network bridge module.
+//! Network bridge integration — S001 / S012-FR-001.a.
+//!
+#![cfg(target_os = "linux")]
 //!
 //! Must be run as root (or with CAP_NET_ADMIN):
 //!     sudo cargo test -p outcalld --test bridge_integration -- --nocapture

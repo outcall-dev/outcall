@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+
+use outcall::{parse_memory_arg, urlencoded};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
@@ -48,6 +51,11 @@ enum Commands {
     Network {
         #[command(subcommand)]
         action: NetworkAction,
+    },
+    /// Manage the TLS interception CA (S011)
+    Ca {
+        #[command(subcommand)]
+        action: CaAction,
     },
 }
 
@@ -172,6 +180,20 @@ enum ContainerAction {
     },
 }
 
+#[derive(clap::Subcommand)]
+enum CaAction {
+    /// Initialise a new CA for TLS interception (S011-FR-002)
+    Init {
+        /// Output directory for ca.crt and ca.key (default: /etc/outcall/ca/)
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Export the CA certificate bundle for container distribution (S011-FR-018)
+    Bundle,
+    /// Show loaded CA status (S011-FR-001)
+    Status,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -191,22 +213,37 @@ fn main() -> Result<()> {
             ProxyAction::Status => cmd_proxy_status(&cli.socket),
         },
         Commands::Container { action } => match action {
-            ContainerAction::Create { image, network, name, memory, cpu_shares } => {
-                cmd_container_create(&cli.socket, image, network, name, memory, cpu_shares)
-            }
+            ContainerAction::Create {
+                image,
+                network,
+                name,
+                memory,
+                cpu_shares,
+            } => cmd_container_create(&cli.socket, image, network, name, memory, cpu_shares),
             ContainerAction::List => cmd_container_list(&cli.socket),
             ContainerAction::Inspect { name } => cmd_container_inspect(&cli.socket, &name),
-            ContainerAction::Stop { name, timeout } => cmd_container_stop(&cli.socket, &name, timeout),
-            ContainerAction::Remove { name, force } => cmd_container_remove(&cli.socket, &name, force),
+            ContainerAction::Stop { name, timeout } => {
+                cmd_container_stop(&cli.socket, &name, timeout)
+            }
+            ContainerAction::Remove { name, force } => {
+                cmd_container_remove(&cli.socket, &name, force)
+            }
             ContainerAction::Pull { image } => cmd_container_pull(&cli.socket, &image),
         },
         Commands::Network { action } => match action {
-            NetworkAction::Create { name, subnet, gateway } => {
-                cmd_network_create(&cli.socket, name, subnet, gateway)
-            }
+            NetworkAction::Create {
+                name,
+                subnet,
+                gateway,
+            } => cmd_network_create(&cli.socket, name, subnet, gateway),
             NetworkAction::Status { name } => cmd_network_status(&cli.socket, name.as_deref()),
             NetworkAction::List => cmd_network_list(&cli.socket),
             NetworkAction::Destroy { name } => cmd_network_destroy(&cli.socket, name),
+        },
+        Commands::Ca { action } => match action {
+            CaAction::Init { out } => cmd_ca_init(out),
+            CaAction::Bundle => cmd_ca_bundle(&cli.socket),
+            CaAction::Status => cmd_ca_status(&cli.socket),
         },
     }
 }
@@ -231,7 +268,11 @@ fn cmd_bridge_status(socket: &str) -> Result<()> {
     }
     println!(
         "nftables:  {}",
-        if status.nftables_active { "active" } else { "inactive" }
+        if status.nftables_active {
+            "active"
+        } else {
+            "inactive"
+        }
     );
 
     Ok(())
@@ -269,12 +310,14 @@ fn cmd_dns_status(socket: &str) -> Result<()> {
         anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
     }
 
-    let status: DnsFilterStatus =
-        serde_json::from_value(resp.data.context("no data")?)?;
+    let status: DnsFilterStatus = serde_json::from_value(resp.data.context("no data")?)?;
 
     if status.running {
         println!("DNS Filter:     active");
-        println!("Listen:         {}:{}", status.listen_address, status.listen_port);
+        println!(
+            "Listen:         {}:{}",
+            status.listen_address, status.listen_port
+        );
         println!("Upstreams:      {}", status.upstreams.join(", "));
         println!("Cache:          {} entries", status.cache_entries);
         println!(
@@ -348,10 +391,7 @@ fn cmd_dns_cache(socket: &str, show_entries: bool) -> Result<()> {
     let s = &detail.stats;
 
     let hit_rate = if s.hits + s.misses > 0 {
-        format!(
-            "{:.1}%",
-            s.hits as f64 / (s.hits + s.misses) as f64 * 100.0
-        )
+        format!("{:.1}%", s.hits as f64 / (s.hits + s.misses) as f64 * 100.0)
     } else {
         "N/A".to_string()
     };
@@ -363,9 +403,12 @@ fn cmd_dns_cache(socket: &str, show_entries: bool) -> Result<()> {
     println!("Hit rate:       {hit_rate}");
 
     if show_entries && !detail.entries.is_empty() {
-        println!("\n{:<32} {:<6} {}", "HOSTNAME", "TYPE", "TTL");
+        println!("\n{:<32} {:<6} TTL", "HOSTNAME", "TYPE");
         for e in &detail.entries {
-            println!("{:<32} {:<6} {}s", e.hostname, e.record_type, e.ttl_remaining_secs);
+            println!(
+                "{:<32} {:<6} {}s",
+                e.hostname, e.record_type, e.ttl_remaining_secs
+            );
         }
     }
 
@@ -461,8 +504,7 @@ fn cmd_container_list(socket: &str) -> Result<()> {
         anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
     }
 
-    let containers: Vec<ContainerInfo> =
-        serde_json::from_value(resp.data.context("no data")?)?;
+    let containers: Vec<ContainerInfo> = serde_json::from_value(resp.data.context("no data")?)?;
 
     if containers.is_empty() {
         println!("No agent containers found.");
@@ -470,8 +512,8 @@ fn cmd_container_list(socket: &str) -> Result<()> {
     }
 
     println!(
-        "{:<30} {:<20} {:<10} {:<20} {}",
-        "NAME", "IMAGE", "STATE", "NETWORK", "CREATED"
+        "{:<30} {:<20} {:<10} {:<20} CREATED",
+        "NAME", "IMAGE", "STATE", "NETWORK"
     );
     for c in &containers {
         println!(
@@ -602,9 +644,8 @@ fn http_post_json<T: serde::Serialize>(socket: &str, path: &str, body: &T) -> Re
 }
 
 fn connect(socket: &str) -> Result<UnixStream> {
-    UnixStream::connect(socket).with_context(|| {
-        format!("cannot connect to outcalld at {socket} — is it running?")
-    })
+    UnixStream::connect(socket)
+        .with_context(|| format!("cannot connect to outcalld at {socket} — is it running?"))
 }
 
 fn read_body(stream: &mut UnixStream) -> Result<String> {
@@ -616,31 +657,6 @@ fn read_body(stream: &mut UnixStream) -> Result<String> {
         .context("malformed HTTP response from outcalld")
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-/// Parse a human-friendly memory string (e.g. "256m", "1g") to bytes.
-fn parse_memory_arg(s: &str) -> Result<i64> {
-    let s = s.trim();
-    let (num, mult) = if let Some(n) = s.strip_suffix('g').or_else(|| s.strip_suffix('G')) {
-        (n, 1024 * 1024 * 1024i64)
-    } else if let Some(n) = s.strip_suffix('m').or_else(|| s.strip_suffix('M')) {
-        (n, 1024 * 1024i64)
-    } else if let Some(n) = s.strip_suffix('k').or_else(|| s.strip_suffix('K')) {
-        (n, 1024i64)
-    } else {
-        (s, 1i64)
-    };
-    let bytes: i64 = num
-        .parse()
-        .with_context(|| format!("invalid memory value: {s}"))?;
-    Ok(bytes * mult)
-}
-
-/// Percent-encode a string for use in query parameters (minimal — only encodes spaces).
-fn urlencoded(s: &str) -> String {
-    s.replace(' ', "%20")
-}
-
 // ── Network commands (S002) ────────────────────────────────────────────────
 
 fn cmd_network_create(
@@ -649,11 +665,18 @@ fn cmd_network_create(
     subnet: Option<String>,
     gateway: Option<String>,
 ) -> Result<()> {
-    let req = NetworkCreateRequest { name, subnet, gateway };
+    let req = NetworkCreateRequest {
+        name,
+        subnet,
+        gateway,
+    };
     let body = http_post_json(socket, "/api/v1/network/create", &req)?;
     let resp: Response = serde_json::from_str(&body)?;
     if !resp.success {
-        eprintln!("Error: {}", resp.error.unwrap_or_else(|| "unknown".to_string()));
+        eprintln!(
+            "Error: {}",
+            resp.error.unwrap_or_else(|| "unknown".to_string())
+        );
         std::process::exit(1);
     }
     let r: NetworkCreateResult = serde_json::from_value(resp.data.context("no data")?)?;
@@ -664,7 +687,11 @@ fn cmd_network_create(
             println!("Network \"{}\" created.", r.name);
         }
     } else {
-        println!("Network \"{}\" already exists (id: {}).", r.name, &r.network_id[..12.min(r.network_id.len())]);
+        println!(
+            "Network \"{}\" already exists (id: {}).",
+            r.name,
+            &r.network_id[..12.min(r.network_id.len())]
+        );
     }
     Ok(())
 }
@@ -677,7 +704,10 @@ fn cmd_network_status(socket: &str, name: Option<&str>) -> Result<()> {
     let body = http_get(socket, &path)?;
     let resp: Response = serde_json::from_str(&body)?;
     if !resp.success {
-        eprintln!("Error: {}", resp.error.unwrap_or_else(|| "unknown".to_string()));
+        eprintln!(
+            "Error: {}",
+            resp.error.unwrap_or_else(|| "unknown".to_string())
+        );
         std::process::exit(1);
     }
     let s: NetworkStatus = serde_json::from_value(resp.data.context("no data")?)?;
@@ -704,7 +734,10 @@ fn cmd_network_list(socket: &str) -> Result<()> {
     let body = http_get(socket, "/api/v1/networks")?;
     let resp: Response = serde_json::from_str(&body)?;
     if !resp.success {
-        eprintln!("Error: {}", resp.error.unwrap_or_else(|| "unknown".to_string()));
+        eprintln!(
+            "Error: {}",
+            resp.error.unwrap_or_else(|| "unknown".to_string())
+        );
         std::process::exit(1);
     }
     let nets: Vec<NetworkStatus> = serde_json::from_value(resp.data.context("no data")?)?;
@@ -725,7 +758,10 @@ fn cmd_network_destroy(socket: &str, name: Option<String>) -> Result<()> {
     let body = http_post_json(socket, "/api/v1/network/destroy", &req)?;
     let resp: Response = serde_json::from_str(&body)?;
     if !resp.success {
-        eprintln!("Error: {}", resp.error.unwrap_or_else(|| "unknown".to_string()));
+        eprintln!(
+            "Error: {}",
+            resp.error.unwrap_or_else(|| "unknown".to_string())
+        );
         std::process::exit(1);
     }
     let r: NetworkDestroyResult = serde_json::from_value(resp.data.context("no data")?)?;
@@ -734,5 +770,111 @@ fn cmd_network_destroy(socket: &str, name: Option<String>) -> Result<()> {
     } else {
         println!("Network \"{}\" did not exist.", r.name);
     }
+    Ok(())
+}
+
+// ── CA commands (S011) ────────────────────────────────────────────────────
+
+fn cmd_ca_init(out_dir: Option<String>) -> Result<()> {
+    use rcgen::{
+        BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
+        KeyUsagePurpose, SanType, date_time_ymd,
+    };
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use time::OffsetDateTime;
+
+    let dir = PathBuf::from(out_dir.unwrap_or_else(|| "/etc/outcall/ca".to_string()));
+
+    // Generate 4096-bit RSA CA cert valid 10 years (S011-AS-009).
+    let mut ca_params = CertificateParams::default();
+    ca_params.distinguished_name = DistinguishedName::new();
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "Outcall CA");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    // Validity: 10 years from now.
+    let now = OffsetDateTime::now_utc();
+    let y = now.year();
+    let m = now.month() as i32;
+    let d = now.day() as i32;
+    ca_params.not_before = date_time_ymd(y, m.try_into().unwrap(), d.try_into().unwrap());
+    ca_params.not_after = date_time_ymd(y + 10, m.try_into().unwrap(), d.try_into().unwrap());
+    ca_params.subject_alt_names = vec![SanType::DnsName("outcall-ca".try_into()?)];
+
+    let ca_key_pair = KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256)
+        .map_err(|e| anyhow::anyhow!("failed to generate RSA key pair: {e}"))?;
+    let ca_cert = ca_params
+        .self_signed(&ca_key_pair)
+        .map_err(|e| anyhow::anyhow!("failed to sign CA certificate: {e}"))?;
+
+    let ca_cert_pem = ca_cert.pem();
+    let ca_key_pem = ca_key_pair.serialize_pem();
+
+    fs::create_dir_all(&dir).context("failed to create CA directory")?;
+    let cert_path = dir.join("ca.crt");
+    let key_path = dir.join("ca.key");
+    fs::write(&cert_path, &ca_cert_pem).context("failed to write ca.crt")?;
+    fs::write(&key_path, &ca_key_pem).context("failed to write ca.key")?;
+
+    // Restrict key file permissions to owner-only.
+    let key_perms = fs::Permissions::from_mode(0o600);
+    fs::set_permissions(&key_path, key_perms).context("failed to set ca.key permissions")?;
+
+    println!(
+        "CA initialised in {}\n  cert: {}\n  key:  {}",
+        dir.display(),
+        cert_path.display(),
+        key_path.display()
+    );
+    println!("Use --ca-cert and --ca-key with outcalld to enable interception.");
+    println!("Distribute ca.crt to agent containers as a trusted CA.");
+    Ok(())
+}
+
+fn cmd_ca_bundle(socket: &str) -> Result<()> {
+    let body = http_get(socket, "/api/v1/ca/bundle")?;
+    let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
+
+    if !resp.success {
+        anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
+    }
+
+    let bundle: outcall_api::CaBundleResult =
+        serde_json::from_value(resp.data.context("no data")?)?;
+    print!("{}", bundle.pem_bundle);
+    Ok(())
+}
+
+fn cmd_ca_status(socket: &str) -> Result<()> {
+    let body = http_get(socket, "/api/v1/ca/status")?;
+    let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
+
+    if !resp.success {
+        anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
+    }
+
+    let status: outcall_api::CaStatus = serde_json::from_value(resp.data.context("no data")?)?;
+
+    println!("CA loaded:    {}", if status.loaded { "yes" } else { "no" });
+    if let Some(cert_path) = status.cert_path {
+        println!("Cert:         {cert_path}");
+    }
+    if let Some(key_path) = status.key_path {
+        println!("Key:          {key_path}");
+    }
+    if let Some(serial) = status.subject_serial {
+        println!("Serial:       {serial}");
+    }
+    println!(
+        "Interception: {}",
+        if status.interception_enabled {
+            "enabled"
+        } else {
+            "disabled (no CA)"
+        }
+    );
     Ok(())
 }

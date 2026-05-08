@@ -13,14 +13,16 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use hickory_proto::op::{Header, ResponseCode};
-use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::rr::rdata::SOA;
+use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::TokioAsyncResolver;
 use hickory_resolver::config::{
     NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig, ResolverOpts,
 };
 use hickory_server::authority::MessageResponseBuilder;
-use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo, ServerFuture};
+use hickory_server::server::{
+    Request, RequestHandler, ResponseHandler, ResponseInfo, ServerFuture,
+};
 use lru::LruCache;
 use outcall_api::{
     AllowRuleRequest, Decision, DnsCacheEntry, DnsCacheStats, DnsContext, DnsFilterStatus,
@@ -30,8 +32,8 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use crate::rules::RuleEngine;
 use crate::dynamic::DynamicRuleManager;
+use crate::rules::RuleEngine;
 use crate::rules::model::EgressMode;
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -139,7 +141,9 @@ impl RequestHandler for DnsHandler {
 
         match eval_result.decision {
             Decision::Block => {
-                self.counters.queries_blocked.fetch_add(1, Ordering::Relaxed);
+                self.counters
+                    .queries_blocked
+                    .fetch_add(1, Ordering::Relaxed);
                 info!(
                     %src, %hostname, record_type = %record_type_str,
                     decision = "block", rule = rule_id, from_cache = false,
@@ -149,7 +153,9 @@ impl RequestHandler for DnsHandler {
             }
 
             Decision::Allow => {
-                self.counters.queries_allowed.fetch_add(1, Ordering::Relaxed);
+                self.counters
+                    .queries_allowed
+                    .fetch_add(1, Ordering::Relaxed);
 
                 let cache_key = (hostname.clone(), record_type);
 
@@ -198,8 +204,7 @@ impl RequestHandler for DnsHandler {
 
                         // Cache the result
                         if !records.is_empty() {
-                            let min_ttl =
-                                records.iter().map(|r| r.ttl()).min().unwrap_or(60);
+                            let min_ttl = records.iter().map(|r| r.ttl()).min().unwrap_or(60);
                             let effective_ttl = min_ttl.min(DNS_CACHE_MAX_TTL_SECS);
                             let entry = CacheEntry {
                                 records: records.clone(),
@@ -225,8 +230,7 @@ impl RequestHandler for DnsHandler {
                             "DNS query allowed"
                         );
 
-                        self
-                            .apply_egress_policy(src, &hostname, &matched_egress, &records)
+                        self.apply_egress_policy(src, &hostname, &matched_egress, &records)
                             .await;
 
                         self.send_answer(request, &records, &mut response_handle)
@@ -390,8 +394,7 @@ impl DnsHandler {
 fn soa_record() -> Record {
     let name = Name::from_str("outcall.invalid.").unwrap_or_else(|_| Name::root());
     let mname = Name::from_str("ns.outcall.invalid.").unwrap_or_else(|_| Name::root());
-    let rname =
-        Name::from_str("hostmaster.outcall.invalid.").unwrap_or_else(|_| Name::root());
+    let rname = Name::from_str("hostmaster.outcall.invalid.").unwrap_or_else(|_| Name::root());
     let soa = SOA::new(mname, rname, 1, 3600, 600, 86400, 60);
     Record::from_rdata(name, 60, RData::SOA(soa))
 }
@@ -451,7 +454,7 @@ fn extract_ipv6_destinations(records: &[Record]) -> Vec<String> {
 
 /// Public handle for the running DNS filter.
 pub struct DnsServer {
-    pub listen_addr: SocketAddr,
+    listen_addr: Mutex<SocketAddr>,
     pub upstreams: Vec<SocketAddr>,
     pub cache: Arc<Mutex<DnsLruCache>>,
     pub counters: Arc<DnsCounters>,
@@ -462,7 +465,7 @@ pub struct DnsServer {
 impl DnsServer {
     pub fn new(listen_addr: SocketAddr, upstreams: Vec<SocketAddr>) -> Arc<Self> {
         Arc::new(Self {
-            listen_addr,
+            listen_addr: Mutex::new(listen_addr),
             upstreams,
             cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(DNS_CACHE_MAX_ENTRIES).unwrap(),
@@ -488,14 +491,18 @@ impl DnsServer {
             counters: self.counters.clone(),
         };
 
-        let udp = UdpSocket::bind(self.listen_addr)
+        // Lock to get the address for binding (only locked briefly here).
+        let bind_addr = *self.listen_addr.lock().await;
+        let udp = UdpSocket::bind(bind_addr)
             .await
-            .with_context(|| format!("DNS: failed to bind UDP {}", self.listen_addr))?;
-        let tcp = TcpListener::bind(self.listen_addr)
+            .with_context(|| format!("DNS: failed to bind UDP {}", bind_addr))?;
+        let tcp = TcpListener::bind(bind_addr)
             .await
-            .with_context(|| format!("DNS: failed to bind TCP {}", self.listen_addr))?;
+            .with_context(|| format!("DNS: failed to bind TCP {}", bind_addr))?;
 
-        info!(addr = %self.listen_addr, "DNS filter started");
+        // Store the actual bound address (handles ephemeral port 0 case).
+        *self.listen_addr.lock().await = udp.local_addr().expect("UDP local_addr");
+        info!(addr = %udp.local_addr().expect("UDP local_addr"), "DNS filter started");
 
         let mut server = ServerFuture::new(handler);
         server.register_socket(udp);
@@ -532,6 +539,12 @@ impl DnsServer {
         self.running.store(false, Ordering::SeqCst);
     }
 
+    /// Returns the actual address the DNS server is listening on.
+    /// Useful for tests that bind on port 0 (ephemeral).
+    pub async fn local_addr(&self) -> SocketAddr {
+        *self.listen_addr.lock().await
+    }
+
     /// Flush the DNS cache. Returns the number of entries cleared.
     pub async fn flush_cache(&self) -> usize {
         let mut cache = self.cache.lock().await;
@@ -543,15 +556,12 @@ impl DnsServer {
     /// Build a DnsFilterStatus snapshot.
     pub async fn status(&self) -> DnsFilterStatus {
         let cache_entries = self.cache.lock().await.len();
+        let listen_addr = self.listen_addr.lock().await;
         DnsFilterStatus {
             running: self.running.load(Ordering::Relaxed),
-            listen_address: self.listen_addr.ip().to_string(),
-            listen_port: self.listen_addr.port(),
-            upstreams: self
-                .upstreams
-                .iter()
-                .map(|a| a.to_string())
-                .collect(),
+            listen_address: listen_addr.ip().to_string(),
+            listen_port: listen_addr.port(),
+            upstreams: self.upstreams.iter().map(|a| a.to_string()).collect(),
             cache_entries,
             queries_total: self.counters.queries_total.load(Ordering::Relaxed),
             queries_allowed: self.counters.queries_allowed.load(Ordering::Relaxed),
@@ -610,11 +620,8 @@ fn build_resolver(upstreams: &[SocketAddr]) -> Result<TokioAsyncResolver> {
         .map(|addr| NameServerConfig::new(*addr, Protocol::Udp))
         .collect();
 
-    let config = ResolverConfig::from_parts(
-        None,
-        vec![],
-        NameServerConfigGroup::from(name_servers),
-    );
+    let config =
+        ResolverConfig::from_parts(None, vec![], NameServerConfigGroup::from(name_servers));
 
     let mut opts = ResolverOpts::default();
     opts.cache_size = 0; // We maintain our own cache
@@ -648,9 +655,7 @@ pub fn parse_upstream_arg(arg: &str) -> Vec<SocketAddr> {
             if s.contains(':') {
                 s.parse().ok()
             } else {
-                s.parse::<IpAddr>()
-                    .ok()
-                    .map(|ip| SocketAddr::new(ip, 53))
+                s.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, 53))
             }
         })
         .collect()
@@ -658,9 +663,7 @@ pub fn parse_upstream_arg(arg: &str) -> Vec<SocketAddr> {
 
 /// Build the resolv.conf content to inject into containers (FR-006, IF-007).
 pub fn container_resolv_conf(gateway_ip: &str) -> String {
-    format!(
-        "# Generated by outcalld -- do not edit\nnameserver {gateway_ip}\noptions ndots:0\n"
-    )
+    format!("# Generated by outcalld -- do not edit\nnameserver {gateway_ip}\noptions ndots:0\n")
 }
 
 #[cfg(test)]
@@ -671,9 +674,21 @@ mod tests {
     #[test]
     fn extract_ipv4_destinations_dedups_and_ignores_non_a_records() {
         let name = Name::from_ascii("ports.ubuntu.com.").expect("name");
-        let rec1 = Record::from_rdata(name.clone(), 60, RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(91, 189, 91, 104))));
-        let rec2 = Record::from_rdata(name.clone(), 60, RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(91, 189, 92, 19))));
-        let rec3 = Record::from_rdata(name, 60, RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(91, 189, 91, 104))));
+        let rec1 = Record::from_rdata(
+            name.clone(),
+            60,
+            RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(91, 189, 91, 104))),
+        );
+        let rec2 = Record::from_rdata(
+            name.clone(),
+            60,
+            RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(91, 189, 92, 19))),
+        );
+        let rec3 = Record::from_rdata(
+            name,
+            60,
+            RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(91, 189, 91, 104))),
+        );
 
         let got = extract_ipv4_destinations(&[rec1, rec2, rec3]);
         assert_eq!(got, vec!["91.189.91.104", "91.189.92.19"]);
@@ -685,27 +700,35 @@ mod tests {
         let rec1 = Record::from_rdata(
             name.clone(),
             60,
-            RData::AAAA(hickory_proto::rr::rdata::AAAA(*Ipv6Addr::LOCALHOST)),
+            RData::AAAA(hickory_proto::rr::rdata::AAAA(Ipv6Addr::LOCALHOST)),
         );
         let rec2 = Record::from_rdata(
             name.clone(),
             60,
-            RData::AAAA(hickory_proto::rr::rdata::AAAA(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x1))),
+            RData::AAAA(hickory_proto::rr::rdata::AAAA(Ipv6Addr::new(
+                0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x1,
+            ))),
         );
         let rec3 = Record::from_rdata(
             name,
             60,
-            RData::AAAA(hickory_proto::rr::rdata::AAAA(*Ipv6Addr::LOCALHOST)),
+            RData::AAAA(hickory_proto::rr::rdata::AAAA(Ipv6Addr::LOCALHOST)),
         );
 
         let got = extract_ipv6_destinations(&[rec1, rec2, rec3]);
-        assert_eq!(got, vec!["::1", "2001:db8::1"]);
+        // The function sorts lexicographically before dedup. ASCII '2' (0x32)
+        // sorts before ':' (0x3A), so "2001:db8::1" precedes "::1".
+        assert_eq!(got, vec!["2001:db8::1", "::1"]);
     }
 
     #[test]
     fn extract_ipv6_destinations_ignores_a_records() {
         let name = Name::from_ascii("example.com.").expect("name");
-        let rec = Record::from_rdata(name, 60, RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(93, 184, 215, 14))));
+        let rec = Record::from_rdata(
+            name,
+            60,
+            RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(93, 184, 215, 14))),
+        );
 
         let got = extract_ipv6_destinations(&[rec]);
         assert!(got.is_empty());

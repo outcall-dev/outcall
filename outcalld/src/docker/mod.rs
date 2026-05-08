@@ -8,24 +8,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use bollard::Docker;
+use bollard::container::NetworkingConfig;
 use bollard::container::{
-    CreateContainerOptions, ListContainersOptions, RemoveContainerOptions,
-    StartContainerOptions, StopContainerOptions,
+    CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, StartContainerOptions,
+    StopContainerOptions,
 };
 use bollard::image::CreateImageOptions;
-use bollard::container::NetworkingConfig;
 use bollard::models::{EndpointSettings, HostConfig};
 use bollard::system::EventsOptions;
-use bollard::Docker;
 use futures::stream::StreamExt;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use outcall_api::{
-    ContainerCreateRequest, ContainerCreateResult, ContainerInfo, ContainerInspectResult,
-    ContainerRemoveResult, ContainerStopResult, ImagePullResult, AGENT_SOCKET_CONTAINER_PATH,
-    DEFAULT_CPU_SHARES, DEFAULT_MEMORY_LIMIT, DEFAULT_PID_LIMIT,
-    DEFAULT_STOP_TIMEOUT_SECS, SHIM_CONTAINER_PATH,
+    AGENT_SOCKET_CONTAINER_PATH, ContainerCreateRequest, ContainerCreateResult, ContainerInfo,
+    ContainerInspectResult, ContainerRemoveResult, ContainerStopResult, DEFAULT_CPU_SHARES,
+    DEFAULT_MEMORY_LIMIT, DEFAULT_PID_LIMIT, DEFAULT_STOP_TIMEOUT_SECS, ImagePullResult,
+    SHIM_CONTAINER_PATH,
 };
 
 // ── Event types ───────────────────────────────────────────────────────────────
@@ -138,10 +138,7 @@ impl DockerManager {
         proxy_addr: &str,
         dns_addr: &str,
     ) -> Result<ContainerCreateResult> {
-        let docker = self
-            .docker
-            .as_ref()
-            .context("Docker manager unavailable")?;
+        let docker = self.docker.as_ref().context("Docker manager unavailable")?;
 
         let network_name = req
             .network
@@ -185,10 +182,7 @@ impl DockerManager {
         let mut labels = HashMap::new();
         labels.insert("managed-by".to_string(), "outcalld".to_string());
         labels.insert("outcall.network".to_string(), network_name.clone());
-        labels.insert(
-            "outcall.created-at".to_string(),
-            chrono_now_iso8601(),
-        );
+        labels.insert("outcall.created-at".to_string(), chrono_now_iso8601());
 
         let memory = req.memory_limit.unwrap_or(DEFAULT_MEMORY_LIMIT);
         let cpu_shares = req.cpu_shares.unwrap_or(DEFAULT_CPU_SHARES);
@@ -204,7 +198,12 @@ impl DockerManager {
                 .as_ref()
                 .map(|v| v.iter().map(String::as_str).collect()),
             env: Some(env.iter().map(String::as_str).collect()),
-            labels: Some(labels.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()),
+            labels: Some(
+                labels
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect(),
+            ),
             networking_config: Some(NetworkingConfig {
                 endpoints_config: endpoints,
             }),
@@ -213,7 +212,7 @@ impl DockerManager {
                 memory: Some(memory),
                 cpu_shares: Some(cpu_shares as i64),
                 pids_limit: Some(DEFAULT_PID_LIMIT),
-                readonly_rootfs: Some(true),  // bollard field name (no underscore split)
+                readonly_rootfs: Some(true), // bollard field name (no underscore split)
                 privileged: Some(false),
                 cap_drop: Some(vec!["ALL".to_string()]),
                 dns: Some(vec![dns_addr.to_string()]),
@@ -258,10 +257,7 @@ impl DockerManager {
         name: &str,
         timeout: Option<i64>,
     ) -> Result<ContainerStopResult> {
-        let docker = self
-            .docker
-            .as_ref()
-            .context("Docker manager unavailable")?;
+        let docker = self.docker.as_ref().context("Docker manager unavailable")?;
         let t = timeout.unwrap_or(DEFAULT_STOP_TIMEOUT_SECS);
         docker
             .stop_container(name, Some(StopContainerOptions { t }))
@@ -276,15 +272,8 @@ impl DockerManager {
     }
 
     /// Remove a stopped container (FR-013).
-    pub async fn remove_container(
-        &self,
-        name: &str,
-        force: bool,
-    ) -> Result<ContainerRemoveResult> {
-        let docker = self
-            .docker
-            .as_ref()
-            .context("Docker manager unavailable")?;
+    pub async fn remove_container(&self, name: &str, force: bool) -> Result<ContainerRemoveResult> {
+        let docker = self.docker.as_ref().context("Docker manager unavailable")?;
 
         docker
             .remove_container(
@@ -309,10 +298,7 @@ impl DockerManager {
 
     /// List all outcall-managed containers (identified by `managed-by=outcalld` label).
     pub async fn list_containers(&self) -> Result<Vec<ContainerInfo>> {
-        let docker = self
-            .docker
-            .as_ref()
-            .context("Docker manager unavailable")?;
+        let docker = self.docker.as_ref().context("Docker manager unavailable")?;
 
         let mut filters = HashMap::new();
         filters.insert("label", vec!["managed-by=outcalld"]);
@@ -363,10 +349,7 @@ impl DockerManager {
 
     /// Inspect a single container by name (FR-015).
     pub async fn inspect_container(&self, name: &str) -> Result<ContainerInspectResult> {
-        let docker = self
-            .docker
-            .as_ref()
-            .context("Docker manager unavailable")?;
+        let docker = self.docker.as_ref().context("Docker manager unavailable")?;
 
         let details = docker
             .inspect_container(name, None)
@@ -398,12 +381,7 @@ impl DockerManager {
         let (network, ip_address) = ns
             .and_then(|ns| ns.networks.as_ref())
             .and_then(|nets| nets.iter().next())
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    v.ip_address.clone().unwrap_or_default(),
-                )
-            })
+            .map(|(k, v)| (k.clone(), v.ip_address.clone().unwrap_or_default()))
             .unwrap_or_default();
 
         let container_name = details
@@ -440,10 +418,7 @@ impl DockerManager {
     /// Pull an image from a registry (FR-017).
     /// Returns `pulled: false` if the image was already present locally.
     pub async fn pull_image(&self, image: &str) -> Result<ImagePullResult> {
-        let docker = self
-            .docker
-            .as_ref()
-            .context("Docker manager unavailable")?;
+        let docker = self.docker.as_ref().context("Docker manager unavailable")?;
 
         // Check if image exists locally first.
         let already_present = docker.inspect_image(image).await.is_ok();
@@ -499,9 +474,7 @@ impl DockerManager {
             return None;
         }
 
-        details
-            .name
-            .map(|n| n.trim_start_matches('/').to_string())
+        details.name.map(|n| n.trim_start_matches('/').to_string())
     }
 
     pub async fn lookup_container_name_by_ip(&self, ip: &str) -> Option<String> {
@@ -524,10 +497,7 @@ impl DockerManager {
                 continue;
             };
             let details = docker
-                .inspect_container(
-                    &id,
-                    None::<bollard::container::InspectContainerOptions>,
-                )
+                .inspect_container(&id, None::<bollard::container::InspectContainerOptions>)
                 .await
                 .ok()?;
 
@@ -543,9 +513,7 @@ impl DockerManager {
                 .unwrap_or(false);
 
             if matched {
-                return details
-                    .name
-                    .map(|n| n.trim_start_matches('/').to_string());
+                return details.name.map(|n| n.trim_start_matches('/').to_string());
             }
         }
 
@@ -556,13 +524,13 @@ impl DockerManager {
 
     /// Check that the named network exists.
     async fn check_network(&self, network_name: &str) -> Result<()> {
-        let docker = self
-            .docker
-            .as_ref()
-            .context("Docker manager unavailable")?;
+        let docker = self.docker.as_ref().context("Docker manager unavailable")?;
 
         docker
-            .inspect_network(network_name, None::<bollard::network::InspectNetworkOptions<&str>>)
+            .inspect_network(
+                network_name,
+                None::<bollard::network::InspectNetworkOptions<&str>>,
+            )
             .await
             .with_context(|| format!("network \"{network_name}\" does not exist"))?;
         Ok(())
@@ -759,8 +727,10 @@ mod tests {
 
     #[test]
     fn format_unix_timestamp_known() {
-        // 2026-04-24T00:00:00Z = 1745452800
-        assert_eq!(format_unix_timestamp(1_745_452_800), "2026-04-24T00:00:00Z");
+        // 2026-04-24T00:00:00Z = 1_776_988_800 unix seconds.
+        // (The earlier value 1_745_452_800 was a year off — that one is
+        // 2025-04-24, which the function correctly produced.)
+        assert_eq!(format_unix_timestamp(1_776_988_800), "2026-04-24T00:00:00Z");
     }
 
     #[test]

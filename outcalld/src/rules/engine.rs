@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use cel_interpreter::{Context as CelCtx, Value};
 use outcall_api::{
-    Decision, DockerContext, DnsContext, EvalContext, EvaluateResult, HttpContext, NetworkContext,
+    Decision, DnsContext, DockerContext, EvalContext, EvaluateResult, HttpContext, NetworkContext,
     RuleAction, RuleDetail, RuleSummary, RunContext,
 };
 use tokio::sync::RwLock;
@@ -19,11 +19,13 @@ use super::model::{CompiledRule, EgressSpec, RuleFile, RuleSet};
 
 /// The rule engine. Holds a hot-swappable compiled rule set.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct RuleEngine {
     pub rules_dir: String,
     rule_set: Arc<RwLock<Arc<RuleSet>>>,
 }
 
+#[allow(dead_code)]
 impl RuleEngine {
     /// Load rules from `rules_dir`, compile CEL expressions, return the engine.
     /// Returns an error if any P1 static analysis check fails (S003-FR-014/015).
@@ -51,9 +53,17 @@ impl RuleEngine {
         };
 
         for rule in &rule_set.rules {
-            let matched = rule.program.execute(&cel_ctx)
+            let matched = rule
+                .program
+                .execute(&cel_ctx)
                 .ok()
-                .and_then(|v| if let Value::Bool(b) = v { Some(b) } else { None })
+                .and_then(|v| {
+                    if let Value::Bool(b) = v {
+                        Some(b)
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or(false);
 
             if !matched {
@@ -113,7 +123,9 @@ impl RuleEngine {
 
     /// List all loaded rules in evaluation order.
     pub async fn list_rules(&self) -> Vec<RuleSummary> {
-        self.rule_set.read().await
+        self.rule_set
+            .read()
+            .await
             .rules
             .iter()
             .map(|r| RuleSummary {
@@ -128,7 +140,9 @@ impl RuleEngine {
 
     /// Get details for a specific rule by ID.
     pub async fn get_rule(&self, id: &str) -> Option<RuleDetail> {
-        self.rule_set.read().await
+        self.rule_set
+            .read()
+            .await
             .rules
             .iter()
             .find(|r| r.id == id)
@@ -157,8 +171,8 @@ impl RuleEngine {
     /// Returns `Ok(())` if the file parses and all CEL expressions compile.
     pub fn validate_rule_file(rule_yaml: &str) -> Result<(), String> {
         use super::model::RuleFile;
-        let rf: RuleFile = serde_yaml::from_str(rule_yaml)
-            .map_err(|e| format!("YAML parse error: {e}"))?;
+        let rf: RuleFile =
+            serde_yaml::from_str(rule_yaml).map_err(|e| format!("YAML parse error: {e}"))?;
         if rf.version != "1" {
             return Err(format!("unsupported rule file version: {:?}", rf.version));
         }
@@ -180,7 +194,10 @@ impl RuleEngine {
                 let cel_ctx = build_cel_context(ctx);
                 match prog.execute(&cel_ctx) {
                     Ok(Value::Bool(b)) => (b, None),
-                    Ok(other) => (false, Some(format!("expression returned non-bool: {other:?}"))),
+                    Ok(other) => (
+                        false,
+                        Some(format!("expression returned non-bool: {other:?}")),
+                    ),
                     Err(e) => (false, Some(format!("evaluation error: {e}"))),
                 }
             }
@@ -191,12 +208,16 @@ impl RuleEngine {
 // ── Rule loading ──────────────────────────────────────────────────────────
 
 /// Load and compile all rules from the given directory.
+#[allow(dead_code)]
 fn load_and_compile(rules_dir: &str) -> Result<RuleSet> {
     let path = Path::new(rules_dir);
 
     // FR-038: missing or empty rules dir = empty rule set (no error)
     if !path.exists() {
-        info!(rules_dir, "rules directory does not exist — starting with empty rule set");
+        info!(
+            rules_dir,
+            "rules directory does not exist — starting with empty rule set"
+        );
         return Ok(RuleSet::default());
     }
 
@@ -212,7 +233,10 @@ fn load_and_compile(rules_dir: &str) -> Result<RuleSet> {
     yaml_files.sort();
 
     if yaml_files.is_empty() {
-        info!(rules_dir, "no .yaml files found — starting with empty rule set");
+        info!(
+            rules_dir,
+            "no .yaml files found — starting with empty rule set"
+        );
         return Ok(RuleSet::default());
     }
 
@@ -226,8 +250,8 @@ fn load_and_compile(rules_dir: &str) -> Result<RuleSet> {
             .to_string_lossy()
             .to_string();
 
-        let content = std::fs::read_to_string(file_path)
-            .with_context(|| format!("reading {file_name}"))?;
+        let content =
+            std::fs::read_to_string(file_path).with_context(|| format!("reading {file_name}"))?;
 
         // FR-015.f: malformed YAML = error
         let rule_file: RuleFile = serde_yaml::from_str(&content)
@@ -253,13 +277,13 @@ fn load_and_compile(rules_dir: &str) -> Result<RuleSet> {
 
             // Expand $name definitions
             let expanded = expand_definitions(&spec.condition, &rule_file.definitions, &file_name)
-                .with_context(|| format!("expanding definitions in rule {:?} ({file_name})", spec.id))?;
+                .with_context(|| {
+                    format!("expanding definitions in rule {:?} ({file_name})", spec.id)
+                })?;
 
             // FR-004/015.a: CEL compile at load time
             let program = cel_interpreter::Program::compile(&expanded)
-                .with_context(|| {
-                    format!("CEL parse error in rule {:?} ({file_name})", spec.id)
-                })?;
+                .with_context(|| format!("CEL parse error in rule {:?} ({file_name})", spec.id))?;
 
             let priority = spec.priority.unwrap_or(100);
 
@@ -295,6 +319,7 @@ fn load_and_compile(rules_dir: &str) -> Result<RuleSet> {
 
 /// Expand `$name` references in a CEL expression using the definitions map.
 /// Definitions are applied recursively. Circular references are detected.
+#[allow(dead_code)]
 fn expand_definitions(
     expr: &str,
     defs: &HashMap<String, String>,
@@ -303,6 +328,7 @@ fn expand_definitions(
     expand_recursive(expr, defs, file_name, &mut Vec::new())
 }
 
+#[allow(dead_code)]
 fn expand_recursive(
     expr: &str,
     defs: &HashMap<String, String>,
@@ -327,19 +353,13 @@ fn expand_recursive(
                 continue;
             }
 
-            let def = defs
-                .get(name)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "undefined $name reference \"${name}\" in {file_name}"
-                    )
-                })?;
+            let def = defs.get(name).ok_or_else(|| {
+                anyhow::anyhow!("undefined $name reference \"${name}\" in {file_name}")
+            })?;
 
             // FR-006.c: circular reference detection
             if stack.contains(&name.to_string()) {
-                anyhow::bail!(
-                    "circular definition reference \"${name}\" in {file_name}"
-                );
+                anyhow::bail!("circular definition reference \"${name}\" in {file_name}");
             }
             stack.push(name.to_string());
             let expanded_def = expand_recursive(def, defs, file_name, stack)?;
@@ -359,6 +379,7 @@ fn expand_recursive(
 
 /// Build a CEL evaluation context from the API EvalContext.
 /// Absent namespaces are injected with zero values (FR-005.f).
+#[allow(dead_code, mismatched_lifetime_syntaxes)]
 fn build_cel_context(ctx: &EvalContext) -> CelCtx {
     let mut cel = CelCtx::default();
 
@@ -368,15 +389,16 @@ fn build_cel_context(ctx: &EvalContext) -> CelCtx {
     let docker = ctx.docker.as_ref().cloned().unwrap_or_default();
     let run = ctx.run.as_ref().cloned().unwrap_or_default();
 
-    cel.add_variable("network", network_value(&net));
-    cel.add_variable("http", http_value(&http));
-    cel.add_variable("dns", dns_value(&dns));
-    cel.add_variable("docker", docker_value(&docker));
-    cel.add_variable("run", run_value(&run));
+    let _ = cel.add_variable("network", network_value(&net));
+    let _ = cel.add_variable("http", http_value(&http));
+    let _ = cel.add_variable("dns", dns_value(&dns));
+    let _ = cel.add_variable("docker", docker_value(&docker));
+    let _ = cel.add_variable("run", run_value(&run));
 
     cel
 }
 
+#[allow(dead_code)]
 fn network_value(n: &NetworkContext) -> Value {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -387,6 +409,7 @@ fn network_value(n: &NetworkContext) -> Value {
     Value::from(map)
 }
 
+#[allow(dead_code)]
 fn http_value(h: &HttpContext) -> Value {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -395,13 +418,16 @@ fn http_value(h: &HttpContext) -> Value {
     map.insert("host", Value::from(h.host.as_str()));
     map.insert("body_size", Value::from(h.body_size as i64));
     // headers: map<string, string>
-    let headers: HashMap<&str, Value> = h.headers.iter()
+    let headers: HashMap<&str, Value> = h
+        .headers
+        .iter()
         .map(|(k, v)| (k.as_str(), Value::from(v.as_str())))
         .collect();
     map.insert("headers", Value::from(headers));
     Value::from(map)
 }
 
+#[allow(dead_code)]
 fn dns_value(d: &DnsContext) -> Value {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -410,6 +436,7 @@ fn dns_value(d: &DnsContext) -> Value {
     Value::from(map)
 }
 
+#[allow(dead_code)]
 fn docker_value(d: &DockerContext) -> Value {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -421,6 +448,7 @@ fn docker_value(d: &DockerContext) -> Value {
     Value::from(map)
 }
 
+#[allow(dead_code)]
 fn run_value(r: &RunContext) -> Value {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -429,19 +457,23 @@ fn run_value(r: &RunContext) -> Value {
     map.insert("flags", Value::from(str_list(&r.flags)));
     map.insert("cwd", Value::from(r.cwd.as_str()));
     // run.context is a map — for now we include string-valued keys only
-    let ctx_map: HashMap<&str, Value> = r.context.iter()
+    let ctx_map: HashMap<&str, Value> = r
+        .context
+        .iter()
         .filter_map(|(k, v)| v.as_str().map(|s| (k.as_str(), Value::from(s))))
         .collect();
     map.insert("context", Value::from(ctx_map));
     Value::from(map)
 }
 
+#[allow(dead_code)]
 fn str_list(v: &[String]) -> Vec<Value> {
     v.iter().map(|s| Value::from(s.as_str())).collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,7 +505,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
         // Can't easily inspect rules_dir length via public API but reload should work.
-        assert!(engine.rules_dir.len() > 0);
+        assert!(!engine.rules_dir.is_empty());
     }
 
     #[test]
@@ -708,6 +740,7 @@ rules:
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -716,6 +749,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn count_files(dir: &str) -> usize {
     WalkDir::new(dir)
         .max_depth(1)
@@ -727,6 +761,7 @@ fn count_files(dir: &str) -> usize {
 }
 
 /// Collect non-fatal warnings (unused defs, etc.) — FR-016.
+#[allow(dead_code)]
 fn collect_warnings(rules_dir: &str) -> Result<Vec<String>> {
     let path = Path::new(rules_dir);
     if !path.exists() {
@@ -744,19 +779,28 @@ fn collect_warnings(rules_dir: &str) -> Result<Vec<String>> {
     yaml_files.sort_by_key(|e| e.path().to_path_buf());
 
     for entry in yaml_files {
-        let file_name = entry.path().file_name().unwrap_or_default().to_string_lossy();
+        let file_name = entry
+            .path()
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
         let content = std::fs::read_to_string(entry.path())?;
         if let Ok(rule_file) = serde_yaml::from_str::<RuleFile>(&content) {
             // FR-016.a: warn on unused definitions
             for def_name in rule_file.definitions.keys() {
-                let used = rule_file.rules.iter().any(|r| r.condition.contains(&format!("${def_name}")));
+                let used = rule_file
+                    .rules
+                    .iter()
+                    .any(|r| r.condition.contains(&format!("${def_name}")));
                 if !used {
                     warnings.push(format!("unused definition \"{def_name}\" in {file_name}"));
                 }
             }
             // FR-016.c: warn on definitions section with no rules
             if !rule_file.definitions.is_empty() && rule_file.rules.is_empty() {
-                warnings.push(format!("definitions section present but no rules in {file_name}"));
+                warnings.push(format!(
+                    "definitions section present but no rules in {file_name}"
+                ));
             }
         }
     }

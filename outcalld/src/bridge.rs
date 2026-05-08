@@ -36,14 +36,11 @@ pub struct BridgeManager {
 impl BridgeManager {
     /// Create a new bridge manager. Does not touch the kernel yet.
     pub async fn new(name: Option<&str>) -> Result<Self, BridgeError> {
-        let (conn, handle, _) =
-            rtnetlink::new_connection().map_err(BridgeError::Connection)?;
+        let (conn, handle, _) = rtnetlink::new_connection().map_err(BridgeError::Connection)?;
         tokio::spawn(conn);
 
         Ok(Self {
-            name: name
-                .unwrap_or(outcall_api::DEFAULT_BRIDGE_NAME)
-                .to_string(),
+            name: name.unwrap_or(outcall_api::DEFAULT_BRIDGE_NAME).to_string(),
             handle,
             index: None,
         })
@@ -170,7 +167,8 @@ impl BridgeManager {
                 let detail = if e.kind() == std::io::ErrorKind::NotFound {
                     "nft command not found — is nftables installed?".to_string()
                 } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    "permission denied running nft — are you root or have CAP_NET_ADMIN?".to_string()
+                    "permission denied running nft — are you root or have CAP_NET_ADMIN?"
+                        .to_string()
                 } else {
                     format!("spawn nft: {e}")
                 };

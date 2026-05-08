@@ -8,12 +8,14 @@ use outcall_api::RuleAction;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum EgressMode {
     Proxy,
     DirectIp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct EgressSpec {
     pub mode: EgressMode,
     #[serde(default)]
@@ -22,6 +24,7 @@ pub struct EgressSpec {
 
 /// Top-level structure of a rule YAML file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RuleFile {
     /// Must be "1".
     pub version: String,
@@ -35,6 +38,7 @@ pub struct RuleFile {
 
 /// A single rule entry within a rule file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RuleSpec {
     /// Unique identifier across all loaded rule files.
     pub id: String,
@@ -57,6 +61,7 @@ pub struct RuleSpec {
 
 /// Configuration for an enrich hook script.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct EnrichSpec {
     /// Script path relative to the rules directory.
     pub script: String,
@@ -66,6 +71,7 @@ pub struct EnrichSpec {
 
 /// A compiled rule, ready for evaluation.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct CompiledRule {
     pub id: String,
     pub file: String,
@@ -81,6 +87,7 @@ pub struct CompiledRule {
 
 /// The entire compiled rule set, held in an Arc for concurrent evaluation.
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct RuleSet {
     pub rules: Vec<CompiledRule>,
 }
@@ -103,7 +110,10 @@ rules:
 "#;
 
         let parsed: RuleFile = serde_yaml::from_str(yaml).expect("rule file should parse");
-        let egress = parsed.rules[0].egress.as_ref().expect("egress should exist");
+        let egress = parsed.rules[0]
+            .egress
+            .as_ref()
+            .expect("egress should exist");
         assert_eq!(egress.mode, EgressMode::DirectIp);
         assert_eq!(egress.ports, vec![80, 443]);
     }

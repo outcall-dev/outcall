@@ -1,0 +1,76 @@
+# cargo-deny policy for Outcall.
+#
+# Run locally:    cargo deny check
+# Run in CI:      see .github/workflows/ci.yml `deny` job
+#
+# Edit cautiously — this file is the supply-chain trust boundary.
+
+[graph]
+# Check only the standard targets the daemon actually ships on.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+# Don't fail on dev-dependencies for license/duplicate checks; they don't ship.
+all-features = false
+
+[output]
+feature-depth = 1
+
+# ─── Advisories (RustSec / GHSA) ───────────────────────────────────────────────
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = [
+    # paste 1.0.15 — unmaintained; pulled in transitively by netlink-packet-core
+    # and cel-interpreter. No replacement upstream yet. Re-evaluate when a
+    # netlink-packet-core release switches off paste.
+    "RUSTSEC-2024-0436",
+]
+
+# ─── Licenses ──────────────────────────────────────────────────────────────────
+[licenses]
+# Outcall is permissively licensed; we accept permissive deps.
+# Reject GPL/AGPL/SSPL — they would force a relicense if linked statically.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MIT",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",       # weak copyleft, file-level — acceptable for transitive deps
+    "CC0-1.0",
+    "0BSD",
+]
+confidence-threshold = 0.93
+exceptions = [
+    # Add per-crate license exceptions here when a crate's license is fine in
+    # context but doesn't appear in `allow` above.
+]
+
+# ─── Bans (duplicate versions, banned crates) ──────────────────────────────────
+[bans]
+multiple-versions = "warn"   # tighten to "deny" once duplicates are cleaned up
+wildcards = "deny"           # forbid `version = "*"` in Cargo.toml
+highlight = "all"
+deny = [
+    # Add a row here when a crate is forbidden, e.g. forks of openssl that
+    # we don't want to accidentally take.
+]
+skip = [
+    # Allowed duplicates — list specific (name, version) when transitive
+    # deps force a duplicate that's not worth fighting.
+]
+skip-tree = []
+
+# ─── Sources (where deps may come from) ────────────────────────────────────────
+[sources]
+unknown-registry = "deny"     # only use registries listed below
+unknown-git = "deny"          # only use git deps from allow-list below
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []                # add git deps here when introduced

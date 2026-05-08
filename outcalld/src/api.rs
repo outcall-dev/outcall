@@ -4,11 +4,11 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use outcall_api::{
-    ActiveRule, AllowRuleRequest, AllowRuleResult, ApiResponse, BridgeStatus,
-    ContainerCreateRequest, ContainerCreateResult, ContainerInfo, ContainerInspectResult,
-    ContainerRemoveRequest, ContainerRemoveResult, ContainerStopRequest, ContainerStopResult,
-    DnsCacheDetail, DnsCacheFlushResult, DnsFilterStatus, EvaluateRequest, EvaluateResult,
-    FlushDynamicResult, ImagePullRequest, ImagePullResult, NetworkCreateRequest,
+    ActiveRule, AllowRuleRequest, AllowRuleResult, ApiResponse, BridgeStatus, CaBundleResult,
+    CaConfig, CaStatus, ContainerCreateRequest, ContainerCreateResult, ContainerInfo,
+    ContainerInspectResult, ContainerRemoveRequest, ContainerRemoveResult, ContainerStopRequest,
+    ContainerStopResult, DnsCacheDetail, DnsCacheFlushResult, DnsFilterStatus, EvaluateRequest,
+    EvaluateResult, FlushDynamicResult, ImagePullRequest, ImagePullResult, NetworkCreateRequest,
     NetworkCreateResult, NetworkDestroyRequest, NetworkDestroyResult, NetworkStatus, ProxyStatus,
     ReloadResult, RuleDetail, RuleSummary, TestExpressionRequest, TestExpressionResult,
 };
@@ -40,6 +40,14 @@ pub struct AppState {
     pub docker: SharedDocker,
     pub dynamic: SharedDynamic,
     pub network: SharedNetwork,
+    pub ca: Arc<CaState>,
+}
+
+#[derive(Clone, Default)]
+pub struct CaState {
+    pub config: Option<CaConfig>,
+    pub interception_enabled: bool,
+    pub pem_bundle: Option<String>,
 }
 
 pub fn router(
@@ -50,8 +58,18 @@ pub fn router(
     docker: SharedDocker,
     dynamic: SharedDynamic,
     network: SharedNetwork,
+    ca: CaState,
 ) -> Router {
-    let state = AppState { bridge, rules, dns, proxy, docker, dynamic, network };
+    let state = AppState {
+        bridge,
+        rules,
+        dns,
+        proxy,
+        docker,
+        dynamic,
+        network,
+        ca: Arc::new(ca),
+    };
     Router::new()
         // Bridge endpoints
         .route("/api/v1/bridge", get(bridge_status))
@@ -86,6 +104,9 @@ pub fn router(
         .route("/api/v1/networks", get(network_list))
         .route("/api/v1/network/destroy", post(network_destroy))
         .route("/api/v1/network/config", get(network_config))
+        // CA / TLS interception endpoints (S011)
+        .route("/api/v1/ca/status", get(ca_status))
+        .route("/api/v1/ca/bundle", get(ca_bundle))
         .with_state(state)
         // Dashboard (S010) — stateless, merged after state is bound
         .merge(outcall_ui::router())
@@ -198,9 +219,7 @@ async fn dns_cache(
 }
 
 /// POST /api/v1/dns/cache/flush — flush the DNS cache.
-async fn dns_cache_flush(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<DnsCacheFlushResult>> {
+async fn dns_cache_flush(State(state): State<AppState>) -> Json<ApiResponse<DnsCacheFlushResult>> {
     let entries_flushed = state.dns.flush_cache().await;
     Json(ApiResponse::ok(DnsCacheFlushResult { entries_flushed }))
 }
@@ -223,9 +242,7 @@ async fn proxy_status(State(state): State<AppState>) -> Json<ApiResponse<ProxySt
 // ── Docker Manager handlers (S008) ─────────────────────────────────────────
 
 /// GET /api/v1/containers — list all outcall-managed containers.
-async fn containers_list(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Vec<ContainerInfo>>> {
+async fn containers_list(State(state): State<AppState>) -> Json<ApiResponse<Vec<ContainerInfo>>> {
     if state.docker.is_unavailable() {
         return Json(ApiResponse::err("Docker manager unavailable"));
     }
@@ -328,9 +345,7 @@ async fn container_pull(
 // ── Dynamic Rules handlers (S009) ──────────────────────────────────────────
 
 /// GET /api/v1/rules/active — list all active dynamic nftables rules.
-async fn dynamic_rules_list(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Vec<ActiveRule>>> {
+async fn dynamic_rules_list(State(state): State<AppState>) -> Json<ApiResponse<Vec<ActiveRule>>> {
     Json(ApiResponse::ok(state.dynamic.list_rules().await))
 }
 
@@ -382,9 +397,7 @@ async fn network_inspect(
 }
 
 /// GET /api/v1/networks — list all outcall-managed networks.
-async fn network_list(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Vec<NetworkStatus>>> {
+async fn network_list(State(state): State<AppState>) -> Json<ApiResponse<Vec<NetworkStatus>>> {
     match state.network.list_networks().await {
         Ok(r) => Json(ApiResponse::ok(r)),
         Err(e) => Json(ApiResponse::err(e.to_string())),
@@ -412,4 +425,45 @@ async fn network_config(State(state): State<AppState>) -> Json<ApiResponse<Netwo
     Json(ApiResponse::ok(NetworkConfig {
         subnet_block: state.network.subnet_block_cidr(),
     }))
+}
+
+// ── CA / TLS interception handlers (S011) ─────────────────────────────────
+
+/// GET /api/v1/ca/status — return CA loading status (S011-IF-009).
+async fn ca_status(State(state): State<AppState>) -> Json<ApiResponse<CaStatus>> {
+    let loaded = state.ca.config.is_some();
+    let (cert_path, key_path, subject_serial, interception_enabled) =
+        if let Some(ref cfg) = state.ca.config {
+            let serial = read_ca_serial(cfg);
+            (
+                Some(cfg.cert_path.to_string_lossy().to_string()),
+                Some(cfg.key_path.to_string_lossy().to_string()),
+                serial,
+                state.ca.interception_enabled,
+            )
+        } else {
+            (None, None, None, false)
+        };
+    Json(ApiResponse::ok(CaStatus {
+        loaded,
+        cert_path,
+        key_path,
+        subject_serial,
+        interception_enabled,
+    }))
+}
+
+/// GET /api/v1/ca/bundle — return CA PEM bundle (S011-FR-018).
+async fn ca_bundle(State(state): State<AppState>) -> Json<ApiResponse<CaBundleResult>> {
+    match &state.ca.pem_bundle {
+        Some(bundle) => Json(ApiResponse::ok(CaBundleResult {
+            pem_bundle: bundle.clone(),
+        })),
+        None => Json(ApiResponse::err("no CA loaded".to_string())),
+    }
+}
+
+fn read_ca_serial(_cfg: &CaConfig) -> Option<String> {
+    // TODO: Parse PEM, extract SubjectSerial from X509 cert
+    None
 }

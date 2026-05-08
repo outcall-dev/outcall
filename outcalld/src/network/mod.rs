@@ -5,17 +5,15 @@ use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
-use bollard::network::{
-    CreateNetworkOptions, InspectNetworkOptions, ListNetworksOptions,
-};
-use bollard::models::{Ipam, IpamConfig};
+use anyhow::{Context, Result, anyhow};
 use bollard::Docker;
+use bollard::models::{Ipam, IpamConfig};
+use bollard::network::{CreateNetworkOptions, InspectNetworkOptions, ListNetworksOptions};
 use tracing::{info, warn};
 
 use outcall_api::{
-    NetworkContainer, NetworkCreateRequest, NetworkCreateResult, NetworkDestroyResult,
-    NetworkStatus, DEFAULT_GATEWAY, DEFAULT_NETWORK_NAME, DEFAULT_SUBNET, NETWORK_PREFIX,
+    DEFAULT_GATEWAY, DEFAULT_NETWORK_NAME, DEFAULT_SUBNET, NETWORK_PREFIX, NetworkContainer,
+    NetworkCreateRequest, NetworkCreateResult, NetworkDestroyResult, NetworkStatus,
 };
 
 use crate::bridge::BridgeManager;
@@ -80,9 +78,7 @@ impl SubnetBlock {
 // ── FR-030: RFC 1918 validation ──
 fn is_rfc1918(addr: Ipv4Addr) -> bool {
     let o = addr.octets();
-    o[0] == 10
-        || (o[0] == 172 && (16..=31).contains(&o[1]))
-        || (o[0] == 192 && o[1] == 168)
+    o[0] == 10 || (o[0] == 172 && (16..=31).contains(&o[1])) || (o[0] == 192 && o[1] == 168)
 }
 
 impl NetworkManager {
@@ -103,9 +99,7 @@ impl NetworkManager {
         let docker = match Docker::connect_with_local_defaults() {
             Ok(d) => d,
             Err(e) => {
-                warn!(
-                    "Docker client init failed: {e} — network endpoints will return errors"
-                );
+                warn!("Docker client init failed: {e} — network endpoints will return errors");
                 // Still create a client object so endpoint calls return a proper error.
                 Docker::connect_with_local_defaults().map_err(|e| anyhow!("{e}"))?
             }
@@ -150,10 +144,7 @@ impl NetworkManager {
     }
 
     /// FR-001-005: create a network. Idempotent.
-    pub async fn create_network(
-        &self,
-        req: NetworkCreateRequest,
-    ) -> Result<NetworkCreateResult> {
+    pub async fn create_network(&self, req: NetworkCreateRequest) -> Result<NetworkCreateResult> {
         // FR-004: bridge must be up.
         if !self.bridge.lock().await.status().await.up {
             return Err(anyhow!("cannot create network: bridge is not up"));
@@ -177,10 +168,9 @@ impl NetworkManager {
         let (subnet, gateway) = if let Some(s) = req.subnet.as_deref() {
             // FR-015: explicit subnet still checked for collisions.
             self.check_subnet_collision(s).await?;
-            let g = req
-                .gateway
-                .clone()
-                .unwrap_or_else(|| derive_gateway(s).unwrap_or_else(|| DEFAULT_GATEWAY.to_string()));
+            let g = req.gateway.clone().unwrap_or_else(|| {
+                derive_gateway(s).unwrap_or_else(|| DEFAULT_GATEWAY.to_string())
+            });
             (s.to_string(), g)
         } else if full_name == DEFAULT_NETWORK_NAME {
             // FR-006: default network uses default subnet (still verify free).
@@ -218,7 +208,10 @@ impl NetworkManager {
             name: full_name.as_str(),
             driver: "bridge",
             ipam,
-            options: options_map.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
+            options: options_map
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect(),
             ..Default::default()
         };
 
@@ -397,23 +390,11 @@ fn derive_gateway(subnet_cidr: &str) -> Option<String> {
 }
 
 fn first_subnet(n: &bollard::models::Network) -> Option<String> {
-    n.ipam
-        .as_ref()?
-        .config
-        .as_ref()?
-        .first()?
-        .subnet
-        .clone()
+    n.ipam.as_ref()?.config.as_ref()?.first()?.subnet.clone()
 }
 
 fn first_gateway(n: &bollard::models::Network) -> Option<String> {
-    n.ipam
-        .as_ref()?
-        .config
-        .as_ref()?
-        .first()?
-        .gateway
-        .clone()
+    n.ipam.as_ref()?.config.as_ref()?.first()?.gateway.clone()
 }
 
 fn connected_containers(n: &bollard::models::Network) -> Vec<NetworkContainer> {
@@ -460,7 +441,10 @@ mod tests {
     #[test]
     fn full_name_default() {
         assert_eq!(NetworkManager::full_name(None).unwrap(), "outcall-default");
-        assert_eq!(NetworkManager::full_name(Some("")).unwrap(), "outcall-default");
+        assert_eq!(
+            NetworkManager::full_name(Some("")).unwrap(),
+            "outcall-default"
+        );
     }
 
     #[test]

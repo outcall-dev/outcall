@@ -5,13 +5,15 @@
 //!
 //! Mount with: `router.merge(outcall_ui::router())`
 
+#![forbid(unsafe_code)]
+
 use axum::{
+    Router,
     body::Body,
     extract::Path,
-    http::{header, Response, StatusCode},
+    http::{Response, StatusCode, header},
     response::IntoResponse,
     routing::get,
-    Router,
 };
 use rust_embed::RustEmbed;
 

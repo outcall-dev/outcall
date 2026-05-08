@@ -35,12 +35,12 @@ pub struct UnixPeerCred {
     pub pid: Option<u32>,
 }
 
-impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::UnixListener>>
-    for UnixPeerCred
+impl
+    axum::extract::connect_info::Connected<
+        axum::serve::IncomingStream<'_, tokio::net::UnixListener>,
+    > for UnixPeerCred
 {
-    fn connect_info(
-        target: axum::serve::IncomingStream<'_, tokio::net::UnixListener>,
-    ) -> Self {
+    fn connect_info(target: axum::serve::IncomingStream<'_, tokio::net::UnixListener>) -> Self {
         let pid = target
             .io()
             .peer_cred()
@@ -213,10 +213,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .map(|t| t.to_string())
 }
 
-async fn resolve_session(
-    state: &AgentState,
-    headers: &HeaderMap,
-) -> Result<String, Response> {
+async fn resolve_session(state: &AgentState, headers: &HeaderMap) -> Result<String, Response> {
     let token = match bearer_token(headers) {
         Some(t) => t,
         None => {
@@ -342,9 +339,9 @@ async fn permissions_check(
     // FR-014.a: configurable sliding-window rate limit per container.
     {
         let mut rate = state.perm_rate.lock().await;
-        let limiter = rate.entry(container_id.clone()).or_insert_with(|| {
-            SlidingWindow::new(state.perm_limit, state.perm_window)
-        });
+        let limiter = rate
+            .entry(container_id.clone())
+            .or_insert_with(|| SlidingWindow::new(state.perm_limit, state.perm_window));
         if !limiter.allow() {
             warn!(container_id = %container_id, "permission check: rate limited");
             let mut resp = (
@@ -363,27 +360,26 @@ async fn permissions_check(
     let eval_ctx = build_eval_context(&req);
 
     // FR-015: server-side timeout — fail closed on expiry.
-    let verdict = match tokio::time::timeout(state.eval_timeout, state.rules.evaluate(&eval_ctx))
-        .await
-    {
-        Ok(result) => Verdict {
-            allowed: matches!(result.decision, Decision::Allow),
-            matched_rule: result.matched_rule.clone(),
-            reason: if matches!(result.decision, Decision::Block) {
-                Some("blocked by policy".to_string())
-            } else {
-                None
+    let verdict =
+        match tokio::time::timeout(state.eval_timeout, state.rules.evaluate(&eval_ctx)).await {
+            Ok(result) => Verdict {
+                allowed: matches!(result.decision, Decision::Allow),
+                matched_rule: result.matched_rule.clone(),
+                reason: if matches!(result.decision, Decision::Block) {
+                    Some("blocked by policy".to_string())
+                } else {
+                    None
+                },
             },
-        },
-        Err(_) => {
-            warn!(container_id = %container_id, "permission check: evaluation timeout");
-            Verdict {
-                allowed: false,
-                matched_rule: None,
-                reason: Some("evaluation timeout".to_string()),
+            Err(_) => {
+                warn!(container_id = %container_id, "permission check: evaluation timeout");
+                Verdict {
+                    allowed: false,
+                    matched_rule: None,
+                    reason: Some("evaluation timeout".to_string()),
+                }
             }
-        }
-    };
+        };
 
     info!(
         container_id = %container_id,
@@ -411,9 +407,9 @@ async fn rule_request_submit(
     // FR-014.b: configurable sliding-window rate limit per container.
     {
         let mut rate = state.rule_rate.lock().await;
-        let limiter = rate.entry(container_id.clone()).or_insert_with(|| {
-            SlidingWindow::new(state.rule_limit, state.rule_window)
-        });
+        let limiter = rate
+            .entry(container_id.clone())
+            .or_insert_with(|| SlidingWindow::new(state.rule_limit, state.rule_window));
         if !limiter.allow() {
             warn!(container_id = %container_id, "rule submit: rate limited");
             let mut resp = (
@@ -581,7 +577,9 @@ fn fill_random(buf: &mut [u8]) {
         let pid = std::process::id() as u128;
         let mut x = nanos ^ pid.rotate_left(33);
         for byte in buf.iter_mut() {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *byte = (x >> 56) as u8;
         }
     }

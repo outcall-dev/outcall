@@ -1,9 +1,9 @@
 #[cfg(target_os = "linux")]
 mod agent_api;
 #[cfg(target_os = "linux")]
-mod bridge;
-#[cfg(target_os = "linux")]
 mod api;
+#[cfg(target_os = "linux")]
+mod bridge;
 #[cfg(target_os = "linux")]
 mod dns;
 #[cfg(target_os = "linux")]
@@ -81,13 +81,30 @@ struct Args {
     /// Must be within RFC 1918 private space.
     #[arg(long, default_value = outcall_api::SUBNET_BLOCK)]
     subnet_block: String,
+
+    /// Path to the TLS interception CA certificate (S011-FR-001).
+    /// Required for interception mode; omitted = interception disabled.
+    #[arg(long)]
+    ca_cert: Option<String>,
+
+    /// Path to the TLS interception CA private key (S011-FR-001).
+    #[arg(long)]
+    ca_key: Option<String>,
+
+    /// Leaf certificate TTL in seconds (S011-FR-021). Default: 86400 (24h).
+    #[arg(long)]
+    intercept_leaf_ttl_secs: Option<u64>,
+
+    /// Maximum request body bytes to buffer for interception matching (S011-FR-014).
+    /// Default: 1048576 (1 MiB).
+    #[arg(long)]
+    intercept_body_cap_bytes: Option<usize>,
 }
 
 /// Parse a rate limit string of the form `<count>/<seconds>`.
+#[allow(dead_code)]
 fn parse_rate(s: &str) -> (usize, std::time::Duration) {
-    let (count_s, window_s) = s
-        .split_once('/')
-        .unwrap_or((s, "1"));
+    let (count_s, window_s) = s.split_once('/').unwrap_or((s, "1"));
     let count = count_s.parse().unwrap_or(1);
     let window = std::time::Duration::from_secs(window_s.parse().unwrap_or(1));
     (count, window)
@@ -132,19 +149,17 @@ async fn linux_main(args: Args) -> Result<()> {
 
     // Initialize Docker Manager (S008).
     // EC-008 graceful degradation: unavailable Docker does NOT stop the daemon.
-    let docker_manager = match docker::DockerManager::new(
-        &args.agent_socket_host_path,
-        &args.shim_host_path,
-    )? {
-        Some(mgr) => {
-            info!("Docker Manager initialized");
-            mgr
-        }
-        None => {
-            info!("Docker Manager unavailable — continuing in degraded mode");
-            Arc::new(docker::DockerManager::new_unavailable())
-        }
-    };
+    let docker_manager =
+        match docker::DockerManager::new(&args.agent_socket_host_path, &args.shim_host_path)? {
+            Some(mgr) => {
+                info!("Docker Manager initialized");
+                mgr
+            }
+            None => {
+                info!("Docker Manager unavailable — continuing in degraded mode");
+                Arc::new(docker::DockerManager::new_unavailable())
+            }
+        };
 
     // Initialize Dynamic Rule Manager (S009) — subscribes to Docker death events.
     let dynamic_mgr = dynamic::DynamicRuleManager::new(docker_manager.clone());
@@ -167,7 +182,9 @@ async fn linux_main(args: Args) -> Result<()> {
 
     // Initialize HTTP proxy (S006)
     let proxy_server = proxy::ProxyServer::new(
-        args.proxy_addr.parse().map_err(|e| anyhow::anyhow!("invalid --proxy-addr: {e}"))?,
+        args.proxy_addr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid --proxy-addr: {e}"))?,
     );
     if !args.no_proxy {
         if let Err(e) = proxy_server.start(rule_engine.clone()).await {
@@ -182,14 +199,42 @@ async fn linux_main(args: Args) -> Result<()> {
     }
 
     // Initialize Network Manager (S002).
-    let network_mgr = network::NetworkManager::new(
-        bridge.clone(),
-        &args.bridge,
-        &args.subnet_block,
-    )?;
+    let network_mgr =
+        network::NetworkManager::new(bridge.clone(), &args.bridge, &args.subnet_block)?;
     info!(subnet_block = %args.subnet_block, "Network Manager initialized");
 
-    let app = api::router(bridge.clone(), rule_engine.clone(), dns_server.clone(), proxy_server.clone(), docker_manager.clone(), dynamic_mgr, network_mgr);
+    // Initialize CA for TLS interception (S011-FR-001).
+    let ca_state = if args.ca_cert.is_some() && args.ca_key.is_some() {
+        let ca_config = outcall_api::CaConfig {
+            cert_path: std::path::PathBuf::from(args.ca_cert.as_ref().unwrap()),
+            key_path: std::path::PathBuf::from(args.ca_key.as_ref().unwrap()),
+        };
+        let pem_bundle = std::fs::read_to_string(&ca_config.cert_path).ok().map(|p| {
+            p.lines()
+                .skip(1)
+                .take_while(|l| !l.starts_with("-----"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        api::CaState {
+            config: Some(ca_config),
+            interception_enabled: true,
+            pem_bundle,
+        }
+    } else {
+        api::CaState::default()
+    };
+
+    let app = api::router(
+        bridge.clone(),
+        rule_engine.clone(),
+        dns_server.clone(),
+        proxy_server.clone(),
+        docker_manager.clone(),
+        dynamic_mgr,
+        network_mgr,
+        ca_state,
+    );
 
     // Prepare host socket
     if let Some(parent) = std::path::Path::new(&args.socket).parent() {
@@ -211,7 +256,11 @@ async fn linux_main(args: Args) -> Result<()> {
     let (perm_count, perm_window) = parse_rate(&args.agent_perm_rate);
     let (rule_count, rule_window) = parse_rate(&args.agent_rule_rate);
     // FR-010: path for rule-request queue persistence.
-    let rule_state_path = format!("{}/{}", outcall_api::DEFAULT_STATE_DIR, outcall_api::RULE_REQUESTS_FILE);
+    let rule_state_path = format!(
+        "{}/{}",
+        outcall_api::DEFAULT_STATE_DIR,
+        outcall_api::RULE_REQUESTS_FILE
+    );
     // Ensure the state directory exists before loading.
     std::fs::create_dir_all(outcall_api::DEFAULT_STATE_DIR)?;
     let agent_app = agent_api::router(
@@ -226,8 +275,7 @@ async fn linux_main(args: Args) -> Result<()> {
     );
 
     let agent_server = tokio::spawn(async move {
-        let make_svc = agent_app
-            .into_make_service_with_connect_info::<agent_api::UnixPeerCred>();
+        let make_svc = agent_app.into_make_service_with_connect_info::<agent_api::UnixPeerCred>();
         if let Err(e) = axum::serve(agent_listener, make_svc).await {
             tracing::error!("agent API server error: {e}");
         }

@@ -25,8 +25,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
-use outcall_api::{Decision, EvalContext, HttpContext, NetworkContext};
 use crate::rules::RuleEngine;
+use outcall_api::{Decision, EvalContext, HttpContext, NetworkContext};
 
 const MAX_CONNECTIONS: usize = 1024;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
@@ -47,6 +47,9 @@ enum HeaderReadError {
 
 pub struct ProxyServer {
     pub listen_addr: SocketAddr,
+    /// Filled in once `start()` has bound the listener — the OS-assigned
+    /// port if `listen_addr` had port 0. None until `start()` returns.
+    bound_addr: Mutex<Option<SocketAddr>>,
     active_connections: Arc<AtomicU64>,
     total_requests: Arc<AtomicU64>,
     total_blocked: Arc<AtomicU64>,
@@ -58,6 +61,7 @@ impl ProxyServer {
     pub fn new(listen_addr: SocketAddr) -> Arc<Self> {
         Arc::new(Self {
             listen_addr,
+            bound_addr: Mutex::new(None),
             active_connections: Arc::new(AtomicU64::new(0)),
             total_requests: Arc::new(AtomicU64::new(0)),
             total_blocked: Arc::new(AtomicU64::new(0)),
@@ -70,6 +74,13 @@ impl ProxyServer {
         let listener = TcpListener::bind(self.listen_addr)
             .await
             .map_err(|e| anyhow::anyhow!("proxy: failed to bind {}: {e}", self.listen_addr))?;
+
+        // Capture the actually-bound address — when listen_addr's port is 0
+        // (the OS-assigned-port idiom used in tests), self.listen_addr alone
+        // does not reflect the real port.
+        if let Ok(addr) = listener.local_addr() {
+            *self.bound_addr.lock().await = Some(addr);
+        }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         *self.shutdown_tx.lock().await = Some(tx);
@@ -93,6 +104,12 @@ impl ProxyServer {
 
     pub fn proxy_url(&self) -> String {
         format!("http://{}", self.listen_addr)
+    }
+
+    /// Address the listener is actually bound to. None until `start()` has
+    /// completed. Use this in tests where `listen_addr.port() == 0`.
+    pub async fn local_addr(&self) -> Option<SocketAddr> {
+        *self.bound_addr.lock().await
     }
 
     /// Returns (active_connections, total_requests, total_blocked).
@@ -125,7 +142,9 @@ impl ProxyServer {
                 Ok(p) => p,
                 Err(_) => {
                     tokio::spawn(async move {
-                        let _ = write_error(stream, 503, "Service Unavailable", "Too many connections").await;
+                        let _ =
+                            write_error(stream, 503, "Service Unavailable", "Too many connections")
+                                .await;
                     });
                     continue;
                 }
@@ -199,8 +218,16 @@ async fn handle_connection(
         handle_connect(stream, &raw_uri, rule_engine, total_blocked).await;
     } else {
         let body_prefix = buf[header_end..].to_vec();
-        handle_http(stream, &method, &raw_uri, headers, body_prefix, rule_engine, total_blocked)
-            .await;
+        handle_http(
+            stream,
+            &method,
+            &raw_uri,
+            headers,
+            body_prefix,
+            rule_engine,
+            total_blocked,
+        )
+        .await;
     }
 }
 
@@ -233,11 +260,20 @@ async fn handle_connect(
 
     // Pre-SNI evaluation on the CONNECT hostname — allows sending 403 before 200.
     let prelim_result = rule_engine
-        .evaluate(&build_http_ctx("CONNECT", &host, "/", &HashMap::new(), port))
+        .evaluate(&build_http_ctx(
+            "CONNECT",
+            &host,
+            "/",
+            &HashMap::new(),
+            port,
+        ))
         .await;
 
     if prelim_result.decision == Decision::Block {
-        let reason = prelim_result.matched_rule.as_deref().unwrap_or("default policy");
+        let reason = prelim_result
+            .matched_rule
+            .as_deref()
+            .unwrap_or("default policy");
         warn!("BLOCK CONNECT {host}:{port} (pre-SNI) rule={reason}");
         total_blocked.fetch_add(1, Ordering::Relaxed);
         let body = format!("Blocked by outcall: {reason}");
@@ -277,10 +313,19 @@ async fn handle_connect(
     // Re-evaluate if SNI differs from CONNECT hostname.
     if eval_host != host {
         let sni_result = rule_engine
-            .evaluate(&build_http_ctx("CONNECT", &eval_host, "/", &HashMap::new(), port))
+            .evaluate(&build_http_ctx(
+                "CONNECT",
+                &eval_host,
+                "/",
+                &HashMap::new(),
+                port,
+            ))
             .await;
         if sni_result.decision == Decision::Block {
-            let reason = sni_result.matched_rule.as_deref().unwrap_or("default policy");
+            let reason = sni_result
+                .matched_rule
+                .as_deref()
+                .unwrap_or("default policy");
             warn!("BLOCK CONNECT {eval_host}:{port} (SNI) rule={reason}");
             total_blocked.fetch_add(1, Ordering::Relaxed);
             // 200 already sent — close the connection; client sees a reset.
@@ -391,7 +436,13 @@ async fn handle_http(
     req.push_str("Connection: close\r\n\r\n");
 
     if upstream.write_all(req.as_bytes()).await.is_err() {
-        let _ = write_error(client, 502, "Bad Gateway", "Failed to write request to upstream").await;
+        let _ = write_error(
+            client,
+            502,
+            "Bad Gateway",
+            "Failed to write request to upstream",
+        )
+        .await;
         return;
     }
 
@@ -457,7 +508,10 @@ async fn read_through_headers(
 ) -> std::result::Result<usize, HeaderReadError> {
     loop {
         let mut chunk = [0u8; 1024];
-        let n = stream.read(&mut chunk).await.map_err(|_| HeaderReadError::Io)?;
+        let n = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|_| HeaderReadError::Io)?;
         if n == 0 {
             return Err(HeaderReadError::Io);
         }
@@ -472,9 +526,7 @@ async fn read_through_headers(
 }
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
-    buf.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|p| p + 4)
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
 }
 
 /// Parse "METHOD URI HTTP/1.x\r\nHeader: Value\r\n…\r\n" from raw bytes.
@@ -623,12 +675,35 @@ mod tests {
 
     #[test]
     fn parse_host_port_with_port() {
-        assert_eq!(parse_host_port("example.com:8443"), Some(("example.com".into(), 8443)));
+        assert_eq!(
+            parse_host_port("example.com:8443"),
+            Some(("example.com".into(), 8443))
+        );
     }
 
     #[test]
     fn parse_host_port_no_port_defaults_443() {
-        assert_eq!(parse_host_port("example.com"), Some(("example.com".into(), 443)));
+        assert_eq!(
+            parse_host_port("example.com"),
+            Some(("example.com".into(), 443))
+        );
+    }
+
+    #[test]
+    fn parse_host_port_rejects_non_numeric_port() {
+        assert_eq!(parse_host_port("example.com:notaport"), None);
+    }
+
+    #[test]
+    fn parse_host_port_rejects_out_of_range_port() {
+        // 99999 > u16::MAX, parse fails.
+        assert_eq!(parse_host_port("example.com:99999"), None);
+    }
+
+    #[test]
+    fn parse_host_port_rejects_trailing_colon() {
+        // "host:" has an empty port string — parse() fails on empty input.
+        assert_eq!(parse_host_port("example.com:"), None);
     }
 
     #[test]
@@ -665,8 +740,11 @@ mod tests {
 
     #[test]
     fn find_double_crlf_present() {
+        // The 4-byte CRLF-CRLF terminator starts at byte 23 in this input;
+        // find_double_crlf returns the position right after it (where the
+        // body begins), which is 27.
         let buf = b"GET / HTTP/1.1\r\nHost: x\r\n\r\nbody";
-        assert_eq!(find_double_crlf(buf), Some(28));
+        assert_eq!(find_double_crlf(buf), Some(27));
     }
 
     #[test]
@@ -677,7 +755,8 @@ mod tests {
 
     #[test]
     fn parse_request_line_headers_basic() {
-        let raw = b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\n\r\n";
+        let raw =
+            b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\n\r\n";
         let r = parse_request_line_headers(raw);
         assert!(r.is_some());
         let (method, uri, hdrs) = r.unwrap();
@@ -694,5 +773,50 @@ mod tests {
         let (method, uri, _) = r.unwrap();
         assert_eq!(method, "CONNECT");
         assert_eq!(uri, "api.github.com:443");
+    }
+
+    // ─── negative paths ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_request_line_headers_rejects_non_utf8() {
+        // 0xff is never valid UTF-8 — the early `from_utf8` must reject this.
+        let raw: &[u8] = &[0xff, 0xfe, b'G', b'E', b'T'];
+        assert!(parse_request_line_headers(raw).is_none());
+    }
+
+    #[test]
+    fn parse_request_line_headers_rejects_empty_input() {
+        // Empty input parses as UTF-8, but has no method/uri tokens.
+        assert!(parse_request_line_headers(b"").is_none());
+    }
+
+    #[test]
+    fn parse_request_line_headers_rejects_request_line_without_uri() {
+        // Method present, URI missing — the second `parts.next()?` returns None.
+        assert!(parse_request_line_headers(b"GET\r\n\r\n").is_none());
+    }
+
+    #[test]
+    fn parse_request_line_headers_keeps_empty_value_headers() {
+        // `X-Empty:` with no value is still a valid header line — should appear
+        // in the output with an empty value, not be dropped.
+        let raw = b"GET / HTTP/1.1\r\nX-Empty:\r\nHost: x\r\n\r\n";
+        let (_, _, hdrs) = parse_request_line_headers(raw).expect("parse");
+        let empty = hdrs
+            .iter()
+            .find(|(k, _)| k == "X-Empty")
+            .expect("X-Empty header preserved");
+        assert_eq!(empty.1, "");
+    }
+
+    #[test]
+    fn parse_request_line_headers_silently_skips_malformed_headers() {
+        // A header line without a colon is currently dropped silently. Lock in
+        // that behaviour — surfacing it as an error would be a breaking change
+        // that we'd want to make deliberately.
+        let raw = b"GET / HTTP/1.1\r\nNoColonHere\r\nHost: x\r\n\r\n";
+        let (_, _, hdrs) = parse_request_line_headers(raw).expect("parse");
+        assert_eq!(hdrs.len(), 1);
+        assert_eq!(hdrs[0].0, "Host");
     }
 }

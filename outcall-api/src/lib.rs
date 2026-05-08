@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -574,4 +576,73 @@ pub struct AllowRuleResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlushDynamicResult {
     pub removed: usize,
+}
+
+// ── TLS Interception types (S011) ──
+
+/// Default leaf certificate TTL (24 hours).
+pub const INTERCEPT_LEAF_TTL_SECS_DEFAULT: u64 = 86_400;
+
+/// Default body buffer cap (1 MiB).
+pub const INTERCEPT_BODY_CAP_BYTES_DEFAULT: usize = 1_048_576;
+
+/// Maximum entries in the leaf certificate LRU cache.
+pub const INTERCEPT_LEAF_CACHE_MAX: usize = 1024;
+
+/// CA configuration for TLS interception — loaded via daemon flags.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaConfig {
+    pub cert_path: std::path::PathBuf,
+    pub key_path: std::path::PathBuf,
+}
+
+/// Egress mode per rule — determines how traffic is forwarded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressMode {
+    /// S006: SNI-only evaluation, tunnel bytes verbatim.
+    Proxy,
+    /// S009: nftables verdict, allow container to send directly.
+    DirectIp,
+    /// S011: TLS termination + decrypted L7 evaluation.
+    Intercept,
+}
+
+/// Per-rule interception configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterceptConfig {
+    /// Leaf certificate TTL in seconds.
+    pub leaf_ttl_secs: u64,
+    /// Maximum body bytes to buffer for matching.
+    pub body_cap_bytes: usize,
+    /// Whether to capture and match on request body.
+    pub match_body: bool,
+}
+
+/// Context available during an intercepted HTTPS request (S011-FR-012).
+#[derive(Debug, Clone)]
+pub struct InterceptedRequestContext {
+    pub hostname: String,
+    pub method: String,
+    pub path: String,
+    pub headers: std::collections::HashMap<String, String>,
+    pub body_size: usize,
+    /// Present when `match_body` is true and body is within `body_cap_bytes`.
+    pub body: Option<String>,
+}
+
+/// Response for GET /api/v1/ca/status (S011-IF-009).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaStatus {
+    pub loaded: bool,
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
+    pub subject_serial: Option<String>,
+    pub interception_enabled: bool,
+}
+
+/// Response for GET /api/v1/ca/bundle (S011-FR-018).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaBundleResult {
+    pub pem_bundle: String,
 }

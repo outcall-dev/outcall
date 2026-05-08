@@ -15,6 +15,8 @@
 //!   1  — action failed or was blocked by policy
 //!   5  — outcalld unreachable (fail-closed)
 
+#![forbid(unsafe_code)]
+
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -29,9 +31,8 @@ use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use outcall_api::{
-    ActionType, ApiResponse, CheckinData, PermissionRequest, Verdict,
-    DEFAULT_AGENT_SOCKET, DEFAULT_HEARTBEAT_INTERVAL_SECS, DEFAULT_REQUEST_TIMEOUT_SECS,
-    UNREACHABLE_EXIT_CODE,
+    ActionType, ApiResponse, CheckinData, DEFAULT_AGENT_SOCKET, DEFAULT_HEARTBEAT_INTERVAL_SECS,
+    DEFAULT_REQUEST_TIMEOUT_SECS, PermissionRequest, UNREACHABLE_EXIT_CODE, Verdict,
 };
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -75,11 +76,13 @@ async fn run() -> Result<ExitCode> {
         .context(format!("agent socket not reachable at {socket_path}"))?;
 
     // FR-003: check in with outcalld (empty body — identity derived from SO_PEERCRED)
-    let checkin: CheckinData =
-        tokio::time::timeout(req_timeout, post_json(socket_path, "/v1/checkin", &Empty {}, None))
-            .await
-            .context("check-in timed out — outcalld unreachable")?
-            .context("check-in rejected")?;
+    let checkin: CheckinData = tokio::time::timeout(
+        req_timeout,
+        post_json(socket_path, "/v1/checkin", &Empty {}, None),
+    )
+    .await
+    .context("check-in timed out — outcalld unreachable")?
+    .context("check-in rejected")?;
 
     let session_token = checkin.session_token.clone();
     info!(component = "shim", container_id = %checkin.container_id, "registered with outcalld");
@@ -100,7 +103,11 @@ async fn run() -> Result<ExitCode> {
     let perm_req = PermissionRequest {
         action_type,
         target: target.clone(),
-        metadata: if metadata.is_empty() { None } else { Some(metadata) },
+        metadata: if metadata.is_empty() {
+            None
+        } else {
+            Some(metadata)
+        },
     };
 
     let verdict_result = tokio::time::timeout(
@@ -226,12 +233,7 @@ struct Empty {}
 
 /// POST JSON to the agent API over the Unix domain socket.
 /// Returns the deserialized `data` field on success, or an error.
-async fn post_json<T, R>(
-    socket_path: &str,
-    path: &str,
-    body: &T,
-    auth: Option<&str>,
-) -> Result<R>
+async fn post_json<T, R>(socket_path: &str, path: &str, body: &T, auth: Option<&str>) -> Result<R>
 where
     T: serde::Serialize,
     R: for<'de> serde::Deserialize<'de>,
@@ -240,10 +242,9 @@ where
         .await
         .with_context(|| format!("failed to connect to {socket_path}"))?;
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake(io)
-            .await
-            .context("HTTP handshake failed")?;
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        .await
+        .context("HTTP handshake failed")?;
 
     // Drive the connection in the background
     tokio::spawn(async move {
@@ -310,7 +311,12 @@ where
 ///   outcall <other> [args...]      → tool_exec
 fn parse_invocation(
     args: &[String],
-) -> (ActionType, String, HashMap<String, String>, Option<Vec<String>>) {
+) -> (
+    ActionType,
+    String,
+    HashMap<String, String>,
+    Option<Vec<String>>,
+) {
     debug_assert!(!args.is_empty(), "parse_invocation called with empty args");
 
     let verb = args[0].as_str();

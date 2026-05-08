@@ -20,7 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use outcall_api::{ActiveRule, AllowRuleRequest, AllowRuleResult, FlushDynamicResult};
 
@@ -97,13 +97,7 @@ impl DynamicRuleManager {
         let handle = {
             // Serialize all nftables operations (FR-008).
             let _lock = self.state.lock().await;
-            nft_insert(
-                &req.src_ip,
-                &dst_ip,
-                req.protocol.as_deref(),
-                req.port,
-            )
-            .await?
+            nft_insert(&req.src_ip, &dst_ip, req.protocol.as_deref(), req.port).await?
         };
 
         // Record the rule in memory (outside the nft-critical lock is fine —
@@ -118,11 +112,7 @@ impl DynamicRuleManager {
             nft_handle: handle,
             inserted_at: now_iso8601(),
         };
-        state
-            .rules
-            .entry(req.container)
-            .or_default()
-            .push(record);
+        state.rules.entry(req.container).or_default().push(record);
 
         Ok(AllowRuleResult { nft_handle: handle })
     }
@@ -182,7 +172,10 @@ impl DynamicRuleManager {
         for rules in state.rules.values() {
             for rule in rules {
                 if let Err(e) = nft_delete(rule.nft_handle).await {
-                    warn!(handle = rule.nft_handle, "flush: failed to delete nft rule: {e}");
+                    warn!(
+                        handle = rule.nft_handle,
+                        "flush: failed to delete nft rule: {e}"
+                    );
                 } else {
                     removed += 1;
                 }
@@ -202,23 +195,21 @@ async fn container_event_loop(
 ) {
     loop {
         match rx.recv().await {
-            Ok(ev) => {
-                match ev.kind {
-                    ContainerEventKind::Die
-                    | ContainerEventKind::Oom
-                    | ContainerEventKind::Kill
-                    | ContainerEventKind::Destroy => {
-                        let removed = mgr.remove_container_rules(&ev.container_name).await;
-                        if removed > 0 {
-                            info!(
-                                container = %ev.container_name,
-                                removed,
-                                "cleaned up dynamic rules on container death"
-                            );
-                        }
+            Ok(ev) => match ev.kind {
+                ContainerEventKind::Die
+                | ContainerEventKind::Oom
+                | ContainerEventKind::Kill
+                | ContainerEventKind::Destroy => {
+                    let removed = mgr.remove_container_rules(&ev.container_name).await;
+                    if removed > 0 {
+                        info!(
+                            container = %ev.container_name,
+                            removed,
+                            "cleaned up dynamic rules on container death"
+                        );
                     }
                 }
-            }
+            },
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 warn!(
                     "dynamic rule event receiver lagged by {n} messages — some container deaths may have been missed"
@@ -299,8 +290,7 @@ async fn nft_insert(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_nft_handle(&stdout)
-        .with_context(|| format!("could not parse nft handle from: {stdout}"))
+    parse_nft_handle(&stdout).with_context(|| format!("could not parse nft handle from: {stdout}"))
 }
 
 /// Delete a rule by its nftables handle.
@@ -378,9 +368,7 @@ async fn resolve_destination(destination: &str) -> Result<String> {
         }
     }
 
-    anyhow::bail!(
-        "no IP address found for \"{destination}\" — nftables requires an IP address"
-    )
+    anyhow::bail!("no IP address found for \"{destination}\" — nftables requires an IP address")
 }
 
 fn is_ip_or_cidr(s: &str) -> bool {
