@@ -118,7 +118,10 @@ jobs:
         uses: taiki-e/install-action@cargo-geiger
 
       - name: cargo geiger
-        run: cargo geiger --workspace --all-targets -- -D warnings
+        run: |
+          for pkg in outcalld outcall outcall-agent outcall-api; do
+            cargo geiger --package $pkg --all-targets -- -D warnings || exit 1
+          done
 
   deny:
     name: cargo deny (licenses + bans)
