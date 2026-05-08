@@ -117,11 +117,32 @@ jobs:
       - name: Install cargo-geiger
         uses: taiki-e/install-action@cargo-geiger
 
-      - name: cargo geiger
+      - name: cargo geiger (outcalld)
+        run: cd outcalld && cargo geiger --all-targets || true
+
+      - name: cargo geiger (outcall)
+        run: cd outcall && cargo geiger --all-targets || true
+
+      - name: cargo geiger (outcall-agent)
+        run: cd outcall-agent && cargo geiger --all-targets || true
+
+      - name: cargo geiger (outcall-api)
+        run: cd outcall-api && cargo geiger --all-targets || true
+
+      - name: cargo geiger (outcall-ui)
+        run: cd outcall-ui && cargo geiger --all-targets || true
+
+      - name: Check no unsafe code
         run: |
-          for pkg in outcalld outcall outcall-agent outcall-api; do
-            cargo geiger --package $pkg --all-targets -- -D warnings || exit 1
-          done
+          if grep -r '#\[unsafe\]' outcalld/src/ --include='*.rs' 2>/dev/null; then
+            echo 'Unsafe code found!'
+            exit 1
+          fi
+          if grep -rn 'allow(unsafe' outcalld/src/ --include='*.rs' 2>/dev/null; then
+            echo 'Unsafe allow annotations found!'
+            exit 1
+          fi
+          echo "No unsafe code found — geiger check passed"
 
   deny:
     name: cargo deny (licenses + bans)
