@@ -388,12 +388,14 @@ fn build_cel_context(ctx: &EvalContext) -> CelCtx {
     let dns = ctx.dns.as_ref().cloned().unwrap_or_default();
     let docker = ctx.docker.as_ref().cloned().unwrap_or_default();
     let run = ctx.run.as_ref().cloned().unwrap_or_default();
+    let agent = ctx.agent.as_ref().cloned().unwrap_or_default();
 
     let _ = cel.add_variable("network", network_value(&net));
     let _ = cel.add_variable("http", http_value(&http));
     let _ = cel.add_variable("dns", dns_value(&dns));
     let _ = cel.add_variable("docker", docker_value(&docker));
     let _ = cel.add_variable("run", run_value(&run));
+    let _ = cel.add_variable("agent", agent_value(&agent));
 
     cel
 }
@@ -469,6 +471,14 @@ fn run_value(r: &RunContext) -> Value {
 #[allow(dead_code)]
 fn str_list(v: &[String]) -> Vec<Value> {
     v.iter().map(|s| Value::from(s.as_str())).collect()
+}
+
+#[allow(dead_code)]
+fn agent_value(a: &outcall_api::AgentContext) -> Value {
+    use std::collections::HashMap;
+    let mut map = HashMap::new();
+    map.insert("name", Value::from(a.name.as_str()));
+    Value::from(map)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -651,6 +661,19 @@ rules:
         assert!(err.is_some());
     }
 
+    fn agent_ctx(name: &str, port: u16) -> EvalContext {
+        EvalContext {
+            agent: Some(outcall_api::AgentContext { name: name.to_string() }),
+            network: Some(NetworkContext {
+                ip: String::new(),
+                port,
+                protocol: "tcp".to_string(),
+                hostname: None,
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn definition_expansion() {
         let yaml = r#"
@@ -665,6 +688,41 @@ rules:
         let dir = tmp_rules_dir(yaml);
         let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
         let _ = engine; // loaded without error = expansion worked
+    }
+
+    #[tokio::test]
+    async fn evaluate_agent_name_matches() {
+        let yaml = r#"
+version: "1"
+rules:
+  - id: allow-db-admin
+    condition: 'agent.name == "db-agent" && network.port == 5432'
+    action: allow
+"#;
+        let dir = tmp_rules_dir(yaml);
+        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let ctx = agent_ctx("db-agent", 5432);
+        // S013-FR-005: agent.name is available as a CEL binding
+        let result = engine.evaluate(&ctx).await;
+        assert_eq!(result.decision, Decision::Allow);
+        assert_eq!(result.matched_rule.as_deref(), Some("allow-db-admin"));
+    }
+
+    #[tokio::test]
+    async fn evaluate_agent_name_no_match() {
+        let yaml = r#"
+version: "1"
+rules:
+  - id: allow-db-admin
+    condition: 'agent.name == "db-agent" && network.port == 5432'
+    action: allow
+"#;
+        let dir = tmp_rules_dir(yaml);
+        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let ctx = agent_ctx("web-agent", 5432);
+        let result = engine.evaluate(&ctx).await;
+        assert_eq!(result.decision, Decision::Block);
+        assert!(result.matched_rule.is_none());
     }
 
     #[test]
