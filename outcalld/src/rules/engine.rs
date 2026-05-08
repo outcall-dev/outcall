@@ -663,7 +663,9 @@ rules:
 
     fn agent_ctx(name: &str, port: u16) -> EvalContext {
         EvalContext {
-            agent: Some(outcall_api::AgentContext { name: name.to_string() }),
+            agent: Some(outcall_api::AgentContext {
+                name: name.to_string(),
+            }),
             network: Some(NetworkContext {
                 ip: String::new(),
                 port,
