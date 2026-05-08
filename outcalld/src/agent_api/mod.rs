@@ -19,8 +19,9 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use outcall_api::{
-    ActionType, AgentRuleSubmitRequest, ApiResponse, CheckinData, Decision, EvalContext,
-    NetworkContext, PermissionRequest, RuleRequestResponse, RuleRequestStatus, RunContext, Verdict,
+    ActionType, AgentContext, AgentRuleSubmitRequest, ApiResponse, CheckinData, Decision,
+    EvalContext, NetworkContext, PermissionRequest, RuleRequestResponse, RuleRequestStatus,
+    RunContext, Verdict,
 };
 
 use crate::docker::DockerManager;
@@ -357,7 +358,7 @@ async fn permissions_check(
         }
     }
 
-    let eval_ctx = build_eval_context(&req);
+    let eval_ctx = build_eval_context(&req, &container_id);
 
     // FR-015: server-side timeout — fail closed on expiry.
     let verdict =
@@ -494,10 +495,36 @@ async fn rule_request_status(
 
 // ── Context builder ───────────────────────────────────────────────────────────
 
-fn build_eval_context(req: &PermissionRequest) -> EvalContext {
+use regex::Regex;
+
+/// Derives the agent name from a container name by stripping the trailing `-N`
+/// replica suffix. Falls back to the full name if no numeric suffix is found.
+fn derive_agent_name(container_name: &str) -> String {
+    static RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"-[0-9]+$").unwrap());
+    RE.replace(container_name, "").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_derive_agent_name() {
+        assert_eq!(derive_agent_name("foobar-1"), "foobar");
+        assert_eq!(derive_agent_name("foobar-12"), "foobar");
+        assert_eq!(derive_agent_name("my-agent-12"), "my-agent");
+        assert_eq!(derive_agent_name("standalone"), "standalone");
+        assert_eq!(derive_agent_name("agent-0"), "agent");
+    }
+}
+
+fn build_eval_context(req: &PermissionRequest, container_id: &str) -> EvalContext {
+    let agent_name = derive_agent_name(container_id);
+
     let meta: HashMap<String, String> = req.metadata.clone().unwrap_or_default();
 
-    match req.action_type {
+    let mut ctx = match req.action_type {
         ActionType::NetworkCall => {
             let (hostname, port) = parse_host_port(&req.target);
             EvalContext {
@@ -537,7 +564,12 @@ fn build_eval_context(req: &PermissionRequest) -> EvalContext {
             }),
             ..Default::default()
         },
-    }
+    };
+
+    // S013-FR-002: Add agent identity to EvalContext
+    ctx.agent = Some(AgentContext { name: agent_name });
+
+    ctx
 }
 
 fn parse_host_port(target: &str) -> (String, u16) {
@@ -644,7 +676,7 @@ mod tests {
             target: "evil.com:443".to_string(),
             metadata: None,
         };
-        let ctx = build_eval_context(&req);
+        let ctx = build_eval_context(&req, "test-agent-1");
         let net = ctx.network.unwrap();
         assert_eq!(net.hostname, Some("evil.com".to_string()));
         assert_eq!(net.port, 443);
@@ -657,9 +689,22 @@ mod tests {
             target: "rm -rf /".to_string(),
             metadata: None,
         };
-        let ctx = build_eval_context(&req);
+        let ctx = build_eval_context(&req, "test-agent-1");
         let run = ctx.run.unwrap();
         assert_eq!(run.tool, "sh");
         assert_eq!(run.args, vec!["-c".to_string(), "rm -rf /".to_string()]);
+    }
+
+    #[test]
+    fn build_eval_context_agent_name() {
+        // S013-FR-003: agent name is derived from container name
+        let req = PermissionRequest {
+            action_type: ActionType::NetworkCall,
+            target: "example.com:443".to_string(),
+            metadata: None,
+        };
+        let ctx = build_eval_context(&req, "my-agent-12");
+        let agent = ctx.agent.unwrap();
+        assert_eq!(agent.name, "my-agent");
     }
 }

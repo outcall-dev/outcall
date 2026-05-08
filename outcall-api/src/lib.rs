@@ -152,6 +152,13 @@ pub struct RunContext {
     pub context: HashMap<String, serde_json::Value>,
 }
 
+/// Agent identity resolved from SO_PEERCRED + container lookup.
+/// None when resolution fails (non-Unix socket, container not found).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentContext {
+    pub name: String,
+}
+
 /// Full CEL evaluation context sent to the evaluate endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EvalContext {
@@ -160,6 +167,7 @@ pub struct EvalContext {
     pub dns: Option<DnsContext>,
     pub docker: Option<DockerContext>,
     pub run: Option<RunContext>,
+    pub agent: Option<AgentContext>,
 }
 
 /// Request body for POST /api/v1/rule/evaluate.
