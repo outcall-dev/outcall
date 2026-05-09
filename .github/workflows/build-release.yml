@@ -46,9 +46,14 @@ jobs:
             gcc-multilib \
             g++-multilib \
             libc6-dev-amd64-cross \
+            libc6-dev-arm64-cross \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
             libc6-dev-arm64-cross
 
       - name: Build release
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_GCC: aarch64-linux-gnu-gcc
         run: |
           cargo fetch --locked
           cargo build --release --workspace --locked --target ${{ matrix.target }}
