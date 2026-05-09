@@ -60,6 +60,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: rustfmt, clippy
 
       - name: Install cross compilation support (Linux)
         if: matrix.runner == 'ubuntu-latest'
