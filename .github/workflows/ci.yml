@@ -26,6 +26,9 @@ jobs:
         with:
           workspaces: target
 
+      - name: Clear stale hickory artifacts
+        run: rm -rf ~/.cargo/registry/cache ~/.cargo/registry/src
+
       - name: cargo check
         run: cargo check --workspace --all-targets --locked
 
