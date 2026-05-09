@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use hickory_proto::op::{Header, ResponseCode};
+use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::SOA;
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::TokioResolver;
@@ -93,21 +93,31 @@ impl RequestHandler for DnsHandler {
     async fn handle_request<R: ResponseHandler, T: Time>(
         &self,
         request: &Request,
-        response_handle: R,
+        mut response_handle: R,
     ) -> ResponseInfo {
-        let query = request.query();
+        let request_info = match request.request_info() {
+            Ok(info) => info,
+            Err(e) => {
+                warn!(error = %e, "invalid DNS request");
+                let mut metadata = Metadata::new(0, MessageType::Response, OpCode::Query);
+                metadata.response_code = ResponseCode::ServFail;
+                return ResponseInfo::from(Header { metadata, counts: HeaderCounts::default() });
+            }
+        };
+
+        let query = request_info.query;
         let raw_name = query.name().to_string();
         let hostname = raw_name.trim_end_matches('.').to_lowercase();
         let record_type = query.query_type();
         let record_type_str = record_type_to_str(record_type);
-        let src = request.src();
+        let src = request_info.src;
 
         self.counters.queries_total.fetch_add(1, Ordering::Relaxed);
 
         // mDNS (.local) → NXDOMAIN without rule evaluation (FR-033)
         if hostname.ends_with(".local") {
             debug!(%hostname, "mDNS query → NXDOMAIN (no rule evaluation)");
-            return self.send_nxdomain(request, &mut response_handle).await;
+            return self.send_nxdomain(request, response_handle).await;
         }
 
         // Build evaluation context
@@ -150,7 +160,7 @@ impl RequestHandler for DnsHandler {
                     decision = "block", rule = rule_id, from_cache = false,
                     "DNS query blocked"
                 );
-                self.send_nxdomain(request, &mut response_handle).await
+                self.send_nxdomain(request, response_handle).await
             }
 
             Decision::Allow => {
@@ -169,7 +179,7 @@ impl RequestHandler for DnsHandler {
                             let remaining = entry.effective_ttl.saturating_sub(elapsed);
                             let mut records = entry.records.clone();
                             for r in &mut records {
-                                r.set_ttl(remaining);
+                                r.ttl = remaining;
                             }
                             Some(records)
                         } else {
@@ -188,7 +198,7 @@ impl RequestHandler for DnsHandler {
                         "DNS query allowed (cached)"
                     );
                     return self
-                        .send_answer(request, &records, &mut response_handle)
+                        .send_answer(request, &records, response_handle)
                         .await;
                 }
 
@@ -199,13 +209,13 @@ impl RequestHandler for DnsHandler {
                 match self.resolver.lookup(hostname.as_str(), record_type).await {
                     Ok(lookup) => {
                         let upstream_ms = upstream_start.elapsed().as_millis();
-                        let records: Vec<Record> = lookup.records().to_vec();
+                        let records: Vec<Record> = lookup.answers().to_vec();
 
                         check_rebinding(&hostname, &records);
 
                         // Cache the result
                         if !records.is_empty() {
-                            let min_ttl = records.iter().map(|r| r.ttl()).min().unwrap_or(60);
+                            let min_ttl = records.iter().map(|r| r.ttl).min().unwrap_or(60);
                             let effective_ttl = min_ttl.min(DNS_CACHE_MAX_TTL_SECS);
                             let entry = CacheEntry {
                                 records: records.clone(),
@@ -234,12 +244,12 @@ impl RequestHandler for DnsHandler {
                         self.apply_egress_policy(src, &hostname, &matched_egress, &records)
                             .await;
 
-                        self.send_answer(request, &records, &mut response_handle)
+                        self.send_answer(request, &records, response_handle)
                             .await
                     }
                     Err(e) => {
                         warn!(%hostname, error = %e, "upstream DNS resolution failed → SERVFAIL");
-                        self.send_servfail(request, &mut response_handle).await
+                        self.send_servfail(request, response_handle).await
                     }
                 }
             }
@@ -320,19 +330,20 @@ impl DnsHandler {
         }
     }
 
-    async fn send_nxdomain<R: ResponseHandler>(
+async fn send_nxdomain<R: ResponseHandler>(
         &self,
         request: &Request,
-        response_handle: &mut R,
+        mut response_handle: R,
     ) -> ResponseInfo {
         let soa = soa_record();
         let builder = MessageResponseBuilder::from_message_request(request);
-        let mut header = Header::response_from_request(request.header());
-        header.set_response_code(ResponseCode::NXDomain);
-        header.set_authoritative(true);
-        header.set_recursion_available(true);
+        let mut metadata = Metadata::response_from_request(&(&*request).metadata);
+        metadata.message_type = MessageType::Response;
+        metadata.response_code = ResponseCode::NXDomain;
+        metadata.authoritative = true;
+        metadata.recursion_available = true;
         let resp = builder.build(
-            header,
+            metadata,
             std::iter::empty::<&Record>(),
             std::iter::empty::<&Record>(),
             std::iter::once(&soa),
@@ -341,43 +352,39 @@ impl DnsHandler {
         response_handle
             .send_response(resp)
             .await
-            .unwrap_or_else(|_| ResponseInfo::from(*request.header()))
+            .unwrap_or_else(|_| ResponseInfo::from(self.nxdomain_header(&(&*request).metadata)))
     }
 
     async fn send_servfail<R: ResponseHandler>(
         &self,
         request: &Request,
-        response_handle: &mut R,
+        mut response_handle: R,
     ) -> ResponseInfo {
         let builder = MessageResponseBuilder::from_message_request(request);
-        let mut header = Header::response_from_request(request.header());
-        header.set_response_code(ResponseCode::ServFail);
-        header.set_recursion_available(true);
-        let resp = builder.build(
-            header,
-            std::iter::empty::<&Record>(),
-            std::iter::empty::<&Record>(),
-            std::iter::empty::<&Record>(),
-            std::iter::empty::<&Record>(),
-        );
+        let mut metadata = Metadata::response_from_request(&(&*request).metadata);
+        metadata.message_type = MessageType::Response;
+        metadata.response_code = ResponseCode::ServFail;
+        metadata.recursion_available = true;
+        let resp = builder.build_no_records(metadata);
         response_handle
             .send_response(resp)
             .await
-            .unwrap_or_else(|_| ResponseInfo::from(*request.header()))
+            .unwrap_or_else(|_| ResponseInfo::from(self.servfail_header(&(&*request).metadata)))
     }
 
     async fn send_answer<R: ResponseHandler>(
         &self,
         request: &Request,
         records: &[Record],
-        response_handle: &mut R,
+        mut response_handle: R,
     ) -> ResponseInfo {
         let builder = MessageResponseBuilder::from_message_request(request);
-        let mut header = Header::response_from_request(request.header());
-        header.set_response_code(ResponseCode::NoError);
-        header.set_recursion_available(true);
+        let mut metadata = Metadata::response_from_request(&(&*request).metadata);
+        metadata.message_type = MessageType::Response;
+        metadata.response_code = ResponseCode::NoError;
+        metadata.recursion_available = true;
         let resp = builder.build(
-            header,
+            metadata,
             records.iter(),
             std::iter::empty::<&Record>(),
             std::iter::empty::<&Record>(),
@@ -386,11 +393,47 @@ impl DnsHandler {
         response_handle
             .send_response(resp)
             .await
-            .unwrap_or_else(|_| ResponseInfo::from(*request.header()))
+            .unwrap_or_else(|_| ResponseInfo::from(self.noerror_header(&(&*request).metadata)))
     }
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ── Response helpers ───────────────────────────────────────────────────────
+
+impl DnsHandler {
+    fn nxdomain_header(&self, original: &Metadata) -> Header {
+        let mut metadata = Metadata::response_from_request(original);
+        metadata.message_type = MessageType::Response;
+        metadata.response_code = ResponseCode::NXDomain;
+        metadata.authoritative = true;
+        metadata.recursion_available = true;
+        Header {
+            metadata,
+            counts: HeaderCounts::default(),
+        }
+    }
+
+    fn servfail_header(&self, original: &Metadata) -> Header {
+        let mut metadata = Metadata::response_from_request(original);
+        metadata.message_type = MessageType::Response;
+        metadata.response_code = ResponseCode::ServFail;
+        metadata.recursion_available = true;
+        Header {
+            metadata,
+            counts: HeaderCounts::default(),
+        }
+    }
+
+    fn noerror_header(&self, original: &Metadata) -> Header {
+        let mut metadata = Metadata::response_from_request(original);
+        metadata.message_type = MessageType::Response;
+        metadata.response_code = ResponseCode::NoError;
+        metadata.recursion_available = true;
+        Header {
+            metadata,
+            counts: HeaderCounts::default(),
+        }
+    }
+}
 
 fn soa_record() -> Record {
     let name = Name::from_str("outcall.invalid.").unwrap_or_else(|_| Name::root());
@@ -407,9 +450,9 @@ fn record_type_to_str(rt: RecordType) -> String {
 /// Warn on potential DNS rebinding (FR-034).
 fn check_rebinding(hostname: &str, records: &[Record]) {
     for r in records {
-        let maybe_addr: Option<IpAddr> = match r.data() {
-            Some(RData::A(ip)) => Some(IpAddr::V4(ip.0)),
-            Some(RData::AAAA(ip)) => Some(IpAddr::V6(ip.0)),
+        let maybe_addr: Option<IpAddr> = match &r.data {
+            RData::A(ip) => Some(IpAddr::V4(ip.0)),
+            RData::AAAA(ip) => Some(IpAddr::V6(ip.0)),
             _ => None,
         };
         if let Some(addr) = maybe_addr {
@@ -430,7 +473,7 @@ fn check_rebinding(hostname: &str, records: &[Record]) {
 fn extract_ipv4_destinations(records: &[Record]) -> Vec<String> {
     let mut out = Vec::new();
     for r in records {
-        if let Some(RData::A(ip)) = r.data() {
+        if let RData::A(ip) = &r.data {
             out.push(ip.0.to_string());
         }
     }
@@ -442,7 +485,7 @@ fn extract_ipv4_destinations(records: &[Record]) -> Vec<String> {
 fn extract_ipv6_destinations(records: &[Record]) -> Vec<String> {
     let mut out = Vec::new();
     for r in records {
-        if let Some(RData::AAAA(ip)) = r.data() {
+        if let RData::AAAA(ip) = &r.data {
             out.push(ip.0.to_string());
         }
     }
@@ -507,7 +550,7 @@ impl DnsServer {
 
         let mut server = Server::new(handler);
         server.register_socket(udp);
-        server.register_listener(tcp, Duration::from_secs(5));
+        server.register_listener(tcp, Duration::from_secs(5), 4096);
 
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         *self.shutdown_tx.lock().await = Some(tx);
@@ -618,7 +661,7 @@ fn build_resolver(upstreams: &[SocketAddr]) -> Result<TokioResolver> {
 
     let name_servers: Vec<NameServerConfig> = effective
         .iter()
-        .map(|addr| NameServerConfig::udp(*addr))
+        .map(|addr| NameServerConfig::udp(addr.ip()))
         .collect();
 
     let config = ResolverConfig::from_parts(None, vec![], name_servers);
@@ -627,7 +670,9 @@ fn build_resolver(upstreams: &[SocketAddr]) -> Result<TokioResolver> {
     opts.cache_size = 0; // We maintain our own cache
     opts.ndots = 0;
 
-    Ok(TokioResolver::builder_with_config(config, TokioRuntimeProvider::default()).build())
+    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .build()
+        .map_err(|e| anyhow::anyhow!("DNS resolver build failed: {}", e))
 }
 
 /// Parse nameserver lines from /etc/resolv.conf.
