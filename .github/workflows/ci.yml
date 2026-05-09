@@ -27,7 +27,7 @@ jobs:
           workspaces: target
 
       - name: cargo check
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --locked
 
   test:
     name: cargo test
@@ -46,7 +46,7 @@ jobs:
           workspaces: target
 
       - name: cargo test
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets --locked
 
   fmt:
     name: cargo fmt
@@ -79,7 +79,7 @@ jobs:
           workspaces: target
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   audit:
     name: cargo audit
