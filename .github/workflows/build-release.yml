@@ -61,6 +61,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install cross compilation support (Linux)
+        if: matrix.runner == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-multilib \
+            g++-multilib \
+            libc6-dev-amd64-cross \
+            libc6-dev-arm64-cross
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
