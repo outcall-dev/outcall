@@ -75,6 +75,7 @@ jobs:
 
       - name: Build release
         run: |
+          cargo fetch
           cargo build --release --workspace --target ${{ matrix.target }}
 
       - name: Package binaries
