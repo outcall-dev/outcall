@@ -62,6 +62,15 @@ jobs:
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
 
+      - name: Debug: verify Cargo.lock
+        run: |
+          echo "=== Git commit ==="
+          git rev-parse HEAD
+          echo "=== Cargo.lock hickory entries ==="
+          grep -A1 'name = "hickory' Cargo.lock
+          echo "=== hickory-server exact version ==="
+          grep 'name = "hickory-server"' -A2 Cargo.lock
+
       - name: Install cross compilation support (Linux)
         if: matrix.runner == 'ubuntu-latest'
         run: |
