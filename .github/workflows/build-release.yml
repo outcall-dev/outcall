@@ -7,38 +7,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  REGISTRY: ghcr.io
-  IMAGE_NAME: outcall-dev/outcall
 
 jobs:
-  create_release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      version: ${{ steps.tag.outputs.tag }}
-    steps:
-      - name: Extract tag
-        id: tag
-        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    needs: create_release
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -87,25 +62,13 @@ jobs:
           tar -czf release/${{ matrix.target }}.tar.gz -C release/${{ matrix.target }} .
           sha256sum release/${{ matrix.target }}.tar.gz > release/${{ matrix.target }}/SHA256SUMS.txt
 
-      - name: Upload release asset
-        uses: actions/upload-release-asset@v1
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/${{ matrix.target }}.tar.gz
+            release/${{ matrix.target }}/SHA256SUMS.txt
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create_release.outputs.upload_url }}
-          asset_path: release/${{ matrix.target }}.tar.gz
-          asset_name: outcall-${{ matrix.target }}.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload SHA256SUMS
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create_release.outputs.upload_url }}
-          asset_path: release/${{ matrix.target }}/SHA256SUMS.txt
-          asset_name: SHA256SUMS-${{ matrix.target }}.txt
-          asset_content_type: text/plain
-
-  # Container build removed — failures unrelated to code (CI environment issue)
-# Container can be built separately with: docker build -f Dockerfile.test .
