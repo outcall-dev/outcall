@@ -15,13 +15,14 @@ use async_trait::async_trait;
 use hickory_proto::op::{Header, ResponseCode};
 use hickory_proto::rr::rdata::SOA;
 use hickory_proto::rr::{Name, RData, Record, RecordType};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{
-    NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig, ResolverOpts,
+    ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts,
 };
-use hickory_server::authority::MessageResponseBuilder;
+use hickory_net::runtime::{RuntimeProvider, Time, TokioRuntimeProvider, TokioTime};
+use hickory_server::zone_handler::MessageResponseBuilder;
 use hickory_server::server::{
-    Request, RequestHandler, ResponseHandler, ResponseInfo, ServerFuture,
+    Request, RequestHandler, ResponseHandler, ResponseInfo, Server,
 };
 use lru::LruCache;
 use outcall_api::{
@@ -82,17 +83,17 @@ impl DnsCounters {
 struct DnsHandler {
     rule_engine: Arc<RuleEngine>,
     dynamic: Arc<DynamicRuleManager>,
-    resolver: TokioAsyncResolver,
+    resolver: TokioResolver,
     cache: Arc<Mutex<DnsLruCache>>,
     counters: Arc<DnsCounters>,
 }
 
 #[async_trait]
 impl RequestHandler for DnsHandler {
-    async fn handle_request<R: ResponseHandler>(
+    async fn handle_request<R: ResponseHandler, T: Time>(
         &self,
         request: &Request,
-        mut response_handle: R,
+        response_handle: R,
     ) -> ResponseInfo {
         let query = request.query();
         let raw_name = query.name().to_string();
@@ -504,7 +505,7 @@ impl DnsServer {
         *self.listen_addr.lock().await = udp.local_addr().expect("UDP local_addr");
         info!(addr = %udp.local_addr().expect("UDP local_addr"), "DNS filter started");
 
-        let mut server = ServerFuture::new(handler);
+        let mut server = Server::new(handler);
         server.register_socket(udp);
         server.register_listener(tcp, Duration::from_secs(5));
 
@@ -601,7 +602,7 @@ impl DnsServer {
 
 // ── Resolver construction ──────────────────────────────────────────────────
 
-fn build_resolver(upstreams: &[SocketAddr]) -> Result<TokioAsyncResolver> {
+fn build_resolver(upstreams: &[SocketAddr]) -> Result<TokioResolver> {
     let effective = if upstreams.is_empty() {
         let parsed = parse_resolv_conf();
         if parsed.is_empty() {
@@ -617,17 +618,16 @@ fn build_resolver(upstreams: &[SocketAddr]) -> Result<TokioAsyncResolver> {
 
     let name_servers: Vec<NameServerConfig> = effective
         .iter()
-        .map(|addr| NameServerConfig::new(*addr, Protocol::Udp))
+        .map(|addr| NameServerConfig::udp(*addr))
         .collect();
 
-    let config =
-        ResolverConfig::from_parts(None, vec![], NameServerConfigGroup::from(name_servers));
+    let config = ResolverConfig::from_parts(None, vec![], name_servers);
 
     let mut opts = ResolverOpts::default();
     opts.cache_size = 0; // We maintain our own cache
     opts.ndots = 0;
 
-    Ok(TokioAsyncResolver::tokio(config, opts))
+    Ok(TokioResolver::builder_with_config(config, TokioRuntimeProvider::default()).build())
 }
 
 /// Parse nameserver lines from /etc/resolv.conf.
