@@ -32,9 +32,9 @@ walkdir = "2"
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.21"
 futures = "0.3"
-hickory-server = { version = "0.26", features = ["resolver"] }
-hickory-resolver = "0.26"
-hickory-proto = "0.26"
+hickory-server = { version = "0.26.0", features = ["resolver"] }
+hickory-resolver = "0.26.0"
+hickory-proto = "0.26.0"
 lru = "0.17"
 async-trait = "0.1"
 bollard = "0.18"
