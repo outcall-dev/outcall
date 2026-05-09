@@ -38,16 +38,14 @@ jobs:
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
 
-      - name: Install cross compilation support (Linux)
+      - name: Install cross
         if: matrix.runner == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-multilib g++-multilib libc6-dev-amd64-cross
+        run: cargo install cross
 
       - name: Build release
         run: |
           cargo fetch --locked
-          cargo build --release --workspace --locked --target ${{ matrix.target }}
+          cross build --release --workspace --locked --target ${{ matrix.target }}
 
       - name: Package binaries
         run: |
