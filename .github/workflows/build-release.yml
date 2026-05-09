@@ -75,9 +75,8 @@ jobs:
 
       - name: Build release
         run: |
-          cargo fetch
-          rm -rf ~/.cargo/registry/cache
-          cargo build --release --workspace --target ${{ matrix.target }}
+          cargo fetch --locked
+          cargo build --release --workspace --locked --target ${{ matrix.target }}
 
       - name: Package binaries
         run: |
