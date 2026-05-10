@@ -45,7 +45,7 @@ jobs:
       - name: Build release
         run: |
           cargo fetch --locked
-          cross build --release --workspace --locked --target ${{ matrix.target }}
+          ${{ matrix.runner == 'ubuntu-latest' && 'cross' || 'cargo' }} build --release --workspace --locked --target ${{ matrix.target }}
 
       - name: Package binaries
         run: |
