@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_boot;
+pub mod agent_config;
+
 use anyhow::Context;
 
 /// Parse a human-friendly memory string (e.g. "256m", "1g") to bytes.

@@ -115,7 +115,7 @@ fn rule_engine_from_yaml(yaml: &str) -> (tempfile::TempDir, Arc<RuleEngine>) {
 
 /// Spawn a ProxyServer on an ephemeral port; return the proxy and its address.
 async fn spawn_proxy(rules: Arc<RuleEngine>) -> (Arc<ProxyServer>, std::net::SocketAddr) {
-    let proxy = ProxyServer::new("127.0.0.1:0".parse().unwrap());
+    let proxy = ProxyServer::new("127.0.0.1:0".parse().unwrap(), None);
     proxy.start(rules).await.expect("proxy start");
     tokio::time::sleep(Duration::from_millis(50)).await;
     let addr = proxy.local_addr().await.expect("proxy bound addr");

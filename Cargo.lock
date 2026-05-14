@@ -1631,6 +1631,7 @@ dependencies = [
  "rcgen",
  "serde",
  "serde_json",
+ "serde_yaml",
  "time",
 ]
 

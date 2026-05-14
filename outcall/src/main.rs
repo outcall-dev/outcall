@@ -15,7 +15,7 @@ use outcall_api::{
 use serde::Deserialize;
 
 #[derive(Parser)]
-#[command(name = "outcall", about = "Outcall host CLI")]
+#[command(name = "outcall", about = "Outcall host CLI", version)]
 struct Cli {
     /// Path to the outcalld host socket
     #[arg(long, default_value = outcall_api::DEFAULT_HOST_SOCKET, global = true)]
@@ -47,6 +47,45 @@ enum Commands {
         #[command(subcommand)]
         action: ContainerAction,
     },
+    /// Boot an AI agent for the current project
+    Agent {
+        /// Custom agent name (default: <folder>-agent)
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Custom Docker image
+        #[arg(short, long)]
+        image: Option<String>,
+        /// Network to connect to
+        #[arg(short, long)]
+        network: Option<String>,
+        /// Workspace mount path inside container
+        #[arg(short, long)]
+        workspace: Option<String>,
+        /// Run in detached mode
+        #[arg(short, long)]
+        detach: bool,
+        /// Stop a running agent
+        #[arg(long)]
+        stop: bool,
+        /// List running agents
+        #[arg(long)]
+        list: bool,
+        /// Show agent logs
+        #[arg(long)]
+        logs: bool,
+        /// Follow log output (with --logs)
+        #[arg(short, long)]
+        follow: bool,
+        /// Initialize .outcall directory with template config
+        #[arg(long)]
+        init: bool,
+        /// Agent name for --stop or --logs
+        #[arg(long)]
+        agent_name: Option<String>,
+        /// Command to pass to agent entrypoint
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
     /// Manage outcall networks
     Network {
         #[command(subcommand)]
@@ -56,6 +95,80 @@ enum Commands {
     Ca {
         #[command(subcommand)]
         action: CaAction,
+    },
+    /// Start, stop, or inspect the outcalld daemon container
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+    /// Manage the rule engine (reload from disk, etc.)
+    Rules {
+        #[command(subcommand)]
+        action: RulesAction,
+    },
+    /// Open the operator dashboard in a browser via a local TCP→unix-socket bridge
+    Ui {
+        /// TCP port to bind on 127.0.0.1 (default: 8080)
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Don't try to launch a browser; just print the URL
+        #[arg(long)]
+        no_open: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum RulesAction {
+    /// Atomically reload all rule files from the rules.d directory
+    Reload,
+}
+
+#[derive(clap::Subcommand)]
+enum DaemonAction {
+    /// Start the outcalld daemon as a Docker container
+    Start {
+        /// Daemon container image (default: ghcr.io/outcall-dev/outcalld:latest)
+        #[arg(long)]
+        image: Option<String>,
+        /// Bridge interface name (default: outcall0)
+        #[arg(long)]
+        bridge: Option<String>,
+        /// Host directory holding rule YAML files (default: /etc/outcall/rules.d)
+        #[arg(long)]
+        rules_dir: Option<String>,
+        /// Container name (default: outcall-daemon)
+        #[arg(long)]
+        name: Option<String>,
+        /// Disable the in-daemon HTTP proxy (passes --no-proxy to outcalld)
+        #[arg(long)]
+        no_proxy: bool,
+        /// Build the image locally from the given Dockerfile before starting
+        #[arg(long)]
+        build_from: Option<String>,
+    },
+    /// Stop and remove the daemon container
+    Stop {
+        /// Container name (default: outcall-daemon)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Show whether the daemon container is running
+    Status {
+        /// Container name (default: outcall-daemon)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Tail the daemon container's stderr/stdout (`docker logs`)
+    Logs {
+        /// Container name (default: outcall-daemon)
+        #[arg(long)]
+        name: Option<String>,
+        /// Follow log output (Ctrl-C to stop)
+        #[arg(short, long)]
+        follow: bool,
+        /// Show only the last N lines
+        #[arg(long, default_value_t = 200)]
+        tail: usize,
     },
 }
 
@@ -230,6 +343,53 @@ fn main() -> Result<()> {
             }
             ContainerAction::Pull { image } => cmd_container_pull(&cli.socket, &image),
         },
+        Commands::Agent {
+            name,
+            image,
+            network,
+            workspace,
+            detach,
+            stop,
+            list,
+            logs,
+            follow,
+            init,
+            agent_name,
+            args,
+        } => {
+            if init {
+                let project_dir = std::env::current_dir()?;
+                let _ = outcall::agent_boot::init_outcall(&project_dir)?;
+                return Ok(());
+            }
+            
+            if list {
+                return outcall::agent_boot::list_agents();
+            }
+            
+            if stop {
+                let default_name = outcall::agent_boot::auto_detect_name();
+                let name = agent_name.as_deref().unwrap_or(&default_name);
+                return outcall::agent_boot::stop_agent(name);
+            }
+            
+            if logs {
+                let default_name = outcall::agent_boot::auto_detect_name();
+                let name = agent_name.as_deref().unwrap_or(&default_name);
+                return outcall::agent_boot::agent_logs(name, follow);
+            }
+            
+            // Boot agent
+            let project_dir = std::env::current_dir()?;
+            let flags = outcall::agent_config::AgentCliFlags {
+                image,
+                name,
+                network,
+                workspace,
+                detach,
+            };
+            outcall::agent_boot::boot_agent(&project_dir, flags, args)
+        }
         Commands::Network { action } => match action {
             NetworkAction::Create {
                 name,
@@ -245,7 +405,131 @@ fn main() -> Result<()> {
             CaAction::Bundle => cmd_ca_bundle(&cli.socket),
             CaAction::Status => cmd_ca_status(&cli.socket),
         },
+        Commands::Daemon { action } => match action {
+            DaemonAction::Start {
+                image,
+                bridge,
+                rules_dir,
+                name,
+                no_proxy,
+                build_from,
+            } => cmd_daemon_start(image, bridge, rules_dir, name, no_proxy, build_from),
+            DaemonAction::Stop { name } => cmd_daemon_stop(name),
+            DaemonAction::Status { name } => cmd_daemon_status(name),
+            DaemonAction::Logs { name, follow, tail } => cmd_daemon_logs(name, follow, tail),
+        },
+        Commands::Rules { action } => match action {
+            RulesAction::Reload => cmd_rules_reload(&cli.socket),
+        },
+        Commands::Ui { port, no_open } => cmd_ui(&cli.socket, port, !no_open),
     }
+}
+
+// ── UI command — local TCP → unix-socket bridge for the dashboard ──────────
+//
+// The host API is served on a Unix domain socket; browsers can't open Unix
+// sockets directly. `outcall ui` listens on 127.0.0.1:<port> and forwards each
+// connection into the daemon's host socket, byte-for-byte. Equivalent to:
+//   socat TCP-LISTEN:8080,reuseaddr,fork UNIX-CONNECT:/run/outcall/host.sock
+//
+// One OS thread per connection. Fine for a single-operator dashboard;
+// blocking I/O keeps the CLI free of an async runtime dependency.
+
+fn cmd_ui(socket: &str, port: u16, auto_open: bool) -> Result<()> {
+    use std::net::TcpListener;
+
+    let socket_path = std::path::PathBuf::from(socket);
+    if !socket_path.exists() {
+        anyhow::bail!(
+            "host socket not found at {socket}. Is the daemon running? Try `outcall daemon status`."
+        );
+    }
+
+    let bind = format!("127.0.0.1:{port}");
+    let listener = TcpListener::bind(&bind)
+        .with_context(|| format!("failed to bind {bind}; pick another port with --port"))?;
+
+    let url = format!("http://127.0.0.1:{port}/ui/");
+    println!("Dashboard available at: {url}");
+    println!("Bridging 127.0.0.1:{port} → {socket}");
+    println!("Press Ctrl-C to stop.");
+
+    if auto_open {
+        let _ = open_in_browser(&url);
+    }
+
+    for stream in listener.incoming() {
+        let stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("accept error: {e}");
+                continue;
+            }
+        };
+        let target = socket_path.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = bridge_connection(stream, &target) {
+                eprintln!("bridge error: {e}");
+            }
+        });
+    }
+    Ok(())
+}
+
+fn bridge_connection(tcp: std::net::TcpStream, socket_path: &std::path::Path) -> Result<()> {
+    use std::io;
+    use std::net::Shutdown;
+
+    let unix = std::os::unix::net::UnixStream::connect(socket_path)
+        .context("failed to connect to host socket")?;
+
+    let tcp_clone = tcp.try_clone()?;
+    let unix_clone = unix.try_clone()?;
+
+    let upstream = std::thread::spawn(move || {
+        let mut r = tcp_clone;
+        let mut w = unix_clone;
+        let _ = io::copy(&mut r, &mut w);
+        let _ = w.shutdown(Shutdown::Write);
+    });
+
+    let mut r = unix;
+    let mut w = tcp;
+    let _ = io::copy(&mut r, &mut w);
+    let _ = w.shutdown(Shutdown::Write);
+    let _ = upstream.join();
+    Ok(())
+}
+
+fn open_in_browser(url: &str) -> Result<()> {
+    use std::process::Command;
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    Command::new(opener).arg(url).spawn()?;
+    Ok(())
+}
+
+fn cmd_rules_reload(socket: &str) -> Result<()> {
+    let body = http_post(socket, "/api/v1/rules/reload")?;
+    let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
+    if !resp.success {
+        anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
+    }
+    let result: outcall_api::ReloadResult =
+        serde_json::from_value(resp.data.context("no data")?)?;
+    println!(
+        "Reloaded {} rule(s) from {} file(s).",
+        result.rules_loaded, result.files_loaded
+    );
+    for w in &result.warnings {
+        println!("  warning: {w}");
+    }
+    Ok(())
 }
 
 // ── Bridge commands ────────────────────────────────────────────────────────
@@ -875,6 +1159,153 @@ fn cmd_ca_status(socket: &str) -> Result<()> {
         } else {
             "disabled (no CA)"
         }
+    );
+    Ok(())
+}
+
+// ── Daemon commands ────────────────────────────────────────────────────────
+//
+// These shell out to `docker` to manage the outcalld daemon container.
+// Required because outcalld needs Linux netfilter (NET_ADMIN) to function;
+// running it in Docker is the supported install path on macOS hosts and the
+// recommended isolation boundary on Linux hosts.
+
+const DEFAULT_DAEMON_NAME: &str = "outcall-daemon";
+const DEFAULT_DAEMON_IMAGE: &str = "ghcr.io/outcall-dev/outcalld:latest";
+
+fn cmd_daemon_start(
+    image: Option<String>,
+    bridge: Option<String>,
+    rules_dir: Option<String>,
+    name: Option<String>,
+    no_proxy: bool,
+    build_from: Option<String>,
+) -> Result<()> {
+    use std::process::Command;
+
+    let name = name.unwrap_or_else(|| DEFAULT_DAEMON_NAME.to_string());
+    let image = image.unwrap_or_else(|| DEFAULT_DAEMON_IMAGE.to_string());
+    let bridge = bridge.unwrap_or_else(|| outcall_api::DEFAULT_BRIDGE_NAME.to_string());
+    let rules_dir = rules_dir.unwrap_or_else(|| "/etc/outcall/rules.d".to_string());
+
+    if let Some(dockerfile) = build_from {
+        println!("Building image {image} from {dockerfile}…");
+        let status = Command::new("docker")
+            .args(["build", "-f", &dockerfile, "-t", &image, "."])
+            .status()
+            .context("failed to invoke docker build")?;
+        if !status.success() {
+            anyhow::bail!("docker build failed (exit {:?})", status.code());
+        }
+    }
+
+    // Idempotent: remove any prior container of the same name.
+    let _ = Command::new("docker")
+        .args(["rm", "-f", &name])
+        .output();
+
+    // The daemon binds its Unix sockets inside the container at /run/outcall/.
+    // Bind-mounting the host's /run/outcall makes those sockets reachable
+    // from host-installed tools (e.g. brew-installed `outcall`, `outcall ui`,
+    // anything calling DEFAULT_HOST_SOCKET). The directory must exist on
+    // the host before docker run, so we create it idempotently.
+    let socket_dir = "/run/outcall";
+    if let Err(e) = std::fs::create_dir_all(socket_dir) {
+        // Non-fatal warning: on macOS the dir is created inside the Docker
+        // VM, not on macOS itself, and the host CLI talks via docker exec.
+        eprintln!("note: could not create {socket_dir} on host ({e}); host CLI may need `docker exec {name}` to reach the socket");
+    }
+
+    let mut args: Vec<String> = vec![
+        "run".into(), "-d".into(), "--name".into(), name.clone(),
+        "--network".into(), "host".into(),
+        "--cap-add".into(), "NET_ADMIN".into(),
+        "--cap-add".into(), "SYS_ADMIN".into(),
+        "-v".into(), "/var/run/docker.sock:/var/run/docker.sock".into(),
+        "-v".into(), format!("{socket_dir}:{socket_dir}"),
+        "-v".into(), format!("{rules_dir}:/etc/outcall/rules.d:ro"),
+        "--entrypoint".into(), "outcalld".into(),
+        image.clone(),
+        "--bridge".into(), bridge.clone(),
+    ];
+    if no_proxy {
+        args.push("--no-proxy".into());
+    }
+
+    let output = Command::new("docker")
+        .args(&args)
+        .output()
+        .context("failed to invoke docker run; is Docker installed and running?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("docker run failed: {}", stderr.trim());
+    }
+
+    let cid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    println!("Daemon \"{name}\" started ({}, image={image}, bridge={bridge}).",
+        cid.chars().take(12).collect::<String>());
+    Ok(())
+}
+
+fn cmd_daemon_stop(name: Option<String>) -> Result<()> {
+    use std::process::Command;
+    let name = name.unwrap_or_else(|| DEFAULT_DAEMON_NAME.to_string());
+    let output = Command::new("docker")
+        .args(["rm", "-f", &name])
+        .output()
+        .context("failed to invoke docker rm")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("No such container") {
+            println!("Daemon \"{name}\" was not running.");
+            return Ok(());
+        }
+        anyhow::bail!("docker rm failed: {}", stderr.trim());
+    }
+    println!("Daemon \"{name}\" stopped.");
+    Ok(())
+}
+
+fn cmd_daemon_logs(name: Option<String>, follow: bool, tail: usize) -> Result<()> {
+    use std::process::Command;
+    let name = name.unwrap_or_else(|| DEFAULT_DAEMON_NAME.to_string());
+    let mut args: Vec<String> = vec!["logs".into(), "--tail".into(), tail.to_string()];
+    if follow {
+        args.push("-f".into());
+    }
+    args.push(name.clone());
+    let status = Command::new("docker")
+        .args(&args)
+        .status()
+        .context("failed to invoke docker logs")?;
+    if !status.success() {
+        anyhow::bail!(
+            "docker logs failed (exit {:?}); is the container \"{name}\" running?",
+            status.code()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_daemon_status(name: Option<String>) -> Result<()> {
+    use std::process::Command;
+    let name = name.unwrap_or_else(|| DEFAULT_DAEMON_NAME.to_string());
+    let output = Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Running}}\t{{.Config.Image}}", &name])
+        .output()
+        .context("failed to invoke docker inspect")?;
+    if !output.status.success() {
+        println!("Daemon \"{name}\" is not running (no such container).");
+        return Ok(());
+    }
+    let line = String::from_utf8_lossy(&output.stdout);
+    let mut parts = line.trim().splitn(2, '\t');
+    let running = parts.next().unwrap_or("false");
+    let image = parts.next().unwrap_or("?");
+    println!(
+        "Daemon \"{name}\": {} (image={image})",
+        if running == "true" { "running" } else { "stopped" }
     );
     Ok(())
 }

@@ -21,7 +21,7 @@ use clap::Parser;
 use tracing::info;
 
 #[derive(Parser)]
-#[command(name = "outcalld", about = "Outcall security daemon")]
+#[command(name = "outcalld", about = "Outcall security daemon", version)]
 struct Args {
     /// Path for the host API unix socket
     #[arg(long, default_value = outcall_api::DEFAULT_HOST_SOCKET)]
@@ -180,11 +180,13 @@ async fn linux_main(args: Args) -> Result<()> {
         }
     }
 
-    // Initialize HTTP proxy (S006)
+    // Initialize HTTP proxy (S006). Pass DockerManager so the proxy can
+    // resolve peer-IP → container-name → agent.name for CEL rules (S013).
     let proxy_server = proxy::ProxyServer::new(
         args.proxy_addr
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid --proxy-addr: {e}"))?,
+        Some(docker_manager.clone()),
     );
     if !args.no_proxy {
         if let Err(e) = proxy_server.start(rule_engine.clone()).await {

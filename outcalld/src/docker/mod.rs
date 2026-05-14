@@ -496,10 +496,14 @@ impl DockerManager {
             let Some(id) = c.id else {
                 continue;
             };
-            let details = docker
+            // Skip containers we can't inspect (race with removal, transient
+            // Docker errors, etc.) rather than aborting the whole lookup.
+            let Ok(details) = docker
                 .inspect_container(&id, None::<bollard::container::InspectContainerOptions>)
                 .await
-                .ok()?;
+            else {
+                continue;
+            };
 
             let matched = details
                 .network_settings
@@ -683,7 +687,7 @@ fn format_unix_timestamp(secs: i64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     // Algorithm from https://howardhinnant.github.io/date_algorithms.html
     let z = days + 719_468;
     let era = z / 146_097;

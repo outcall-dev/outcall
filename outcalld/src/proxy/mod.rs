@@ -26,7 +26,11 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use crate::rules::RuleEngine;
-use outcall_api::{Decision, EvalContext, HttpContext, NetworkContext};
+use outcall_api::{AgentContext, Decision, EvalContext, HttpContext, NetworkContext};
+
+#[cfg(target_os = "linux")]
+use crate::agent_api::derive_agent_name;
+use crate::docker::DockerManager;
 
 const MAX_CONNECTIONS: usize = 1024;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
@@ -50,6 +54,11 @@ pub struct ProxyServer {
     /// Filled in once `start()` has bound the listener — the OS-assigned
     /// port if `listen_addr` had port 0. None until `start()` returns.
     bound_addr: Mutex<Option<SocketAddr>>,
+    /// Optional resolver for peer-IP → container-name lookups.
+    /// When present, the proxy populates `agent.name` on EvalContext so
+    /// CEL rules referencing `agent.name` can match real HTTP/HTTPS traffic
+    /// (S013). When None (typically in tests), `agent` is left unset.
+    docker: Option<Arc<DockerManager>>,
     active_connections: Arc<AtomicU64>,
     total_requests: Arc<AtomicU64>,
     total_blocked: Arc<AtomicU64>,
@@ -58,10 +67,11 @@ pub struct ProxyServer {
 }
 
 impl ProxyServer {
-    pub fn new(listen_addr: SocketAddr) -> Arc<Self> {
+    pub fn new(listen_addr: SocketAddr, docker: Option<Arc<DockerManager>>) -> Arc<Self> {
         Arc::new(Self {
             listen_addr,
             bound_addr: Mutex::new(None),
+            docker,
             active_connections: Arc::new(AtomicU64::new(0)),
             total_requests: Arc::new(AtomicU64::new(0)),
             total_blocked: Arc::new(AtomicU64::new(0)),
@@ -130,7 +140,7 @@ impl ProxyServer {
         let sem = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
         loop {
-            let (stream, _peer) = tokio::select! {
+            let (stream, peer) = tokio::select! {
                 result = listener.accept() => match result {
                     Ok(pair) => pair,
                     Err(e) => { error!("proxy accept error: {e}"); continue; }
@@ -156,9 +166,11 @@ impl ProxyServer {
             let rule_engine = rule_engine.clone();
             let active = self.active_connections.clone();
             let blocked = self.total_blocked.clone();
+            let docker = self.docker.clone();
 
             tokio::spawn(async move {
-                handle_connection(stream, rule_engine, &blocked).await;
+                let agent_name = resolve_agent_name(&docker, peer).await;
+                handle_connection(stream, rule_engine, &blocked, agent_name).await;
                 active.fetch_sub(1, Ordering::Relaxed);
                 drop(permit);
             });
@@ -178,10 +190,25 @@ impl ProxyServer {
 
 // ── Connection dispatcher ─────────────────────────────────────────────────
 
+/// Resolves a peer SocketAddr to an outcall-managed agent name (if any).
+/// Returns None when the docker manager is unavailable, the peer IP is not
+/// a managed container, or the lookup fails.
+#[cfg(target_os = "linux")]
+async fn resolve_agent_name(
+    docker: &Option<Arc<DockerManager>>,
+    peer: SocketAddr,
+) -> Option<String> {
+    let docker = docker.as_ref()?;
+    let ip = peer.ip().to_string();
+    let name = docker.lookup_container_name_by_ip(&ip).await?;
+    Some(derive_agent_name(&name))
+}
+
 async fn handle_connection(
     mut stream: TcpStream,
     rule_engine: Arc<RuleEngine>,
     total_blocked: &AtomicU64,
+    agent_name: Option<String>,
 ) {
     let mut buf = Vec::with_capacity(2048);
 
@@ -215,7 +242,7 @@ async fn handle_connection(
     }
 
     if method.eq_ignore_ascii_case("CONNECT") {
-        handle_connect(stream, &raw_uri, rule_engine, total_blocked).await;
+        handle_connect(stream, &raw_uri, rule_engine, total_blocked, agent_name).await;
     } else {
         let body_prefix = buf[header_end..].to_vec();
         handle_http(
@@ -226,6 +253,7 @@ async fn handle_connection(
             body_prefix,
             rule_engine,
             total_blocked,
+            agent_name,
         )
         .await;
     }
@@ -249,6 +277,7 @@ async fn handle_connect(
     host_port: &str,
     rule_engine: Arc<RuleEngine>,
     total_blocked: &AtomicU64,
+    agent_name: Option<String>,
 ) {
     let (host, port) = match parse_host_port(host_port) {
         Some(hp) => hp,
@@ -266,6 +295,7 @@ async fn handle_connect(
             "/",
             &HashMap::new(),
             port,
+            agent_name.as_deref(),
         ))
         .await;
 
@@ -319,6 +349,7 @@ async fn handle_connect(
                 "/",
                 &HashMap::new(),
                 port,
+                agent_name.as_deref(),
             ))
             .await;
         if sni_result.decision == Decision::Block {
@@ -365,6 +396,7 @@ async fn handle_http(
     body_prefix: Vec<u8>,
     rule_engine: Arc<RuleEngine>,
     total_blocked: &AtomicU64,
+    agent_name: Option<String>,
 ) {
     let (host, port, path) = match parse_absolute_uri(raw_uri) {
         Some(r) => r,
@@ -382,7 +414,14 @@ async fn handle_http(
     debug!("HTTP {method} {host}:{port}{path}");
 
     let result = rule_engine
-        .evaluate(&build_http_ctx(method, &host, &path, &header_map, port))
+        .evaluate(&build_http_ctx(
+            method,
+            &host,
+            &path,
+            &header_map,
+            port,
+            agent_name.as_deref(),
+        ))
         .await;
 
     if result.decision == Decision::Block {
@@ -465,6 +504,7 @@ fn build_http_ctx(
     path: &str,
     headers: &HashMap<String, String>,
     port: u16,
+    agent_name: Option<&str>,
 ) -> EvalContext {
     EvalContext {
         http: Some(HttpContext {
@@ -480,6 +520,7 @@ fn build_http_ctx(
             port,
             protocol: "tcp".into(),
         }),
+        agent: agent_name.map(|n| AgentContext { name: n.to_string() }),
         ..Default::default()
     }
 }
@@ -818,5 +859,40 @@ mod tests {
         let (_, _, hdrs) = parse_request_line_headers(raw).expect("parse");
         assert_eq!(hdrs.len(), 1);
         assert_eq!(hdrs[0].0, "Host");
+    }
+
+    // ── Agent context enrichment (S013 proxy path) ────────────────────────
+
+    #[test]
+    fn build_http_ctx_without_agent_leaves_agent_unset() {
+        let ctx = build_http_ctx("GET", "example.com", "/", &HashMap::new(), 443, None);
+        assert!(ctx.agent.is_none(), "agent should be unset when name is None");
+        assert!(ctx.http.is_some());
+        assert_eq!(ctx.http.as_ref().unwrap().method, "GET");
+        assert_eq!(ctx.http.as_ref().unwrap().host, "example.com");
+    }
+
+    #[test]
+    fn build_http_ctx_with_agent_populates_name() {
+        let ctx = build_http_ctx("POST", "api.example.com", "/v1", &HashMap::new(), 443, Some("ci"));
+        let agent = ctx.agent.expect("agent should be set");
+        assert_eq!(agent.name, "ci");
+        assert_eq!(ctx.http.as_ref().unwrap().method, "POST");
+    }
+
+    #[test]
+    fn build_http_ctx_uppercases_method() {
+        // Lock in the uppercase normalization — CEL rules use canonical
+        // uppercase methods (`http.method == "GET"`).
+        let ctx = build_http_ctx("get", "x.example", "/", &HashMap::new(), 443, None);
+        assert_eq!(ctx.http.unwrap().method, "GET");
+    }
+
+    #[tokio::test]
+    async fn resolve_agent_name_returns_none_when_docker_absent() {
+        // No DockerManager → no resolution. Verifies the Option<Arc<...>> path.
+        let docker: Option<Arc<DockerManager>> = None;
+        let peer: SocketAddr = "10.200.0.5:54321".parse().unwrap();
+        assert_eq!(resolve_agent_name(&docker, peer).await, None);
     }
 }

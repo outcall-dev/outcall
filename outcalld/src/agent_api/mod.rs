@@ -499,7 +499,7 @@ use regex::Regex;
 
 /// Derives the agent name from a container name by stripping the trailing `-N`
 /// replica suffix. Falls back to the full name if no numeric suffix is found.
-fn derive_agent_name(container_name: &str) -> String {
+pub(crate) fn derive_agent_name(container_name: &str) -> String {
     static RE: std::sync::LazyLock<Regex> =
         std::sync::LazyLock::new(|| Regex::new(r"-[0-9]+$").unwrap());
     RE.replace(container_name, "").to_string()

@@ -6,6 +6,9 @@ pub mod rules;
 pub mod bridge;
 
 #[cfg(target_os = "linux")]
+pub mod agent_api;
+
+#[cfg(target_os = "linux")]
 pub mod api;
 
 #[cfg(target_os = "linux")]

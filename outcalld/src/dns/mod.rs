@@ -93,7 +93,7 @@ impl RequestHandler for DnsHandler {
     async fn handle_request<R: ResponseHandler, T: Time>(
         &self,
         request: &Request,
-        mut response_handle: R,
+        response_handle: R,
     ) -> ResponseInfo {
         let request_info = match request.request_info() {
             Ok(info) => info,
