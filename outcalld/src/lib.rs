@@ -1,3 +1,5 @@
+//! Outcall daemon library (S000).
+
 #![forbid(unsafe_code)]
 
 pub mod rules;

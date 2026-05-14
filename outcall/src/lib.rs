@@ -1,4 +1,4 @@
-//! Library for outcall CLI — exposes helpers for use in integration tests.
+//! Library for outcall CLI — exposes helpers for use in integration tests (S000, S014).
 
 #![forbid(unsafe_code)]
 

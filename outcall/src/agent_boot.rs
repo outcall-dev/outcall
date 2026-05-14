@@ -4,7 +4,9 @@ use std::process::Command;
 
 use crate::agent_config::{AgentCliFlags, AgentConfig};
 
-/// Boot an agent container for the current project
+//! Agent boot command implementation (S014).
+
+/// Boot an agent container for the current project (S014-FR-001..008).
 pub fn boot_agent(
     project_dir: &Path,
     cli_flags: AgentCliFlags,

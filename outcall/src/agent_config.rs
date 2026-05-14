@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+//! Agent configuration parser for `.outcall/agent.yaml` (S014-FR-004).
+
 /// Agent configuration from `.outcall/agent.yaml`
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AgentConfig {

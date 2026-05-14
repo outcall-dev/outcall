@@ -1,3 +1,5 @@
+//! Rule engine modules (S003).
+
 pub mod engine;
 pub mod model;
 

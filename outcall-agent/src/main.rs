@@ -1,4 +1,4 @@
-//! `outcall-agent` — the agent shim for Outcall.
+//! `outcall-agent` — the agent shim for Outcall (S005).
 //!
 //! This binary is bind-mounted read-only into agent containers at
 //! `/usr/local/bin/outcall`. It gates every tool invocation and network
