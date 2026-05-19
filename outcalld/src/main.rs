@@ -228,6 +228,10 @@ async fn linux_main(args: Args) -> Result<()> {
         network::NetworkManager::new(bridge.clone(), &args.bridge, &args.subnet_block)?;
     info!(subnet_block = %args.subnet_block, "Network Manager initialized");
 
+    // Capture daemon effective UID here (binary crate — `unsafe` allowed)
+    // so the lib crate (`api.rs`) can remain `#![forbid(unsafe_code)]`.
+    let daemon_uid: u32 = unsafe { libc::geteuid() };
+
     let app = api::router(
         bridge.clone(),
         rule_engine.clone(),
@@ -237,6 +241,7 @@ async fn linux_main(args: Args) -> Result<()> {
         dynamic_mgr,
         network_mgr,
         ca_state,
+        daemon_uid,
     );
 
     // Prepare host socket.
