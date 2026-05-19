@@ -137,29 +137,52 @@ async fn linux_main(args: Args) -> Result<()> {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    // Initialize rule engine
-    let rule_engine = Arc::new(rules::RuleEngine::load(&args.rules_dir)?);
+    // Initialize CA for TLS interception (S011-FR-001) before rule engine so intercept
+    // rules can be validated at load time.
+    let ca_state = if args.ca_cert.is_some() && args.ca_key.is_some() {
+        let ca_config = outcall_api::CaConfig {
+            cert_path: std::path::PathBuf::from(args.ca_cert.as_ref().unwrap()),
+            key_path: std::path::PathBuf::from(args.ca_key.as_ref().unwrap()),
+        };
+        let pem_bundle = std::fs::read_to_string(&ca_config.cert_path).ok().map(|p| {
+            p.lines()
+                .skip(1)
+                .take_while(|l| !l.starts_with("-----"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        api::CaState {
+            config: Some(ca_config),
+            interception_enabled: true,
+            pem_bundle,
+        }
+    } else {
+        api::CaState::default()
+    };
+
+    // Initialize rule engine (validates intercept rules against CA state at load time)
+    let intercept_enabled = args.ca_cert.is_some() && args.ca_key.is_some();
+    let rule_engine = Arc::new(rules::RuleEngine::load(&args.rules_dir, intercept_enabled)?);
     info!(rules_dir = %args.rules_dir, "rule engine loaded");
 
-    // Initialize bridge
-    let mut mgr = bridge::BridgeManager::new(Some(&args.bridge)).await?;
-    mgr.init().await?;
-
-    let bridge = Arc::new(Mutex::new(mgr));
+    // Initialize bridge (S001) — creates outcall0 + applies base nftables ruleset.
+    let mut bridge_mgr = bridge::BridgeManager::new(Some(&args.bridge)).await?;
+    bridge_mgr.init().await?;
+    let bridge = Arc::new(Mutex::new(bridge_mgr));
+    info!(bridge = %args.bridge, "bridge initialized");
 
     // Initialize Docker Manager (S008).
     // EC-008 graceful degradation: unavailable Docker does NOT stop the daemon.
-    let docker_manager =
-        match docker::DockerManager::new(&args.agent_socket_host_path, &args.shim_host_path)? {
-            Some(mgr) => {
-                info!("Docker Manager initialized");
-                mgr
-            }
-            None => {
-                info!("Docker Manager unavailable — continuing in degraded mode");
-                Arc::new(docker::DockerManager::new_unavailable())
-            }
-        };
+    let docker_manager = match docker::DockerManager::new(&args.agent_socket_host_path, &args.shim_host_path)? {
+        Some(mgr) => {
+            info!("Docker Manager initialized");
+            mgr
+        }
+        None => {
+            info!("Docker Manager unavailable — continuing in degraded mode");
+            Arc::new(docker::DockerManager::new_unavailable())
+        }
+    };
 
     // Initialize Dynamic Rule Manager (S009) — subscribes to Docker death events.
     let dynamic_mgr = dynamic::DynamicRuleManager::new(docker_manager.clone());
@@ -205,28 +228,6 @@ async fn linux_main(args: Args) -> Result<()> {
         network::NetworkManager::new(bridge.clone(), &args.bridge, &args.subnet_block)?;
     info!(subnet_block = %args.subnet_block, "Network Manager initialized");
 
-    // Initialize CA for TLS interception (S011-FR-001).
-    let ca_state = if args.ca_cert.is_some() && args.ca_key.is_some() {
-        let ca_config = outcall_api::CaConfig {
-            cert_path: std::path::PathBuf::from(args.ca_cert.as_ref().unwrap()),
-            key_path: std::path::PathBuf::from(args.ca_key.as_ref().unwrap()),
-        };
-        let pem_bundle = std::fs::read_to_string(&ca_config.cert_path).ok().map(|p| {
-            p.lines()
-                .skip(1)
-                .take_while(|l| !l.starts_with("-----"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        });
-        api::CaState {
-            config: Some(ca_config),
-            interception_enabled: true,
-            pem_bundle,
-        }
-    } else {
-        api::CaState::default()
-    };
-
     let app = api::router(
         bridge.clone(),
         rule_engine.clone(),
@@ -238,14 +239,38 @@ async fn linux_main(args: Args) -> Result<()> {
         ca_state,
     );
 
-    // Prepare host socket
+    // Prepare host socket.
+    //
+    // Security hardening (S015):
+    //   1. Set process umask to 0o077 before bind so the kernel creates the
+    //      socket node with at most 0o600 even before we explicitly chmod it.
+    //      This closes the TOCTOU window between bind() and chmod().
+    //   2. After bind, explicitly set 0o600 — owner-only read/write.
+    //      Combined with running outcalld as root (or a dedicated system user)
+    //      this means no other UID can open the socket at the filesystem level.
+    //   3. The require_operator_uid middleware in api.rs provides defence in
+    //      depth: even if the file permissions were somehow wrong, the kernel's
+    //      SO_PEERCRED is checked per-connection and foreign UIDs receive 403.
     if let Some(parent) = std::path::Path::new(&args.socket).parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(&args.socket);
 
+    // Defence-in-depth: restrict umask so the socket node has tight perms from
+    // the moment the kernel creates it (before our explicit chmod below).
+    let old_umask = unsafe { libc::umask(0o077) };
     let listener = tokio::net::UnixListener::bind(&args.socket)?;
-    info!(socket = %args.socket, "host API listening");
+    // Restore umask immediately so the rest of the process is unaffected.
+    unsafe { libc::umask(old_umask) };
+
+    // Explicitly enforce 0600 regardless of whatever umask was in effect before.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&args.socket)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&args.socket, perms)?;
+    }
+    info!(socket = %args.socket, "host API listening (mode 0600)");
 
     // Initialize Agent API (S004) — separate listener on agent.sock.
     if let Some(parent) = std::path::Path::new(&args.agent_socket_host_path).parent() {
@@ -287,8 +312,12 @@ async fn linux_main(args: Args) -> Result<()> {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("failed to register SIGTERM handler");
 
+    // Serve the host API with ConnectInfo so the require_operator_uid middleware
+    // can inspect SO_PEERCRED on every incoming connection.
+    let host_make_svc = app.into_make_service_with_connect_info::<api::HostPeerCred>();
+
     tokio::select! {
-        result = axum::serve(listener, app) => {
+        result = axum::serve(listener, host_make_svc) => {
             if let Err(e) = result {
                 tracing::error!("API server error: {e}");
             }

@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use outcall_api::{
@@ -22,6 +25,71 @@ use crate::dynamic::DynamicRuleManager;
 use crate::network::NetworkManager;
 use crate::proxy::ProxyServer;
 use crate::rules::RuleEngine;
+
+// ── Host socket peer credentials ──────────────────────────────────────────────
+
+/// Unix peer credentials extracted at connection time for the host control socket.
+/// Carries uid/gid so the access-control middleware can enforce UID policy.
+#[derive(Clone, Debug)]
+pub struct HostPeerCred {
+    pub uid: u32,
+    pub gid: u32,
+    pub pid: Option<u32>,
+}
+
+impl
+    axum::extract::connect_info::Connected<
+        axum::serve::IncomingStream<'_, tokio::net::UnixListener>,
+    > for HostPeerCred
+{
+    fn connect_info(target: axum::serve::IncomingStream<'_, tokio::net::UnixListener>) -> Self {
+        match target.io().peer_cred() {
+            Ok(cred) => HostPeerCred {
+                uid: cred.uid(),
+                gid: cred.gid(),
+                pid: cred.pid().map(|p| p as u32),
+            },
+            Err(_) => {
+                // Deny-by-default: use a sentinel that no real process has.
+                HostPeerCred {
+                    uid: u32::MAX,
+                    gid: u32::MAX,
+                    pid: None,
+                }
+            }
+        }
+    }
+}
+
+/// Axum middleware that enforces host-socket UID policy.
+///
+/// Allowed UIDs: UID 0 (root) **or** the effective UID of the daemon process
+/// (i.e. the operator user that started `outcalld`). Any other caller receives
+/// 403 Forbidden. If peer credentials are unavailable the connection is also
+/// rejected.
+pub async fn require_operator_uid(
+    ConnectInfo(peer): ConnectInfo<HostPeerCred>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let daemon_uid = unsafe { libc::geteuid() };
+    let allowed = peer.uid == 0 || peer.uid == daemon_uid;
+    if !allowed {
+        tracing::warn!(
+            peer_uid = peer.uid,
+            daemon_uid = daemon_uid,
+            "host API: connection rejected — foreign UID"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(outcall_api::ApiResponse::<()>::err(
+                "forbidden: host API requires root or daemon UID",
+            )),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
 
 pub type SharedBridge = Arc<Mutex<BridgeManager>>;
 pub type SharedRules = Arc<RuleEngine>;
@@ -108,7 +176,12 @@ pub fn router(
         .route("/api/v1/ca/status", get(ca_status))
         .route("/api/v1/ca/bundle", get(ca_bundle))
         .with_state(state)
-        // Dashboard (S010) — stateless, merged after state is bound
+        // Enforce host-socket UID policy on all API routes (defence in depth;
+        // primary protection is the 0600 socket file mode set in main.rs).
+        .layer(axum::middleware::from_fn(require_operator_uid))
+        // Dashboard (S010) — stateless, merged after state is bound.
+        // The UI routes are intentionally exempt from UID gating since the
+        // dashboard serves only static assets and has no privileged operations.
         .merge(outcall_ui::router())
 }
 

@@ -31,6 +31,7 @@ walkdir = "2"
 regex = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 rtnetlink = "0.21"
 futures = "0.3"
 hickory-server = { version = "=0.26.1", features = ["resolver"] }
