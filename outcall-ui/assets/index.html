@@ -212,24 +212,24 @@
     const REFRESH_INTERVAL_MS = 5000;
 
     function badgeUp(text) {
-      return `<span class="badge up">${text}</span>`;
+      return '<span class="badge up">' + text + '</span>';
     }
     function badgeDown(text) {
-      return `<span class="badge down">${text}</span>`;
+      return '<span class="badge down">' + text + '</span>';
     }
     function badgeInactive(text) {
-      return `<span class="badge inactive">${text}</span>`;
+      return '<span class="badge inactive">' + text + '</span>';
     }
     function badgeAllow() {
-      return `<span class="badge allow">allow</span>`;
+      return '<span class="badge allow">allow</span>';
     }
     function badgeBlock() {
-      return `<span class="badge block">block</span>`;
+      return '<span class="badge block">block</span>';
     }
 
     async function fetchAPI(path) {
       const resp = await fetch(path, { cache: 'no-store' });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const json = await resp.json();
       if (!json.success) throw new Error(json.error || 'API error');
       return json.data;
@@ -244,6 +244,30 @@
       if (el) el.innerHTML = val;
     }
 
+    // Set a tbody to a single informational row (literal text only — no API data).
+    function setTbodyMessage(tbody, colspan, className, literalText) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.setAttribute('colspan', String(colspan));
+      td.className = className;
+      td.textContent = literalText;
+      tr.appendChild(td);
+      tbody.textContent = '';
+      tbody.appendChild(tr);
+    }
+
+    // Set a tbody to a single error row whose message comes from an Error object.
+    function setTbodyError(tbody, colspan, errorMessage) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.setAttribute('colspan', String(colspan));
+      td.className = 'empty-row error-text';
+      td.textContent = errorMessage;
+      tr.appendChild(td);
+      tbody.textContent = '';
+      tbody.appendChild(tr);
+    }
+
     async function fetchBridge() {
       try {
         const b = await fetchAPI('/api/v1/bridge');
@@ -252,7 +276,14 @@
         setText('bridge-index', b.index != null ? b.index : '—');
         setHTML('bridge-nft', b.nftables_active ? badgeUp('active') : badgeDown('inactive'));
       } catch (e) {
-        setHTML('bridge-status', `<span class="error-text">error: ${e.message}</span>`);
+        const el = document.getElementById('bridge-status');
+        if (el) {
+          el.textContent = '';
+          const span = document.createElement('span');
+          span.className = 'error-text';
+          span.textContent = 'error: ' + e.message;
+          el.appendChild(span);
+        }
       }
     }
 
@@ -261,10 +292,10 @@
         const d = await fetchAPI('/api/v1/dns');
         if (d.running) {
           setHTML('dns-status', badgeUp('active'));
-          setText('dns-listen', `${d.listen_address}:${d.listen_port}`);
+          setText('dns-listen', d.listen_address + ':' + d.listen_port);
           setText('dns-upstreams', d.upstreams && d.upstreams.length ? d.upstreams.join(', ') : 'system');
-          setText('dns-cache-count', `${d.cache_entries} entries`);
-          setText('dns-queries', `${d.queries_total} total · ${d.queries_blocked} blocked`);
+          setText('dns-cache-count', d.cache_entries + ' entries');
+          setText('dns-queries', d.queries_total + ' total · ' + d.queries_blocked + ' blocked');
         } else {
           setHTML('dns-status', badgeInactive('inactive'));
           setText('dns-listen', '—');
@@ -273,7 +304,14 @@
           setText('dns-queries', '—');
         }
       } catch (e) {
-        setHTML('dns-status', `<span class="error-text">error: ${e.message}</span>`);
+        const el = document.getElementById('dns-status');
+        if (el) {
+          el.textContent = '';
+          const span = document.createElement('span');
+          span.className = 'error-text';
+          span.textContent = 'error: ' + e.message;
+          el.appendChild(span);
+        }
       }
     }
 
@@ -294,36 +332,97 @@
           setText('proxy-blocked', '—');
         }
       } catch (e) {
-        setHTML('proxy-status', `<span class="error-text">error: ${e.message}</span>`);
+        const el = document.getElementById('proxy-status');
+        if (el) {
+          el.textContent = '';
+          const span = document.createElement('span');
+          span.className = 'error-text';
+          span.textContent = 'error: ' + e.message;
+          el.appendChild(span);
+        }
       }
+    }
+
+    function makeRuleRow(r) {
+      const tr = document.createElement('tr');
+
+      // ID cell
+      const tdId = document.createElement('td');
+      const codeId = document.createElement('code');
+      codeId.textContent = r.id;
+      tdId.appendChild(codeId);
+      tr.appendChild(tdId);
+
+      // Action cell — badge HTML uses only literal strings; API value only picks which badge
+      const tdAction = document.createElement('td');
+      if (r.action === 'allow') {
+        tdAction.innerHTML = badgeAllow();
+      } else if (r.action === 'block') {
+        tdAction.innerHTML = badgeBlock();
+      } else {
+        tdAction.innerHTML = badgeInactive('unknown');
+      }
+      tr.appendChild(tdAction);
+
+      // File cell
+      const tdFile = document.createElement('td');
+      tdFile.style.cssText = 'color:var(--muted);font-size:0.75rem';
+      const codeFile = document.createElement('code');
+      codeFile.style.cssText = 'background:none;padding:0';
+      codeFile.textContent = r.file;
+      tdFile.appendChild(codeFile);
+      tr.appendChild(tdFile);
+
+      // Description/condition cell
+      const tdDesc = document.createElement('td');
+      tdDesc.style.cssText = 'color:var(--muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+      const desc = r.description || r.condition_preview || '';
+      tdDesc.setAttribute('title', desc);
+      tdDesc.textContent = desc;
+      tr.appendChild(tdDesc);
+
+      return tr;
     }
 
     async function fetchRules() {
       try {
         const rules = await fetchAPI('/api/v1/rules');
         const meta = document.getElementById('rules-meta');
-        if (meta) meta.textContent = `${(rules || []).length} loaded`;
+        if (meta) meta.textContent = (rules || []).length + ' loaded';
         const tbody = document.getElementById('rules-body');
         if (!rules || rules.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="4" class="empty-row">No rules loaded</td></tr>';
+          setTbodyMessage(tbody, 4, 'empty-row', 'No rules loaded');
           return;
         }
-        tbody.innerHTML = rules.map(r => {
-          const actionBadge = r.action === 'allow' ? badgeAllow() :
-                              r.action === 'block' ? badgeBlock() :
-                              `<span class="badge inactive">${r.action}</span>`;
-          const desc = r.description || r.condition_preview || '';
-          return `<tr>
-            <td><code>${r.id}</code></td>
-            <td>${actionBadge}</td>
-            <td style="color:var(--muted);font-size:0.75rem"><code style="background:none;padding:0">${r.file}</code></td>
-            <td style="color:var(--muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${desc}">${desc}</td>
-          </tr>`;
-        }).join('');
+        tbody.textContent = '';
+        rules.forEach(function(r) { tbody.appendChild(makeRuleRow(r)); });
       } catch (e) {
         const tbody = document.getElementById('rules-body');
-        tbody.innerHTML = `<tr><td colspan="4" class="empty-row error-text">Error loading rules: ${e.message}</td></tr>`;
+        setTbodyError(tbody, 4, 'Error loading rules: ' + e.message);
       }
+    }
+
+    function makeDNSCacheRow(entry) {
+      const tr = document.createElement('tr');
+
+      // Hostname cell
+      const tdHost = document.createElement('td');
+      tdHost.textContent = entry.hostname;
+      tr.appendChild(tdHost);
+
+      // Record type cell
+      const tdType = document.createElement('td');
+      const codeType = document.createElement('code');
+      codeType.textContent = entry.record_type;
+      tdType.appendChild(codeType);
+      tr.appendChild(tdType);
+
+      // TTL cell
+      const tdTTL = document.createElement('td');
+      tdTTL.textContent = entry.ttl_remaining_secs + 's';
+      tr.appendChild(tdTTL);
+
+      return tr;
     }
 
     async function fetchDNSCache() {
@@ -336,21 +435,19 @@
           const hitRate = (stats.hits + stats.misses > 0)
             ? ((stats.hits / (stats.hits + stats.misses)) * 100).toFixed(1) + '% hit rate'
             : '';
-          meta.textContent = `${stats.entries || 0} / ${stats.max_entries || 0} entries${hitRate ? ' · ' + hitRate : ''}`;
+          meta.textContent = (stats.entries || 0) + ' / ' + (stats.max_entries || 0) + ' entries' + (hitRate ? ' · ' + hitRate : '');
         }
         const tbody = document.getElementById('dns-cache-body');
         if (entries.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="3" class="empty-row">Cache is empty</td></tr>';
+          setTbodyMessage(tbody, 3, 'empty-row', 'Cache is empty');
           return;
         }
-        tbody.innerHTML = entries.map(e => `<tr>
-          <td>${e.hostname}</td>
-          <td><code>${e.record_type}</code></td>
-          <td>${e.ttl_remaining_secs}s</td>
-        </tr>`).join('');
+        tbody.textContent = '';
+        entries.forEach(function(entry) { tbody.appendChild(makeDNSCacheRow(entry)); });
       } catch (e) {
         const tbody = document.getElementById('dns-cache-body');
-        tbody.innerHTML = `<tr><td colspan="3" class="empty-row">${e.message.includes('inactive') ? 'DNS filter inactive' : 'Error: ' + e.message}</td></tr>`;
+        const msg = e.message.includes('inactive') ? 'DNS filter inactive' : 'Error: ' + e.message;
+        setTbodyError(tbody, 3, msg);
       }
     }
 
@@ -363,7 +460,7 @@
         fetchDNSCache(),
       ]);
       const el = document.getElementById('last-refresh');
-      if (el) el.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      if (el) el.textContent = 'Updated ' + new Date().toLocaleTimeString();
     }
 
     // Initial load + periodic refresh
