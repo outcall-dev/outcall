@@ -46,6 +46,7 @@ pub enum ActionType {
 
 /// Data returned by a successful check-in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckinData {
     /// Opaque container identifier derived host-side from SO_PEERCRED.
     pub container_id: String,
@@ -57,6 +58,7 @@ pub struct CheckinData {
 
 /// Permission check request sent by the agent shim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionRequest {
     pub action_type: ActionType,
     pub target: String,
@@ -77,6 +79,7 @@ pub enum RuleAction {
 
 /// Verdict returned to callers after rule evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Verdict {
     pub allowed: bool,
     pub matched_rule: Option<String>,
@@ -85,6 +88,7 @@ pub struct Verdict {
 
 /// A request from an agent to create a new rule (queued for host approval).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuleRequest {
     pub description: String,
     pub condition: String,
@@ -102,6 +106,7 @@ pub enum RuleRequestStatus {
 
 /// Response for a rule request query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuleRequestResponse {
     pub id: String,
     pub status: RuleRequestStatus,
@@ -112,6 +117,7 @@ pub struct RuleRequestResponse {
 
 /// One of the five CEL evaluation context namespaces.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkContext {
     pub hostname: Option<String>,
     pub ip: String,
@@ -120,6 +126,7 @@ pub struct NetworkContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct HttpContext {
     pub method: String,
     pub path: String,
@@ -129,12 +136,14 @@ pub struct HttpContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DnsContext {
     pub query: String,
     pub record_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DockerContext {
     pub image: String,
     pub command: Vec<String>,
@@ -144,6 +153,7 @@ pub struct DockerContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RunContext {
     pub tool: String,
     pub args: Vec<String>,
@@ -155,12 +165,14 @@ pub struct RunContext {
 /// Agent identity resolved from SO_PEERCRED + container lookup.
 /// None when resolution fails (non-Unix socket, container not found).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AgentContext {
     pub name: String,
 }
 
 /// Full CEL evaluation context sent to the evaluate endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct EvalContext {
     pub network: Option<NetworkContext>,
     pub http: Option<HttpContext>,
@@ -172,6 +184,7 @@ pub struct EvalContext {
 
 /// Request body for POST /api/v1/rule/evaluate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvaluateRequest {
     pub context: EvalContext,
 }
@@ -186,6 +199,7 @@ pub enum Decision {
 
 /// Response for the evaluate endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvaluateResult {
     pub decision: Decision,
     pub matched_rule: Option<String>,
@@ -216,6 +230,7 @@ pub struct RuleDetail {
 
 /// Result of a rule reload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReloadResult {
     pub files_loaded: usize,
     pub rules_loaded: usize,
@@ -224,6 +239,7 @@ pub struct ReloadResult {
 
 /// Request body for POST /api/v1/rule/test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TestExpressionRequest {
     pub expression: String,
     pub context: EvalContext,
@@ -231,6 +247,7 @@ pub struct TestExpressionRequest {
 
 /// Result of a CEL expression test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TestExpressionResult {
     pub result: bool,
     pub error: Option<String>,
@@ -357,6 +374,7 @@ pub const DEFAULT_GATEWAY: &str = "10.200.0.1";
 
 /// Request body for POST /api/v1/network/create.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkCreateRequest {
     /// Name suffix (without `outcall-` prefix). When omitted, the default network is created.
     pub name: Option<String>,
@@ -368,6 +386,7 @@ pub struct NetworkCreateRequest {
 
 /// Response body for POST /api/v1/network/create.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkCreateResult {
     pub network_id: String,
     pub name: String,
@@ -398,12 +417,14 @@ pub struct NetworkStatus {
 
 /// Request body for POST /api/v1/network/destroy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkDestroyRequest {
     pub name: Option<String>,
 }
 
 /// Response body for POST /api/v1/network/destroy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkDestroyResult {
     pub name: String,
     pub destroyed: bool,
@@ -440,6 +461,7 @@ pub const HOST_SOCKET_DENY_PATHS: &[&str] = &[DEFAULT_HOST_SOCKET];
 
 /// Request body for POST /api/v1/container/create.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerCreateRequest {
     /// Docker image to run (required).
     pub image: String,
@@ -462,6 +484,7 @@ pub struct ContainerCreateRequest {
 
 /// Response for POST /api/v1/container/create.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerCreateResult {
     pub container_id: String,
     pub name: String,
@@ -470,6 +493,7 @@ pub struct ContainerCreateResult {
 
 /// Request body for POST /api/v1/container/stop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerStopRequest {
     pub name: String,
     /// Seconds to wait after SIGTERM before SIGKILL (default: 10).
@@ -478,6 +502,7 @@ pub struct ContainerStopRequest {
 
 /// Response for POST /api/v1/container/stop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerStopResult {
     pub name: String,
     pub stopped: bool,
@@ -485,6 +510,7 @@ pub struct ContainerStopResult {
 
 /// Request body for POST /api/v1/container/remove.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerRemoveRequest {
     pub name: String,
     /// If true, stop a running container before removing.
@@ -493,6 +519,7 @@ pub struct ContainerRemoveRequest {
 
 /// Response for POST /api/v1/container/remove.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerRemoveResult {
     pub name: String,
     pub removed: bool,
@@ -525,12 +552,14 @@ pub struct ContainerInspectResult {
 
 /// Request body for POST /api/v1/container/pull.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImagePullRequest {
     pub image: String,
 }
 
 /// Response for POST /api/v1/container/pull.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImagePullResult {
     pub image: String,
     /// True if the image was actually downloaded; false if already present.
@@ -540,6 +569,7 @@ pub struct ImagePullResult {
 /// Request body for POST /v1/requests/rules (agent API, S004-IF-003).
 /// The body MUST be a complete, valid S003-format YAML rule file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentRuleSubmitRequest {
     /// Complete S003-format YAML rule file (version + rules array).
     pub rule_file: String,
@@ -549,6 +579,7 @@ pub struct AgentRuleSubmitRequest {
 
 /// Request to insert a dynamic nftables allow rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AllowRuleRequest {
     /// Container name (e.g. `outcall-agent-a3f7b201`).
     pub container: String,
@@ -576,6 +607,7 @@ pub struct ActiveRule {
 
 /// Result of inserting a dynamic rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AllowRuleResult {
     pub nft_handle: u64,
 }
