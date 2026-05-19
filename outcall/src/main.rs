@@ -434,9 +434,42 @@ fn main() -> Result<()> {
 //
 // One OS thread per connection. Fine for a single-operator dashboard;
 // blocking I/O keeps the CLI free of an async runtime dependency.
+//
+// Security hardening (DNS-rebinding / cross-origin protection):
+//
+//   1. Bind explicitly to 127.0.0.1 (never 0.0.0.0).
+//
+//   2. For every request the bridge reads the HTTP request-line + headers,
+//      then enforces:
+//        a. Host header must be 127.0.0.1:<port> or localhost:<port>.
+//           Any other value (e.g. "evil.com") → 403.
+//        b. Origin header, if present, must start with
+//           "http://127.0.0.1:<port>" or "http://localhost:<port>".
+//           Any other origin → 403.
+//      This stops DNS-rebinding: the attacker's page runs under a different
+//      origin and/or sets Host to the rebound domain — both are rejected.
+//
+//   3. For /api/* and /v1/* paths the request must also carry:
+//        X-Outcall-Token: <TOKEN>   (header on API calls)
+//      OR the URL query string contains  ?token=<TOKEN>  (initial page load).
+//      TOKEN is a cryptographically random 256-bit value printed to stdout on
+//      startup.  An attacker page can never read the token because it lives in
+//      a different browsing context and CORS blocks cross-origin reads.
+//
+//   Static assets (HTML/JS/CSS) served without token so the browser can fetch
+//   index.html, which must then attach the token to its API calls.
+
+/// Generate a 32-byte (256-bit) random token and hex-encode it.
+fn generate_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 fn cmd_ui(socket: &str, port: u16, auto_open: bool) -> Result<()> {
     use std::net::TcpListener;
+    use std::sync::Arc;
 
     let socket_path = std::path::PathBuf::from(socket);
     if !socket_path.exists() {
@@ -445,18 +478,23 @@ fn cmd_ui(socket: &str, port: u16, auto_open: bool) -> Result<()> {
         );
     }
 
+    // Always bind to loopback — never 0.0.0.0.
     let bind = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&bind)
         .with_context(|| format!("failed to bind {bind}; pick another port with --port"))?;
 
-    let url = format!("http://127.0.0.1:{port}/ui/");
-    println!("Dashboard available at: {url}");
+    let token = generate_token();
+    let url = format!("http://127.0.0.1:{port}/ui/?token={token}");
+    println!("Outcall UI listening on {url}");
+    println!("Open this URL in your browser. The token expires when the bridge exits.");
     println!("Bridging 127.0.0.1:{port} → {socket}");
     println!("Press Ctrl-C to stop.");
 
     if auto_open {
         let _ = open_in_browser(&url);
     }
+
+    let token = Arc::new(token);
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -467,8 +505,9 @@ fn cmd_ui(socket: &str, port: u16, auto_open: bool) -> Result<()> {
             }
         };
         let target = socket_path.clone();
+        let tok = Arc::clone(&token);
         std::thread::spawn(move || {
-            if let Err(e) = bridge_connection(stream, &target) {
+            if let Err(e) = bridge_connection(stream, &target, port, &tok) {
                 eprintln!("bridge error: {e}");
             }
         });
@@ -476,23 +515,170 @@ fn cmd_ui(socket: &str, port: u16, auto_open: bool) -> Result<()> {
     Ok(())
 }
 
-fn bridge_connection(tcp: std::net::TcpStream, socket_path: &std::path::Path) -> Result<()> {
-    use std::io;
+/// Read raw HTTP request headers from `tcp` (stops at the blank line),
+/// validate Host/Origin/token, then either:
+///   - write a 403/401 response and return, or
+///   - forward the full request (headers + body) to the Unix socket and
+///     pipe both directions until EOF.
+fn bridge_connection(
+    tcp: std::net::TcpStream,
+    socket_path: &std::path::Path,
+    port: u16,
+    token: &str,
+) -> Result<()> {
+    use std::io::{self, BufRead, BufReader, Write};
     use std::net::Shutdown;
 
+    // --- 1. Read request headers -------------------------------------------
+    // We need to inspect headers before deciding whether to forward the
+    // connection.  We read until the blank line that ends the header section,
+    // then re-splice the headers back with the body before forwarding.
+
+    let mut reader = BufReader::new(tcp.try_clone()?);
+    let mut header_lines: Vec<String> = Vec::new();
+
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            // Connection closed before headers finished — nothing to forward.
+            return Ok(());
+        }
+        let done = line == "\r\n" || line == "\n";
+        header_lines.push(line);
+        if done {
+            break;
+        }
+    }
+
+    // Re-join for forwarding later.
+    let raw_headers: String = header_lines.concat();
+
+    // --- 2. Parse the request line + relevant headers ----------------------
+    // Format: METHOD SP request-target SP HTTP/version CRLF
+    let request_line = header_lines.first().map(|s| s.trim()).unwrap_or("");
+
+    // Extract the path component from the request line (second token).
+    let path: String = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("/")
+        .to_string();
+
+    let mut host_hdr: Option<String> = None;
+    let mut origin_hdr: Option<String> = None;
+    let mut token_hdr: Option<String> = None;
+
+    for line in &header_lines[1..] {
+        let trimmed = line.trim_end();
+        let lower = trimmed.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("host:") {
+            host_hdr = Some(rest.trim().to_string());
+        } else if let Some(rest) = lower.strip_prefix("origin:") {
+            // Preserve original case for origin value.
+            let colon_pos = trimmed.find(':').unwrap_or(0);
+            origin_hdr = Some(trimmed[colon_pos + 1..].trim().to_string());
+            let _ = rest; // suppress unused warning
+        } else if let Some(rest) = lower.strip_prefix("x-outcall-token:") {
+            let colon_pos = trimmed.find(':').unwrap_or(0);
+            token_hdr = Some(trimmed[colon_pos + 1..].trim().to_string());
+            let _ = rest;
+        }
+    }
+
+    let path = path.as_str();
+
+    // --- 3. Host header validation ------------------------------------------
+    // Allowed: 127.0.0.1:<port>  or  localhost:<port>
+    let allowed_host_ip = format!("127.0.0.1:{port}");
+    let allowed_host_name = format!("localhost:{port}");
+    let host_ok = match &host_hdr {
+        None => false, // HTTP/1.1 requires Host; reject absent too.
+        Some(h) => h == &allowed_host_ip || h == &allowed_host_name,
+    };
+
+    if !host_ok {
+        let mut w = tcp;
+        write!(
+            w,
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 40\r\nConnection: close\r\n\r\nForbidden: Host header failed validation."
+        )?;
+        return Ok(());
+    }
+
+    // --- 4. Origin header validation ----------------------------------------
+    // Origin must be absent (curl/CLI) or exactly our loopback origin.
+    let allowed_origin_ip = format!("http://127.0.0.1:{port}");
+    let allowed_origin_name = format!("http://localhost:{port}");
+    let origin_ok = match &origin_hdr {
+        None => true, // absent is fine (non-browser clients)
+        Some(o) => o == &allowed_origin_ip || o == &allowed_origin_name,
+    };
+
+    if !origin_ok {
+        let mut w = tcp;
+        write!(
+            w,
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 41\r\nConnection: close\r\n\r\nForbidden: Origin header failed validation."
+        )?;
+        return Ok(());
+    }
+
+    // --- 5. Token validation for API paths ----------------------------------
+    // Paths under /api/* or /v1/* require the token, either via:
+    //   X-Outcall-Token header, or
+    //   ?token=<TOKEN> query string in the URL.
+    let is_api_path =
+        path.starts_with("/api/") || path.starts_with("/v1/") || path == "/api" || path == "/v1";
+
+    if is_api_path {
+        // Check header first.
+        let header_ok = token_hdr.as_deref().map(|t| t == token).unwrap_or(false);
+
+        // Check query string: look for ?token=<TOKEN> or &token=<TOKEN>.
+        let query_ok = path
+            .splitn(2, '?')
+            .nth(1)
+            .map(|qs| {
+                qs.split('&').any(|pair| {
+                    let mut kv = pair.splitn(2, '=');
+                    let k = kv.next().unwrap_or("");
+                    let v = kv.next().unwrap_or("");
+                    k == "token" && v == token
+                })
+            })
+            .unwrap_or(false);
+
+        if !header_ok && !query_ok {
+            let mut w = tcp;
+            write!(
+                w,
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nContent-Length: 48\r\nWWW-Authenticate: OutcallToken\r\nConnection: close\r\n\r\nUnauthorized: missing or invalid X-Outcall-Token."
+            )?;
+            return Ok(());
+        }
+    }
+
+    // --- 6. Forward the validated request -----------------------------------
+    // Reconnect from the buffered reader's underlying stream.
     let unix = std::os::unix::net::UnixStream::connect(socket_path)
         .context("failed to connect to host socket")?;
 
-    let tcp_clone = tcp.try_clone()?;
-    let unix_clone = unix.try_clone()?;
+    let mut unix_w = unix.try_clone()?;
 
+    // Write the headers we already consumed, then pipe the remainder of the
+    // TCP stream (the body) into the Unix socket.
+    unix_w.write_all(raw_headers.as_bytes())?;
+
+    // body → unix (upstream direction, in a separate thread)
+    let mut body_src = reader.into_inner(); // the original TcpStream
+    let mut unix_w2 = unix_w;
     let upstream = std::thread::spawn(move || {
-        let mut r = tcp_clone;
-        let mut w = unix_clone;
-        let _ = io::copy(&mut r, &mut w);
-        let _ = w.shutdown(Shutdown::Write);
+        let _ = io::copy(&mut body_src, &mut unix_w2);
+        let _ = unix_w2.shutdown(Shutdown::Write);
     });
 
+    // unix response → tcp (downstream direction)
     let mut r = unix;
     let mut w = tcp;
     let _ = io::copy(&mut r, &mut w);
