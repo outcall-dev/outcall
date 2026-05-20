@@ -357,7 +357,13 @@ async fn handle_connect(
                 .matched_rule
                 .as_deref()
                 .unwrap_or("default policy");
-            warn!("BLOCK CONNECT {eval_host}:{port} (SNI) rule={reason}");
+            error!(
+                security_event = true,
+                host = %eval_host,
+                port = %port,
+                matched_rule = %reason,
+                "BLOCK CONNECT (SNI): connection dropped — reason: {reason}"
+            );
             total_blocked.fetch_add(1, Ordering::Relaxed);
             // 200 already sent — close the connection; client sees a reset.
             return;

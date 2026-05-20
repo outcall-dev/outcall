@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use super::model::{CompiledRule, EgressSpec, RuleFile, RuleSet};
+use super::model::{CompiledRule, EgressMode, EgressSpec, RuleFile, RuleSet};
 
 /// The rule engine. Holds a hot-swappable compiled rule set.
 #[derive(Debug)]
@@ -23,17 +23,20 @@ use super::model::{CompiledRule, EgressSpec, RuleFile, RuleSet};
 pub struct RuleEngine {
     pub rules_dir: String,
     rule_set: Arc<RwLock<Arc<RuleSet>>>,
+    intercept_enabled: bool,
 }
 
 #[allow(dead_code)]
 impl RuleEngine {
     /// Load rules from `rules_dir`, compile CEL expressions, return the engine.
     /// Returns an error if any P1 static analysis check fails (S003-FR-014/015).
-    pub fn load(rules_dir: &str) -> Result<Self> {
-        let rule_set = load_and_compile(rules_dir)?;
+    /// Rules with `egress.mode: intercept` are rejected if CA is not loaded.
+    pub fn load(rules_dir: &str, intercept_enabled: bool) -> Result<Self> {
+        let rule_set = load_and_compile(rules_dir, intercept_enabled)?;
         Ok(Self {
             rules_dir: rules_dir.to_string(),
             rule_set: Arc::new(RwLock::new(Arc::new(rule_set))),
+            intercept_enabled,
         })
     }
 
@@ -53,18 +56,28 @@ impl RuleEngine {
         };
 
         for rule in &rule_set.rules {
-            let matched = rule
-                .program
-                .execute(&cel_ctx)
-                .ok()
-                .and_then(|v| {
-                    if let Value::Bool(b) = v {
-                        Some(b)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(false);
+            // Surface CEL runtime errors at warn! so an operator notices a
+            // broken rule instead of it silently never matching. Audit H-1.
+            let matched = match rule.program.execute(&cel_ctx) {
+                Ok(Value::Bool(b)) => b,
+                Ok(other) => {
+                    warn!(
+                        rule_id = %rule.id,
+                        file = %rule.file,
+                        "rule condition evaluated to non-bool: {other:?}"
+                    );
+                    false
+                }
+                Err(e) => {
+                    warn!(
+                        rule_id = %rule.id,
+                        file = %rule.file,
+                        error = %e,
+                        "rule condition raised at runtime — treated as no-match"
+                    );
+                    false
+                }
+            };
 
             if !matched {
                 continue;
@@ -110,8 +123,9 @@ impl RuleEngine {
     }
 
     /// Reload the rule set from disk atomically (S003-FR-021/022/023).
+    /// Rules with `egress.mode: intercept` are rejected if CA is not loaded.
     pub async fn reload(&self) -> Result<(usize, usize, Vec<String>)> {
-        let new_set = load_and_compile(&self.rules_dir)?;
+        let new_set = load_and_compile(&self.rules_dir, self.intercept_enabled)?;
         let files = count_files(&self.rules_dir);
         let rules = new_set.rules.len();
         let warnings = collect_warnings(&self.rules_dir)?;
@@ -169,6 +183,10 @@ impl RuleEngine {
 
     /// Validate a rule YAML string without modifying the engine's rule set.
     /// Returns `Ok(())` if the file parses and all CEL expressions compile.
+    ///
+    /// Expands `$name` definition references before compiling so a rule that
+    /// uses the `definitions` shorthand is validated against its expanded
+    /// form, not the raw `$name` placeholder (which would fail CEL parsing).
     pub fn validate_rule_file(rule_yaml: &str) -> Result<(), String> {
         use super::model::RuleFile;
         let rf: RuleFile =
@@ -180,7 +198,9 @@ impl RuleEngine {
             if rule.id.is_empty() {
                 return Err("rule is missing 'id' field".to_string());
             }
-            cel_interpreter::Program::compile(&rule.condition)
+            let expanded = expand_definitions(&rule.condition, &rf.definitions, "<input>")
+                .map_err(|e| format!("definition expansion error in rule {:?}: {e}", rule.id))?;
+            cel_interpreter::Program::compile(&expanded)
                 .map_err(|e| format!("CEL compile error in rule {:?}: {e}", rule.id))?;
         }
         Ok(())
@@ -208,8 +228,9 @@ impl RuleEngine {
 // ── Rule loading ──────────────────────────────────────────────────────────
 
 /// Load and compile all rules from the given directory.
+/// Rules with `egress.mode: intercept` are rejected if CA is not loaded.
 #[allow(dead_code)]
-fn load_and_compile(rules_dir: &str) -> Result<RuleSet> {
+fn load_and_compile(rules_dir: &str, intercept_enabled: bool) -> Result<RuleSet> {
     let path = Path::new(rules_dir);
 
     // FR-038: missing or empty rules dir = empty rule set (no error)
@@ -284,6 +305,17 @@ fn load_and_compile(rules_dir: &str) -> Result<RuleSet> {
             // FR-004/015.a: CEL compile at load time
             let program = cel_interpreter::Program::compile(&expanded)
                 .with_context(|| format!("CEL parse error in rule {:?} ({file_name})", spec.id))?;
+
+            // Intercept mode requires CA to be loaded — reject at reload time, not runtime.
+            if let Some(ref egress) = spec.egress {
+                if egress.mode == EgressMode::Intercept && !intercept_enabled {
+                    anyhow::bail!(
+                        "rule {:?} ({file_name}) uses egress.mode: intercept but no CA is loaded \
+                         (--ca-cert / --ca-key not provided); set up a CA or use mode: proxy",
+                        spec.id
+                    );
+                }
+            }
 
             let priority = spec.priority.unwrap_or(100);
 
@@ -513,14 +545,14 @@ mod tests {
     #[test]
     fn load_empty_dir_gives_empty_rule_set() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
         // Can't easily inspect rules_dir length via public API but reload should work.
         assert!(!engine.rules_dir.is_empty());
     }
 
     #[test]
     fn load_missing_dir_is_not_error() {
-        let engine = RuleEngine::load("/tmp/nonexistent-outcall-rules-9999999");
+        let engine = RuleEngine::load("/tmp/nonexistent-outcall-rules-9999999", false);
         assert!(engine.is_ok());
     }
 
@@ -534,7 +566,7 @@ rules:
     action: allow
 "#;
         let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
         let _ = engine; // compiled without panic
     }
 
@@ -551,7 +583,7 @@ rules:
     action: block
 "#;
         let dir = tmp_rules_dir(yaml);
-        let result = RuleEngine::load(dir.path().to_str().unwrap());
+        let result = RuleEngine::load(dir.path().to_str().unwrap(), false);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("duplicate rule ID"), "msg: {msg}");
@@ -564,7 +596,7 @@ version: "2"
 rules: []
 "#;
         let dir = tmp_rules_dir(yaml);
-        let result = RuleEngine::load(dir.path().to_str().unwrap());
+        let result = RuleEngine::load(dir.path().to_str().unwrap(), false);
         assert!(result.is_err());
     }
 
@@ -578,7 +610,7 @@ rules:
     action: allow
 "#;
         let dir = tmp_rules_dir(yaml);
-        let result = RuleEngine::load(dir.path().to_str().unwrap());
+        let result = RuleEngine::load(dir.path().to_str().unwrap(), false);
         assert!(result.is_err());
     }
 
@@ -592,7 +624,7 @@ rules:
     action: allow
 "#;
         let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
         let ctx = network_ctx("1.1.1.1", 53, "udp");
         let result = engine.evaluate(&ctx).await;
         assert_eq!(result.decision, Decision::Allow);
@@ -609,7 +641,7 @@ rules:
     action: allow
 "#;
         let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
         let ctx = network_ctx("1.1.1.1", 443, "tcp");
         let result = engine.evaluate(&ctx).await;
         assert_eq!(result.decision, Decision::Block);
@@ -629,7 +661,7 @@ rules:
     action: allow
 "#;
         let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
         let ctx = network_ctx("1.2.3.4", 443, "tcp");
         let result = engine.evaluate(&ctx).await;
         // First rule (block-all-tcp) matches before allow-https
@@ -688,7 +720,7 @@ rules:
     action: allow
 "#;
         let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
         let _ = engine; // loaded without error = expansion worked
     }
 
@@ -702,7 +734,7 @@ rules:
     action: allow
 "#;
         let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
         let ctx = agent_ctx("db-agent", 5432);
         // S013-FR-005: agent.name is available as a CEL binding
         let result = engine.evaluate(&ctx).await;
@@ -720,7 +752,7 @@ rules:
     action: allow
 "#;
         let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
         let ctx = agent_ctx("web-agent", 5432);
         let result = engine.evaluate(&ctx).await;
         assert_eq!(result.decision, Decision::Block);
@@ -740,7 +772,7 @@ rules:
     action: block
 "#;
         let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let rules = rt.block_on(engine.list_rules());
         assert_eq!(rules.len(), 2);
@@ -759,7 +791,7 @@ rules:
     description: "Test rule"
 "#;
         let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let found = rt.block_on(engine.get_rule("my-rule"));
         assert!(found.is_some());
@@ -779,7 +811,7 @@ rules:
     action: allow
 "#;
         let dir = tmp_rules_dir(yaml1);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap()).unwrap();
+        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
 
         // Overwrite with a block rule
         let yaml2 = r#"

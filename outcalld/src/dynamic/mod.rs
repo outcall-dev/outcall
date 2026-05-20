@@ -20,7 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use outcall_api::{ActiveRule, AllowRuleRequest, AllowRuleResult, FlushDynamicResult};
 
@@ -76,7 +76,32 @@ impl DynamicRuleManager {
     ///
     /// Returns the nftables handle of the newly inserted rule (FR-007).
     pub async fn insert_rule(&self, req: AllowRuleRequest) -> Result<AllowRuleResult> {
-        let dst_ip = resolve_destination(&req.destination).await?;
+        // Validate protocol field to prevent malformed nftables expressions (DoS vector).
+        // Protocol must be 'tcp' or 'udp' — invalid values cause `nft insert rule` to fail.
+        if let Some(ref proto) = req.protocol {
+            match proto.as_str() {
+                "tcp" | "udp" => {}
+                _ => anyhow::bail!(
+                    "invalid protocol '{}': must be 'tcp' or 'udp'",
+                    proto
+                ),
+            }
+        }
+
+        // Validate source IP belongs to the named container to prevent a compromised
+        // operator API from requesting allow rules for another container's IP.
+        // This prevents a container from requesting allow rules for another
+        // container's IP address via a compromised operator API call.
+        if let Some(actual_name) = self.docker.lookup_container_name_by_ip(&req.src_ip).await {
+            if actual_name != req.container {
+                anyhow::bail!(
+                    "src_ip {} does not belong to container '{}' (belongs to '{}')",
+                    req.src_ip,
+                    req.container,
+                    actual_name
+                );
+            }
+        }
 
         {
             let state = self.state.lock().await;
@@ -94,6 +119,7 @@ impl DynamicRuleManager {
             }
         }
 
+        let dst_ip = resolve_destination(&req.destination).await?;
         let handle = {
             // Serialize all nftables operations (FR-008).
             let _lock = self.state.lock().await;
@@ -200,6 +226,7 @@ async fn container_event_loop(
                 | ContainerEventKind::Oom
                 | ContainerEventKind::Kill
                 | ContainerEventKind::Destroy => {
+                    // Container is gone — remove all its dynamic rules.
                     let removed = mgr.remove_container_rules(&ev.container_name).await;
                     if removed > 0 {
                         info!(
@@ -208,6 +235,15 @@ async fn container_event_loop(
                             "cleaned up dynamic rules on container death"
                         );
                     }
+                }
+                ContainerEventKind::Pause => {
+                    // Container is paused but not gone — rules remain but no traffic.
+                    // Log for visibility; rules stay in place for when container unpauses.
+                    info!(container = %ev.container_name, "container paused — dynamic rules preserved");
+                }
+                ContainerEventKind::Unpause => {
+                    // Container resumed — rules still valid, nothing to do.
+                    debug!(container = %ev.container_name, "container resumed");
                 }
             },
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

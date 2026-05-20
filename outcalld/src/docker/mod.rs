@@ -46,6 +46,8 @@ pub enum ContainerEventKind {
     Oom,
     Kill,
     Destroy,
+    Pause,   // Container paused — rules remain but container has no traffic
+    Unpause, // Container resumed — rules still valid
 }
 
 // ── DockerManager ─────────────────────────────────────────────────────────────
@@ -601,6 +603,8 @@ async fn event_watch_loop(docker: Docker, tx: broadcast::Sender<ContainerEvent>)
                         "oom" => ContainerEventKind::Oom,
                         "kill" => ContainerEventKind::Kill,
                         "destroy" => ContainerEventKind::Destroy,
+                        "pause" => ContainerEventKind::Pause,
+                        "unpause" => ContainerEventKind::Unpause,
                         _ => continue,
                     };
 
