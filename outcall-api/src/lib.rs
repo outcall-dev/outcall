@@ -686,3 +686,36 @@ pub struct CaStatus {
 pub struct CaBundleResult {
     pub pem_bundle: String,
 }
+
+// ── Rule Request operator types (S010-FR-007) ──
+
+/// One pending rule request as seen by the operator (host API).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingRuleRequest {
+    pub id: String,
+    pub container_id: String,
+    pub rule_file: String,
+    pub status: RuleRequestStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Response body for POST /api/v1/requests/rules/{id}/approve.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApproveRuleResult {
+    pub id: String,
+    pub nft_handle: u64,
+}
+
+/// Request body for POST /api/v1/requests/rules/{id}/reject.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RejectRuleRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Response body for POST /api/v1/requests/rules/{id}/reject.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RejectRuleResult {
+    pub id: String,
+}

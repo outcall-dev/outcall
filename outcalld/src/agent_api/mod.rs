@@ -88,12 +88,83 @@ impl SlidingWindow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RuleRequestEntry {
-    container_id: String,
+pub struct RuleRequestEntry {
+    pub container_id: String,
     /// Held verbatim for the host-side approval workflow (S004-FR-011).
-    rule_file: String,
-    status: RuleRequestStatus,
-    reason: Option<String>,
+    pub rule_file: String,
+    pub status: RuleRequestStatus,
+    pub reason: Option<String>,
+}
+
+// ── Rule Request Manager ──────────────────────────────────────────────────────
+
+/// Shared handle to the in-memory + on-disk rule-request queue.
+///
+/// Both the agent API (submit/poll) and the host API (list/approve/reject) hold
+/// a clone of this struct so they operate on the same underlying data.
+#[derive(Clone)]
+pub struct RuleRequestManager {
+    pub requests: Arc<Mutex<HashMap<String, RuleRequestEntry>>>,
+    pub state_path: String,
+}
+
+impl RuleRequestManager {
+    pub fn new(state_path: String) -> Self {
+        let requests = load_rule_requests(&state_path);
+        Self { requests, state_path }
+    }
+
+    /// Return all entries whose status is `Pending`.
+    pub async fn list_pending(&self) -> Vec<(String, RuleRequestEntry)> {
+        let guard = self.requests.lock().await;
+        guard
+            .iter()
+            .filter(|(_, e)| e.status == RuleRequestStatus::Pending)
+            .map(|(id, e)| (id.clone(), e.clone()))
+            .collect()
+    }
+
+    /// Return all entries regardless of status.
+    pub async fn list_all(&self) -> Vec<(String, RuleRequestEntry)> {
+        let guard = self.requests.lock().await;
+        guard.iter().map(|(id, e)| (id.clone(), e.clone())).collect()
+    }
+
+    /// Mark a request `Approved` and persist.  Returns the entry (caller inserts the nft rule).
+    /// Returns `None` if `id` does not exist.
+    pub async fn approve(&self, id: &str) -> Option<RuleRequestEntry> {
+        let mut guard = self.requests.lock().await;
+        let entry = guard.get_mut(id)?;
+        entry.status = RuleRequestStatus::Approved;
+        let snapshot = entry.clone();
+        persist_rule_requests(&self.state_path, &guard).await;
+        Some(snapshot)
+    }
+
+    /// Mark a request `Rejected` with an optional reason and persist.
+    /// Returns the cloned entry, or `None` if `id` does not exist.
+    pub async fn reject(&self, id: &str, reason: Option<String>) -> Option<RuleRequestEntry> {
+        let mut guard = self.requests.lock().await;
+        let entry = guard.get_mut(id)?;
+        entry.status = RuleRequestStatus::Rejected;
+        entry.reason = reason;
+        let snapshot = entry.clone();
+        persist_rule_requests(&self.state_path, &guard).await;
+        Some(snapshot)
+    }
+
+    /// Retrieve a single entry by ID.
+    pub async fn get(&self, id: &str) -> Option<RuleRequestEntry> {
+        let guard = self.requests.lock().await;
+        guard.get(id).cloned()
+    }
+
+    /// Insert a new entry and persist immediately.
+    pub async fn insert(&self, id: String, entry: RuleRequestEntry) {
+        let mut guard = self.requests.lock().await;
+        guard.insert(id, entry);
+        persist_rule_requests(&self.state_path, &guard).await;
+    }
 }
 
 // ── Shared state ──────────────────────────────────────────────────────────────
@@ -106,8 +177,7 @@ pub struct AgentState {
     container_tokens: Arc<Mutex<HashMap<String, String>>>,
     perm_rate: Arc<Mutex<HashMap<String, SlidingWindow>>>,
     rule_rate: Arc<Mutex<HashMap<String, SlidingWindow>>>,
-    rule_requests: Arc<Mutex<HashMap<String, RuleRequestEntry>>>,
-    rule_state_path: String,
+    rule_mgr: RuleRequestManager,
     eval_timeout: Duration,
     perm_limit: usize,
     perm_window: Duration,
@@ -117,6 +187,8 @@ pub struct AgentState {
 
 // ── Router ─────────────────────────────────────────────────────────────────────
 
+/// Build the agent API router and return it together with the shared
+/// `RuleRequestManager` so the host API can list/approve/reject requests.
 pub fn router(
     docker: Arc<DockerManager>,
     rules: Arc<RuleEngine>,
@@ -125,10 +197,8 @@ pub fn router(
     perm_window: Duration,
     rule_count: usize,
     rule_window: Duration,
-    rule_state_path: String,
+    rule_mgr: RuleRequestManager,
 ) -> Router {
-    // FR-010: load persisted rule requests from disk on startup.
-    let rule_requests = load_rule_requests(&rule_state_path);
     let state = AgentState {
         docker,
         rules,
@@ -136,8 +206,7 @@ pub fn router(
         container_tokens: Default::default(),
         perm_rate: Default::default(),
         rule_rate: Default::default(),
-        rule_requests,
-        rule_state_path,
+        rule_mgr,
         eval_timeout,
         perm_limit: perm_count,
         perm_window,
@@ -449,12 +518,8 @@ async fn rule_request_submit(
         status: RuleRequestStatus::Pending,
         reason: None,
     };
-    {
-        let mut requests = state.rule_requests.lock().await;
-        requests.insert(request_id.clone(), entry);
-        // FR-010: persist to disk after every write.
-        persist_rule_requests(&state.rule_state_path, &requests).await;
-    }
+    // FR-010: persist to disk after every write.
+    state.rule_mgr.insert(request_id.clone(), entry).await;
 
     info!(container_id = %container_id, "rule request submitted");
     (StatusCode::CREATED, Json(ApiResponse::ok(response))).into_response()
@@ -472,8 +537,7 @@ async fn rule_request_status(
         Err(resp) => return resp,
     };
 
-    let requests = state.rule_requests.lock().await;
-    match requests.get(&id) {
+    match state.rule_mgr.get(&id).await {
         Some(entry) if entry.container_id == container_id => {
             let response = RuleRequestResponse {
                 id: id.clone(),

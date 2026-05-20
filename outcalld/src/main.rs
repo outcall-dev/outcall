@@ -259,6 +259,20 @@ async fn linux_main(args: Args) -> Result<()> {
     // so the lib crate (`api.rs`) can remain `#![forbid(unsafe_code)]`.
     let daemon_uid: u32 = unsafe { libc::geteuid() };
 
+    let (perm_count, perm_window) = parse_rate(&args.agent_perm_rate);
+    let (rule_count, rule_window) = parse_rate(&args.agent_rule_rate);
+    // FR-010: path for rule-request queue persistence.
+    let rule_state_path = format!(
+        "{}/{}",
+        outcall_api::DEFAULT_STATE_DIR,
+        outcall_api::RULE_REQUESTS_FILE
+    );
+    // Ensure the state directory exists before loading.
+    std::fs::create_dir_all(outcall_api::DEFAULT_STATE_DIR)?;
+    // Build the shared rule-request manager.  Both the agent API (submit/poll)
+    // and the host API (list/approve/reject) hold a clone so they share state.
+    let rule_mgr = agent_api::RuleRequestManager::new(rule_state_path);
+
     let app = api::router(
         bridge.clone(),
         rule_engine.clone(),
@@ -269,6 +283,8 @@ async fn linux_main(args: Args) -> Result<()> {
         network_mgr,
         ca_state,
         daemon_uid,
+        rule_mgr.clone(),
+        args.rules_dir.clone(),
     );
 
     // Prepare host socket.
@@ -312,16 +328,6 @@ async fn linux_main(args: Args) -> Result<()> {
     let agent_listener = tokio::net::UnixListener::bind(&args.agent_socket_host_path)?;
     info!(socket = %args.agent_socket_host_path, "agent API listening");
 
-    let (perm_count, perm_window) = parse_rate(&args.agent_perm_rate);
-    let (rule_count, rule_window) = parse_rate(&args.agent_rule_rate);
-    // FR-010: path for rule-request queue persistence.
-    let rule_state_path = format!(
-        "{}/{}",
-        outcall_api::DEFAULT_STATE_DIR,
-        outcall_api::RULE_REQUESTS_FILE
-    );
-    // Ensure the state directory exists before loading.
-    std::fs::create_dir_all(outcall_api::DEFAULT_STATE_DIR)?;
     let agent_app = agent_api::router(
         docker_manager.clone(),
         rule_engine.clone(),
@@ -330,7 +336,7 @@ async fn linux_main(args: Args) -> Result<()> {
         perm_window,
         rule_count,
         rule_window,
-        rule_state_path,
+        rule_mgr.clone(),
     );
 
     let agent_server = tokio::spawn(async move {

@@ -7,17 +7,20 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use outcall_api::{
-    ActiveRule, AllowRuleRequest, AllowRuleResult, ApiResponse, BridgeStatus, CaBundleResult,
-    CaConfig, CaStatus, ContainerCreateRequest, ContainerCreateResult, ContainerInfo,
-    ContainerInspectResult, ContainerRemoveRequest, ContainerRemoveResult, ContainerStopRequest,
-    ContainerStopResult, DnsCacheDetail, DnsCacheFlushResult, DnsFilterStatus, EvaluateRequest,
-    EvaluateResult, FlushDynamicResult, ImagePullRequest, ImagePullResult, NetworkCreateRequest,
-    NetworkCreateResult, NetworkDestroyRequest, NetworkDestroyResult, NetworkStatus, ProxyStatus,
-    ReloadResult, RuleDetail, RuleSummary, TestExpressionRequest, TestExpressionResult,
+    ActiveRule, AllowRuleRequest, AllowRuleResult, ApiResponse, ApproveRuleResult, BridgeStatus,
+    CaBundleResult, CaConfig, CaStatus, ContainerCreateRequest, ContainerCreateResult,
+    ContainerInfo, ContainerInspectResult, ContainerRemoveRequest, ContainerRemoveResult,
+    ContainerStopRequest, ContainerStopResult, DnsCacheDetail, DnsCacheFlushResult,
+    DnsFilterStatus, EvaluateRequest, EvaluateResult, FlushDynamicResult, ImagePullRequest,
+    ImagePullResult, NetworkCreateRequest, NetworkCreateResult, NetworkDestroyRequest,
+    NetworkDestroyResult, NetworkStatus, PendingRuleRequest, ProxyStatus, RejectRuleRequest,
+    RejectRuleResult, ReloadResult, RuleDetail, RuleRequestStatus, RuleSummary,
+    TestExpressionRequest, TestExpressionResult,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
+use crate::agent_api::RuleRequestManager;
 use crate::bridge::BridgeManager;
 use crate::dns::DnsServer;
 use crate::docker::DockerManager;
@@ -122,6 +125,9 @@ pub struct AppState {
     pub dynamic: SharedDynamic,
     pub network: SharedNetwork,
     pub ca: Arc<CaState>,
+    pub rule_requests: RuleRequestManager,
+    /// Directory that holds rule YAML files — used when writing approved agent rules.
+    pub rules_dir: String,
 }
 
 #[derive(Clone, Default)]
@@ -141,6 +147,8 @@ pub fn router(
     network: SharedNetwork,
     ca: CaState,
     daemon_uid: u32,
+    rule_requests: RuleRequestManager,
+    rules_dir: String,
 ) -> Router {
     let state = AppState {
         bridge,
@@ -151,6 +159,8 @@ pub fn router(
         dynamic,
         network,
         ca: Arc::new(ca),
+        rule_requests,
+        rules_dir,
     };
     Router::new()
         // Bridge endpoints
@@ -189,6 +199,10 @@ pub fn router(
         // CA / TLS interception endpoints (S011)
         .route("/api/v1/ca/status", get(ca_status))
         .route("/api/v1/ca/bundle", get(ca_bundle))
+        // Rule Request operator endpoints (S010-FR-007)
+        .route("/api/v1/requests/rules", get(rule_requests_list))
+        .route("/api/v1/requests/rules/{id}/approve", post(rule_request_approve))
+        .route("/api/v1/requests/rules/{id}/reject", post(rule_request_reject))
         .with_state(state)
         // Enforce host-socket UID policy on all API routes (defence in depth;
         // primary protection is the 0600 socket file mode set in main.rs).
@@ -554,3 +568,169 @@ fn read_ca_serial(_cfg: &CaConfig) -> Option<String> {
     // TODO: Parse PEM, extract SubjectSerial from X509 cert
     None
 }
+
+// ── Rule Request operator handlers (S010-FR-007) ───────────────────────────
+
+/// GET /api/v1/requests/rules — list all pending rule requests.
+async fn rule_requests_list(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<PendingRuleRequest>>> {
+    let entries = state.rule_requests.list_all().await;
+    let mut list: Vec<PendingRuleRequest> = entries
+        .into_iter()
+        .filter(|(_, e)| e.status == RuleRequestStatus::Pending)
+        .map(|(id, e)| PendingRuleRequest {
+            id,
+            container_id: e.container_id,
+            rule_file: e.rule_file,
+            status: e.status,
+            reason: e.reason,
+        })
+        .collect();
+    list.sort_by(|a, b| a.id.cmp(&b.id));
+    Json(ApiResponse::ok(list))
+}
+
+/// POST /api/v1/requests/rules/{id}/approve — approve a pending rule request.
+///
+/// Writes the agent-submitted rule file into the rules directory with a
+/// unique name and reloads the rule engine so the policy takes effect
+/// immediately. Returns the file name written so the operator can audit it.
+async fn rule_request_approve(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    // Fetch the current entry before mutating so we can check its status.
+    let entry = match state.rule_requests.get(&id).await {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::<ApproveRuleResult>::err(format!(
+                    "rule request \"{id}\" not found"
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    // 409 if already approved — prevents double-loading the rule file.
+    if entry.status == RuleRequestStatus::Approved {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::<ApproveRuleResult>::err(format!(
+                "rule request \"{id}\" is already approved"
+            ))),
+        )
+            .into_response();
+    }
+
+    // 409 if already rejected — operators must create a new request.
+    if entry.status == RuleRequestStatus::Rejected {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::<ApproveRuleResult>::err(format!(
+                "rule request \"{id}\" has already been rejected"
+            ))),
+        )
+            .into_response();
+    }
+
+    // Write the approved rule file to the rules directory.
+    // File is named `agent-<request-id>.yaml` so it is unique and auditable.
+    let safe_id = id.replace(['/', '\\', '.'], "-");
+    let filename = format!("agent-{safe_id}.yaml");
+    let file_path = std::path::Path::new(&state.rules_dir).join(&filename);
+
+    if let Err(e) = tokio::fs::write(&file_path, entry.rule_file.as_bytes()).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<ApproveRuleResult>::err(format!(
+                "failed to write rule file \"{filename}\": {e}"
+            ))),
+        )
+            .into_response();
+    }
+
+    // Reload the rule engine so the new rule takes effect immediately.
+    // This is the same path as `POST /api/v1/rules/reload`.
+    let nft_handle = match state.rules.reload().await {
+        Ok((_, rules_loaded, _)) => {
+            tracing::info!(
+                id = %id,
+                file = %filename,
+                rules_loaded,
+                "rule request approved and rules reloaded"
+            );
+            // We return rules_loaded as the "handle" sentinel (0 = rule engine
+            // reload, not an nft handle) to satisfy the ApproveRuleResult type.
+            rules_loaded as u64
+        }
+        Err(e) => {
+            // Roll back: remove the file we just wrote so the rules dir stays clean.
+            let _ = tokio::fs::remove_file(&file_path).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<ApproveRuleResult>::err(format!(
+                    "rule engine reload failed after writing \"{filename}\": {e}"
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    // Persist the status change only after the reload succeeded.
+    state.rule_requests.approve(&id).await;
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok(ApproveRuleResult { id, nft_handle })),
+    )
+        .into_response()
+}
+
+/// POST /api/v1/requests/rules/{id}/reject — reject a pending rule request.
+async fn rule_request_reject(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RejectRuleRequest>,
+) -> Response {
+    let entry = match state.rule_requests.get(&id).await {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::<RejectRuleResult>::err(format!(
+                    "rule request \"{id}\" not found"
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    if entry.status != RuleRequestStatus::Pending {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::<RejectRuleResult>::err(format!(
+                "rule request \"{id}\" is not pending (status: {:?})",
+                entry.status
+            ))),
+        )
+            .into_response();
+    }
+
+    state.rule_requests.reject(&id, body.reason.clone()).await;
+
+    tracing::info!(
+        id = %id,
+        reason = ?body.reason,
+        "rule request rejected"
+    );
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok(RejectRuleResult { id })),
+    )
+        .into_response()
+}
+
