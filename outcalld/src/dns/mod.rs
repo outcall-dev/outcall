@@ -650,6 +650,7 @@ impl DnsServer {
             listen_addr: Mutex::new(listen_addr),
             upstreams,
             cache: Arc::new(Mutex::new(LruCache::new(
+                // PRIVATE_INVARIANT_OK: DNS_CACHE_MAX_ENTRIES is a non-zero compile-time constant.
                 NonZeroUsize::new(DNS_CACHE_MAX_ENTRIES).unwrap(),
             ))),
             counters: Arc::new(DnsCounters::new()),
@@ -683,6 +684,7 @@ impl DnsServer {
             .with_context(|| format!("DNS: failed to bind TCP {}", bind_addr))?;
 
         // Store the actual bound address (handles ephemeral port 0 case).
+        // STARTUP_OK: udp was just bound successfully above; local_addr() cannot fail here.
         *self.listen_addr.lock().await = udp.local_addr().expect("UDP local_addr");
         info!(addr = %udp.local_addr().expect("UDP local_addr"), "DNS filter started");
 
@@ -789,6 +791,7 @@ fn build_resolver(upstreams: &[SocketAddr]) -> Result<TokioResolver> {
         if parsed.is_empty() {
             // Last-resort fallback
             warn!("No DNS upstreams configured and /etc/resolv.conf empty — using 8.8.8.8");
+            // PRIVATE_INVARIANT_OK: hardcoded literal "8.8.8.8:53" always parses successfully.
             vec!["8.8.8.8:53".parse().unwrap()]
         } else {
             parsed

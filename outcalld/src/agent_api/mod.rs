@@ -422,6 +422,7 @@ async fn permissions_check(
             )
                 .into_response();
             resp.headers_mut()
+                // PRIVATE_INVARIANT_OK: "2" is a hardcoded literal; HeaderValue::from_str cannot fail.
                 .insert("retry-after", "2".parse().unwrap());
             return resp;
         }
@@ -490,6 +491,7 @@ async fn rule_request_submit(
             )
                 .into_response();
             resp.headers_mut()
+                // PRIVATE_INVARIANT_OK: "60" is a hardcoded literal; HeaderValue::from_str cannot fail.
                 .insert("retry-after", "60".parse().unwrap());
             return resp;
         }
@@ -565,6 +567,8 @@ use regex::Regex;
 /// replica suffix. Falls back to the full name if no numeric suffix is found.
 pub(crate) fn derive_agent_name(container_name: &str) -> String {
     static RE: std::sync::LazyLock<Regex> =
+        // PRIVATE_INVARIANT_OK: regex literal is valid; LazyLock panics at first call if not,
+        // which is equivalent to a startup crash, not a remote-triggered one.
         std::sync::LazyLock::new(|| Regex::new(r"-[0-9]+$").unwrap());
     RE.replace(container_name, "").to_string()
 }
@@ -684,6 +688,7 @@ fn fill_random(buf: &mut [u8]) {
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut s, b| {
         use std::fmt::Write;
+        // PRIVATE_INVARIANT_OK: write! to a String (which impls fmt::Write) is infallible.
         write!(&mut s, "{:02x}", b).unwrap();
         s
     })
