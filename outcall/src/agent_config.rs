@@ -1,9 +1,9 @@
+//! Agent configuration parser for `.outcall/agent.yaml` (S014-FR-004).
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-//! Agent configuration parser for `.outcall/agent.yaml` (S014-FR-004).
 
 /// Agent configuration from `.outcall/agent.yaml`
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -72,7 +72,7 @@ fn default_workspace() -> String {
 }
 
 fn default_network() -> String {
-    "outcall-default".to_string()
+    "outcall0".to_string()
 }
 
 fn default_true() -> bool {
@@ -143,7 +143,7 @@ impl AgentConfig {
 # workspace: /workspace
 
 # Network to connect to
-# network: outcall-default
+# network: outcall0
 
 # Run in detached mode
 # detach: false

@@ -1,10 +1,10 @@
+//! Agent boot command implementation (S014).
+
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::agent_config::{AgentCliFlags, AgentConfig};
-
-//! Agent boot command implementation (S014).
 
 /// Boot an agent container for the current project (S014-FR-001..008).
 pub fn boot_agent(
@@ -217,7 +217,7 @@ pub fn list_agents() -> Result<()> {
         return Ok(());
     }
     
-    println!("{:<30} {:<30} {:<20} {}", "NAME", "IMAGE", "STATUS", "PORTS");
+    println!("{:<30} {:<30} {:<20} PORTS", "NAME", "IMAGE", "STATUS");
     for line in lines {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() >= 3 {

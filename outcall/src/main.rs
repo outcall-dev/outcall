@@ -7,10 +7,11 @@ use std::os::unix::net::UnixStream;
 use anyhow::{Context, Result};
 use clap::Parser;
 use outcall_api::{
-    BridgeStatus, ContainerCreateResult, ContainerInfo, ContainerInspectResult,
+    ApproveRuleResult, BridgeStatus, ContainerCreateResult, ContainerInfo, ContainerInspectResult,
     ContainerRemoveResult, ContainerStopResult, DnsCacheDetail, DnsFilterStatus, EvalContext,
     EvaluateRequest, ImagePullResult, NetworkCreateRequest, NetworkCreateResult,
-    NetworkDestroyRequest, NetworkDestroyResult, NetworkStatus, ProxyStatus,
+    NetworkDestroyRequest, NetworkDestroyResult, NetworkStatus, PendingRuleRequest,
+    ProxyStatus, RejectRuleRequest, RejectRuleResult,
 };
 use serde::Deserialize;
 
@@ -106,6 +107,11 @@ enum Commands {
         #[command(subcommand)]
         action: RulesAction,
     },
+    /// Manage agent rule requests (list, approve, reject)
+    Requests {
+        #[command(subcommand)]
+        action: RequestsAction,
+    },
     /// Open the operator dashboard in a browser via a local TCP→unix-socket bridge
     Ui {
         /// TCP port to bind on 127.0.0.1 (default: 8080)
@@ -121,6 +127,25 @@ enum Commands {
 enum RulesAction {
     /// Atomically reload all rule files from the rules.d directory
     Reload,
+}
+
+#[derive(clap::Subcommand)]
+enum RequestsAction {
+    /// List all pending rule requests
+    List,
+    /// Approve a rule request (writes the rule file and reloads the engine)
+    Approve {
+        /// Rule request ID (e.g. rr-aabbcc112233)
+        id: String,
+    },
+    /// Reject a rule request
+    Reject {
+        /// Rule request ID (e.g. rr-aabbcc112233)
+        id: String,
+        /// Optional human-readable rejection reason (stored for audit)
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -421,8 +446,72 @@ fn main() -> Result<()> {
         Commands::Rules { action } => match action {
             RulesAction::Reload => cmd_rules_reload(&cli.socket),
         },
+        Commands::Requests { action } => match action {
+            RequestsAction::List => cmd_requests_list(&cli.socket),
+            RequestsAction::Approve { id } => cmd_requests_approve(&cli.socket, &id),
+            RequestsAction::Reject { id, reason } => {
+                cmd_requests_reject(&cli.socket, &id, reason)
+            }
+        },
         Commands::Ui { port, no_open } => cmd_ui(&cli.socket, port, !no_open),
     }
+}
+
+// ── Rule Request commands (S010-FR-007) ───────────────────────────────────
+
+fn cmd_requests_list(socket: &str) -> Result<()> {
+    let body = http_get(socket, "/api/v1/requests/rules")?;
+    let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
+
+    if !resp.success {
+        anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
+    }
+
+    let requests: Vec<PendingRuleRequest> =
+        serde_json::from_value(resp.data.context("no data")?)?;
+
+    if requests.is_empty() {
+        println!("No pending rule requests.");
+        return Ok(());
+    }
+
+    println!("{:<18} {:<32} STATUS", "ID", "CONTAINER");
+    for r in &requests {
+        println!("{:<18} {:<32} {:?}", r.id, r.container_id, r.status);
+    }
+    Ok(())
+}
+
+fn cmd_requests_approve(socket: &str, id: &str) -> Result<()> {
+    let path = format!("/api/v1/requests/rules/{}/approve", urlencoded(id));
+    let body = http_post(socket, &path)?;
+    let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
+
+    if !resp.success {
+        anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
+    }
+
+    let result: ApproveRuleResult = serde_json::from_value(resp.data.context("no data")?)?;
+    println!(
+        "Rule request \"{}\" approved (rules_loaded={}).",
+        result.id, result.nft_handle
+    );
+    Ok(())
+}
+
+fn cmd_requests_reject(socket: &str, id: &str, reason: Option<String>) -> Result<()> {
+    let path = format!("/api/v1/requests/rules/{}/reject", urlencoded(id));
+    let req = RejectRuleRequest { reason };
+    let body = http_post_json(socket, &path, &req)?;
+    let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
+
+    if !resp.success {
+        anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
+    }
+
+    let result: RejectRuleResult = serde_json::from_value(resp.data.context("no data")?)?;
+    println!("Rule request \"{}\" rejected.", result.id);
+    Ok(())
 }
 
 // ── UI command — local TCP → unix-socket bridge for the dashboard ──────────

@@ -27,6 +27,7 @@ use hyper::body::Bytes;
 use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
 use tokio::net::UnixStream;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::{debug, error, info};
 
@@ -94,10 +95,21 @@ async fn run() -> Result<ExitCode> {
     }
     let (action_type, target, metadata, exec_args) = parse_invocation(&args[1..]);
 
-    // FR-019: start background heartbeat loop
+    // FR-019/020: start background heartbeat loop + SIGTERM handler
     let (stop_tx, stop_rx) = watch::channel(false);
     let hb_socket = socket_path.to_string();
     let hb_handle = tokio::spawn(heartbeat_loop(hb_socket, req_timeout, stop_rx));
+
+    // FR-020: graceful SIGTERM shutdown
+    let sigterm_stop_tx = stop_tx.clone();
+    let mut sigterm = signal(SignalKind::terminate())?;
+    tokio::spawn(async move {
+        if sigterm.recv().await.is_none() {
+            error!(component = "shim", "SIGTERM receiver hung up unexpectedly");
+        }
+        info!(component = "shim", "SIGTERM received — shutting down gracefully");
+        let _ = sigterm_stop_tx.send(true);
+    });
 
     // FR-007/010: send permission check with session token
     let perm_req = PermissionRequest {
