@@ -211,7 +211,47 @@ impl RequestHandler for DnsHandler {
                         let upstream_ms = upstream_start.elapsed().as_millis();
                         let records: Vec<Record> = lookup.answers().to_vec();
 
-                        check_rebinding(&hostname, &records);
+                        // Block DNS rebinding responses (FR-034)
+                        let rebinding = check_rebinding(&hostname, &records);
+                        if rebinding {
+                            self.counters
+                                .queries_blocked
+                                .fetch_add(1, Ordering::Relaxed);
+                            info!(
+                                %src, %hostname,
+                                decision = "block", rule = "dns-rebinding",
+                                "DNS query blocked — rebinding detected"
+                            );
+                            return self.send_nxdomain(request, response_handle).await;
+                        }
+
+                        // Strip private/loopback/link-local/ULA/multicast IPs from the
+                        // upstream response (BYPASS-03a/03b, PAYLOAD-03). An attacker who
+                        // controls upstream DNS could resolve a hostname to an RFC1918
+                        // address and reach services Outcall was supposed to block.
+                        //
+                        // Per-rule opt-out: if the matched rule sets `allow_private_ips: true`
+                        // we pass private IPs through (e.g. internal-VLAN registries).
+                        let allow_private = matched_egress
+                            .as_ref()
+                            .map(|e| e.allow_private_ips)
+                            .unwrap_or(false);
+                        let records = if allow_private {
+                            records
+                        } else {
+                            filter_private_ips(&hostname, records)
+                        };
+
+                        // If filtering emptied the answer set, return SERVFAIL — do NOT
+                        // synthesize a public IP or return NOERROR with zero answers.
+                        if records.is_empty() {
+                            info!(
+                                %src, %hostname,
+                                decision = "block", rule = "private-ip-filter",
+                                "DNS answer set empty after private-IP stripping → SERVFAIL"
+                            );
+                            return self.send_servfail(request, response_handle).await;
+                        }
 
                         // Cache the result
                         if !records.is_empty() {
@@ -272,6 +312,12 @@ impl DnsHandler {
         match egress.mode {
             EgressMode::Proxy => {
                 debug!(%hostname, "egress mode is proxy; no direct nft allow rules inserted");
+            }
+            EgressMode::Intercept => {
+                // Intercept mode terminates TLS at the proxy — no direct nft allow
+                // rules are inserted. The proxy handles the TLS termination and
+                // forwards the (now decrypted) request to the upstream.
+                debug!(%hostname, "egress mode is intercept; TLS termination via proxy; no direct nft allow rules");
             }
             EgressMode::DirectIp => {
                 let src_ip = src.ip().to_string();
@@ -447,8 +493,98 @@ fn record_type_to_str(rt: RecordType) -> String {
     format!("{rt:?}").to_ascii_uppercase()
 }
 
-/// Warn on potential DNS rebinding (FR-034).
-fn check_rebinding(hostname: &str, records: &[Record]) {
+// ── Private-IP filter (BYPASS-03a/03b, PAYLOAD-03) ────────────────────────
+
+/// Returns `true` if `addr` falls within any address range that must not be
+/// forwarded to agent containers as a DNS answer:
+///
+/// IPv4 blocked ranges:
+///   10.0.0.0/8        — RFC1918 private
+///   172.16.0.0/12     — RFC1918 private
+///   192.168.0.0/16    — RFC1918 private
+///   127.0.0.0/8       — loopback
+///   169.254.0.0/16    — link-local (APIPA)
+///   100.64.0.0/10     — Shared Address (CGNAT, RFC6598)
+///   0.0.0.0/8         — "this" network
+///   224.0.0.0/4       — multicast
+///
+/// IPv6 blocked ranges:
+///   ::1/128           — loopback
+///   fe80::/10         — link-local
+///   fc00::/7          — ULA (unique-local, covers fc00:: and fd00::)
+///   ff00::/8          — multicast
+///   ::ffff:0:0/96     — IPv4-mapped (equivalent to filtering the IPv4 form)
+fn is_private_ip(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // 10.0.0.0/8
+            o[0] == 10
+            // 172.16.0.0/12  (172.16.x.x – 172.31.x.x)
+            || (o[0] == 172 && o[1] >= 16 && o[1] <= 31)
+            // 192.168.0.0/16
+            || (o[0] == 192 && o[1] == 168)
+            // 127.0.0.0/8
+            || o[0] == 127
+            // 169.254.0.0/16
+            || (o[0] == 169 && o[1] == 254)
+            // 100.64.0.0/10  (100.64.x.x – 100.127.x.x)
+            || (o[0] == 100 && o[1] >= 64 && o[1] <= 127)
+            // 0.0.0.0/8
+            || o[0] == 0
+            // 224.0.0.0/4  (224.x.x.x – 239.x.x.x)
+            || o[0] >= 224 && o[0] <= 239
+        }
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            // ::1/128 — loopback
+            v6.is_loopback()
+            // fe80::/10 — link-local (fe80:: – febf::)
+            || (segs[0] & 0xffc0) == 0xfe80
+            // fc00::/7  — ULA (fc00:: – fdff::)
+            || (segs[0] & 0xfe00) == 0xfc00
+            // ff00::/8  — multicast
+            || (segs[0] & 0xff00) == 0xff00
+            // ::ffff:0:0/96 — IPv4-mapped  (::ffff:x.x.x.x)
+            || (segs[0] == 0 && segs[1] == 0 && segs[2] == 0
+                && segs[3] == 0 && segs[4] == 0 && segs[5] == 0xffff)
+        }
+    }
+}
+
+/// Remove any A/AAAA records whose IP is private/loopback/link-local/multicast.
+/// Non-address records (CNAME, TXT, …) are always kept.
+/// Each dropped record is logged at INFO with structured fields for operator
+/// debugging: `host`, `dropped_ip`, `reason`.
+fn filter_private_ips(hostname: &str, records: Vec<Record>) -> Vec<Record> {
+    records
+        .into_iter()
+        .filter(|r| {
+            let maybe_addr: Option<IpAddr> = match &r.data {
+                RData::A(ip) => Some(IpAddr::V4(ip.0)),
+                RData::AAAA(ip) => Some(IpAddr::V6(ip.0)),
+                _ => return true, // keep non-address records unconditionally
+            };
+            if let Some(addr) = maybe_addr {
+                if is_private_ip(addr) {
+                    info!(
+                        host = %hostname,
+                        dropped_ip = %addr,
+                        reason = "private_ip",
+                        "DNS answer record stripped — private/loopback/link-local IP"
+                    );
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
+}
+
+/// Check for potential DNS rebinding (FR-034).
+/// Returns true if rebinding was detected (private IP returned for public hostname).
+fn check_rebinding(hostname: &str, records: &[Record]) -> bool {
+    let mut rebinding_detected = false;
     for r in records {
         let maybe_addr: Option<IpAddr> = match &r.data {
             RData::A(ip) => Some(IpAddr::V4(ip.0)),
@@ -463,11 +599,13 @@ fn check_rebinding(hostname: &str, records: &[Record]) {
             if private {
                 warn!(
                     %hostname, %addr,
-                    "potential DNS rebinding: public hostname resolved to private/loopback IP"
+                    "DNS rebinding detected: public hostname resolved to private/loopback IP → blocking"
                 );
+                rebinding_detected = true;
             }
         }
     }
+    rebinding_detected
 }
 
 fn extract_ipv4_destinations(records: &[Record]) -> Vec<String> {
@@ -777,5 +915,105 @@ mod tests {
 
         let got = extract_ipv6_destinations(&[rec]);
         assert!(got.is_empty());
+    }
+
+    // ── Private-IP filter tests ────────────────────────────────────────────
+
+    /// A public IPv4 address (1.1.1.1) must pass through the filter unchanged.
+    #[test]
+    fn filter_private_ips_passes_public_ipv4() {
+        let name = Name::from_ascii("example.com.").expect("name");
+        let rec = Record::from_rdata(
+            name,
+            60,
+            RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(1, 1, 1, 1))),
+        );
+        let out = filter_private_ips("example.com", vec![rec]);
+        assert_eq!(out.len(), 1, "public IP should not be filtered");
+    }
+
+    /// RFC1918 10.x.x.x must be stripped (BYPASS-03a: internal service resolution).
+    #[test]
+    fn filter_private_ips_drops_rfc1918_10_slash_8() {
+        let name = Name::from_ascii("myservice.internal.").expect("name");
+        let rec = Record::from_rdata(
+            name,
+            60,
+            RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(10, 200, 0, 5))),
+        );
+        let out = filter_private_ips("myservice.internal", vec![rec]);
+        assert!(out.is_empty(), "10.x private IP must be dropped");
+    }
+
+    /// IPv4 loopback 127.0.0.1 must be stripped.
+    #[test]
+    fn filter_private_ips_drops_loopback_127() {
+        let name = Name::from_ascii("localhost.").expect("name");
+        let rec = Record::from_rdata(
+            name,
+            60,
+            RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(127, 0, 0, 1))),
+        );
+        let out = filter_private_ips("localhost", vec![rec]);
+        assert!(out.is_empty(), "loopback 127.0.0.1 must be dropped");
+    }
+
+    /// IPv6 link-local fe80::1 must be stripped.
+    #[test]
+    fn filter_private_ips_drops_ipv6_link_local() {
+        let name = Name::from_ascii("fe80-host.example.com.").expect("name");
+        let addr: Ipv6Addr = "fe80::1".parse().unwrap();
+        let rec = Record::from_rdata(
+            name,
+            60,
+            RData::AAAA(hickory_proto::rr::rdata::AAAA(addr)),
+        );
+        let out = filter_private_ips("fe80-host.example.com", vec![rec]);
+        assert!(out.is_empty(), "fe80::/10 link-local must be dropped");
+    }
+
+    /// Mixed response: one private (10.x) and one public (93.184.x) A record.
+    /// The private one must be stripped; the public one must survive.
+    #[test]
+    fn filter_private_ips_strips_private_keeps_public_in_mixed_response() {
+        let name = Name::from_ascii("mixed.example.com.").expect("name");
+        let priv_rec = Record::from_rdata(
+            name.clone(),
+            60,
+            RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(192, 168, 1, 100))),
+        );
+        let pub_rec = Record::from_rdata(
+            name,
+            60,
+            RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(93, 184, 215, 14))),
+        );
+        let out = filter_private_ips("mixed.example.com", vec![priv_rec, pub_rec]);
+        assert_eq!(out.len(), 1, "only the public IP should remain");
+        if let RData::A(ip) = &out[0].data {
+            assert_eq!(ip.0, Ipv4Addr::new(93, 184, 215, 14));
+        } else {
+            panic!("expected an A record");
+        }
+    }
+
+    /// Additional ranges: CGNAT (100.64.x), 172.16/12, 169.254/16 must all be blocked.
+    #[test]
+    fn filter_private_ips_drops_additional_private_ranges() {
+        let name = Name::from_ascii("test.example.com.").expect("name");
+        let cases = vec![
+            Ipv4Addr::new(100, 64, 0, 1),   // CGNAT 100.64.0.0/10
+            Ipv4Addr::new(172, 16, 5, 1),   // 172.16.0.0/12
+            Ipv4Addr::new(172, 31, 255, 1), // top of 172.16.0.0/12
+            Ipv4Addr::new(169, 254, 1, 1),  // link-local APIPA
+        ];
+        for addr in cases {
+            let rec = Record::from_rdata(
+                name.clone(),
+                60,
+                RData::A(hickory_proto::rr::rdata::A(addr)),
+            );
+            let out = filter_private_ips("test.example.com", vec![rec]);
+            assert!(out.is_empty(), "{addr} should be filtered as private");
+        }
     }
 }

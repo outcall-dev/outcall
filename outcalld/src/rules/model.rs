@@ -12,6 +12,7 @@ use outcall_api::RuleAction;
 pub enum EgressMode {
     Proxy,
     DirectIp,
+    Intercept,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +21,12 @@ pub struct EgressSpec {
     pub mode: EgressMode,
     #[serde(default)]
     pub ports: Vec<u16>,
+    /// When true, private/loopback/link-local IPs returned by upstream DNS are
+    /// forwarded to the agent rather than stripped. Set this only for rules that
+    /// intentionally target internal-VLAN services (e.g. a private registry).
+    /// Default: false — private IPs are dropped to prevent DNS-rebinding attacks.
+    #[serde(default)]
+    pub allow_private_ips: bool,
 }
 
 /// Top-level structure of a rule YAML file.
