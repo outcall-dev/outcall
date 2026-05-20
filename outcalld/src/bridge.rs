@@ -137,18 +137,72 @@ impl BridgeManager {
 
     /// Generate the base nftables ruleset.
     ///
-    /// Policy: the chain default is `accept` so we don't break unrelated
-    /// forwarded traffic. Rules explicitly match traffic entering or leaving
-    /// our bridge and drop everything that isn't established/related.
+    /// Policy: the chain default is `drop` — the deepest enforcement layer
+    /// must fail closed. We allow all forwarded traffic that does NOT
+    /// transit our bridge so we don't break unrelated networking on the
+    /// host. Anything that does transit the bridge must be either
+    /// established/related (handled here) or explicitly allowed by a
+    /// dynamic rule inserted at higher priority. Audit C-3.
+    ///
+    /// IPv6 defence-in-depth (BYPASS-11):
+    ///
+    /// The `inet` family covers both IPv4 and IPv6, so the FORWARD chain
+    /// policy drop applies to both. However, certain IPv6 traffic — notably
+    /// link-local multicast (ff02::/16) and packets that exit via a directly-
+    /// connected route on the agent veth rather than being forwarded through
+    /// the bridge — can bypass the FORWARD hook entirely. To close this:
+    ///
+    ///   1. In the `forward` chain we add an explicit `meta nfproto ipv6 drop`
+    ///      before the established/related rules so any IPv6 packet that *does*
+    ///      reach FORWARD with established state is also dropped (defence against
+    ///      IPv6 sessions opened before a rule was revoked).  Dynamic allow rules
+    ///      are inserted at the chain head (position 0, higher priority) and use
+    ///      `ip6 saddr … ip6 daddr … accept`, so legitimately allowed IPv6 flows
+    ///      are still accepted before they hit this explicit drop.
+    ///
+    ///   2. An `output` chain (type filter hook output) drops all IPv6 packets
+    ///      exiting a non-loopback interface *from* the agent — this catches
+    ///      link-local/multicast packets that never traverse the FORWARD hook.
+    ///
+    ///   3. An `input` chain drops all unsolicited IPv6 arriving *on* the bridge
+    ///      interface that weren't established by the host (RA, NS, multicast
+    ///      listener queries etc.) that could otherwise be used to inject routes.
     fn base_ruleset(&self) -> String {
         format!(
             r#"table inet outcall {{
     chain forward {{
-        type filter hook forward priority 0; policy accept;
+        type filter hook forward priority filter; policy drop;
+        # Allow non-outcall0 traffic through (unrelated interfaces)
+        iifname != "{name}" oifname != "{name}" accept
+        # Drop invalid state packets (prevents inkernel tracking exploits)
+        iifname "{name}" ct state invalid drop
+        oifname "{name}" ct state invalid drop
+        # Explicitly block all IPv6 forwarded through the bridge (BYPASS-11).
+        # Dynamic allow rules for IPv6 destinations are inserted at chain head
+        # (position 0) with higher priority and use `ip6 saddr/daddr accept`,
+        # so they are evaluated before this rule.
+        iifname "{name}" meta nfproto ipv6 drop
+        oifname "{name}" meta nfproto ipv6 drop
+        # Accept established/related IPv4 connections
         iifname "{name}" ct state established,related accept
-        iifname "{name}" drop
         oifname "{name}" ct state established,related accept
-        oifname "{name}" drop
+    }}
+
+    # BYPASS-11: catch link-local / multicast IPv6 that leaves the agent veth
+    # without being forwarded through the bridge (direct on-link delivery).
+    # The output hook fires for every packet leaving any local process OR
+    # forwarded out of the host — matching on oifname scopes this to the bridge.
+    chain output_ipv6_block {{
+        type filter hook output priority filter; policy accept;
+        oifname "{name}" meta nfproto ipv6 drop
+    }}
+
+    # BYPASS-11: drop unsolicited inbound IPv6 arriving on the bridge
+    # (Router Advertisements, Neighbour Solicitations, MLD queries) that
+    # could be used to inject a default IPv6 route into an agent namespace.
+    chain input_ipv6_block {{
+        type filter hook input priority filter; policy accept;
+        iifname "{name}" meta nfproto ipv6 ct state new drop
     }}
 }}"#,
             name = self.name
