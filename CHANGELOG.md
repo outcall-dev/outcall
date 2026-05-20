@@ -7,6 +7,65 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed — 2026-05-20 (BREAKING)
+
+- **Daemon:** `--dns-listen` default changed from `0.0.0.0` to `10.200.0.1`
+  (the outcall bridge IP).  On a multi-NIC host (laptop with Ethernet + Wi-Fi,
+  cloud VM with a public interface, server with a management plane) the previous
+  default exposed the DNS resolver on every network interface, including public
+  ones.  The new default restricts the service to the managed bridge so only
+  agent containers can reach it.  **Operators who relied on the old behaviour
+  must add `--dns-listen 0.0.0.0` (or a specific interface address) to their
+  deployment manifest.**  The effective address is now logged at INFO on startup.
+- **Daemon:** `--proxy-addr` default changed from `0.0.0.0:8080` to
+  `10.200.0.1:8080` (the outcall bridge IP).  Same rationale as `--dns-listen`
+  above — the HTTP proxy was previously reachable from any network interface.
+  **Operators who relied on the old behaviour must add
+  `--proxy-addr 0.0.0.0:8080` (or a specific interface address) to their
+  deployment manifest.**  The effective address is now logged at INFO on startup.
+  If you override `--subnet-block` you must also override both flags to match
+  the new bridge IP.
+
+### Security — 2026-05-19 hardening wave
+
+- **Daemon:** Lock down host control socket (`SO_PEERCRED` enforcement, `umask 077`,
+  `chmod 0600`) so only root processes on the host can connect.
+  ([`5c5b1a8`](https://github.com/Outcall-dev/outcall/commit/5c5b1a8))
+- **CLI:** Harden `outcall ui` TCP bridge against DNS rebinding: enforce
+  `Host`/`Origin` header checks, require the dashboard token on every request,
+  and bind only to `127.0.0.1`.
+  ([`9c68b59`](https://github.com/Outcall-dev/outcall/commit/9c68b59))
+- **API:** Deny unknown fields on all trust-boundary structs — 29 structs gained
+  `#[serde(deny_unknown_fields)]` to reject smuggled keys at deserialization.
+  ([`b6829c7`](https://github.com/Outcall-dev/outcall/commit/b6829c7))
+- **UI:** Escape API-sourced strings in the dashboard to prevent stored XSS.
+  ([`e20325f`](https://github.com/Outcall-dev/outcall/commit/e20325f))
+
+### Fixed — 2026-05-19
+
+- **Daemon:** Move `require_operator_uid` out of `unsafe` block in the lib crate
+  (was incorrectly wrapped); no behaviour change.
+  ([`c6f7391`](https://github.com/Outcall-dev/outcall/commit/c6f7391))
+
+### Fixed — 2026-05-19 (test harness, outer repo)
+
+- **Tests:** `test-bypass.sh` and `test-payloads.sh` were silently swallowing
+  failures — 24 `|| true` removed from `test-bypass.sh`, 36 from
+  `test-payloads.sh`, 19 head-pipe invocations now use `pipefail`. Bypass and
+  payload suites now actually validate.
+  ([`4e2673d`](https://github.com/Outcall-dev/outcall/commit/4e2673d))
+
+### Changed — 2026-05-19 (docs)
+
+- **Docs:** Fix phantom CLI commands, CEL field-name drift, TLS intercept
+  overclaims, and dashboard endpoint accuracy across the docs repo.
+  ([`c617f5a`](https://github.com/Outcall-dev/docs/commit/c617f5a))
+- **Docs:** Fix `Outcall-dev` GitHub org casing in `installation.md`.
+  ([`ad6eeb1`](https://github.com/Outcall-dev/docs/commit/ad6eeb1))
+- **Website:** Fix CEL field names, remove phantom CLI commands, downgrade TLS
+  intercept claim to match current implementation.
+  ([`2c76a9e`](https://github.com/Outcall-dev/website/commit/2c76a9e))
+
 ### Added — release-prep round 1 (2026-05-10)
 
 - **CLI:** `outcall daemon start | stop | status` — wraps `docker run` of

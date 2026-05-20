@@ -38,15 +38,20 @@ Linux only. macOS will build the workspace (cross-platform types compile) but `o
 ### Example
 
 ```sh
+# Production image (from registry or local build):
 docker run -d --rm \
     --name outcall-daemon \
     --network host \
     --cap-add NET_ADMIN \
     --cap-add SYS_ADMIN \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    outcall-e2e \
+    outcall-daemon \
     outcalld --bridge outcall0
 ```
+
+For local E2E testing, the test harness builds a separate image tagged
+`outcall-e2e` (see `Makefile` at the workspace root). Use that tag only in
+test environments — do not use it for production deployments.
 
 ### Optional flags
 
@@ -68,7 +73,26 @@ If port `8080` is already bound on the host, pass `--no-proxy` (or change `--pro
 
 ## Specifications
 
-Full functional and interface specs live in the [`outcall-dev/specs`](https://github.com/outcall-dev/specs) repo, organised as `S000`–`S010`.
+Full functional and interface specs live in the [`outcall-dev/specs`](https://github.com/outcall-dev/specs) repo, organised as `S000`–`S015`.
+
+## Security
+
+Outcall is security-critical infrastructure. Before deploying it, read:
+
+- [Threat model](https://github.com/Outcall-dev/docs/blob/main/security/threat-model.md) — what Outcall protects against, what it does not, and the trust boundaries you rely on.
+- [Most recent audit](https://github.com/Outcall-dev/docs/blob/main/security/audit-2026-05-14.md) — findings, severities, and what's fixed.
+- [`SECURITY.md`](./SECURITY.md) — how to report a vulnerability.
+
+For a worked example of a tightly-scoped agent ruleset (Sentry → GitHub PR
+agent), see [`rules.d/examples/sentry-github-agent/`](../rules.d/examples/sentry-github-agent/).
+
+## License
+
+[Apache-2.0](./LICENSE).
+
+## Contributing
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## Repository layout (top level)
 
