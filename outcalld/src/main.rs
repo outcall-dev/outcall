@@ -35,8 +35,14 @@ struct Args {
     #[arg(long, default_value = "/etc/outcall/rules.d")]
     rules_dir: String,
 
-    /// DNS filter listen address (IP only; port set by --dns-port)
-    #[arg(long, default_value = "0.0.0.0")]
+    /// DNS filter listen address (IP only; port set by --dns-port).
+    /// Defaults to the bridge IP `10.200.0.1` so only agent containers on the
+    /// managed bridge can reach the DNS resolver.  If you need the DNS filter
+    /// reachable from the host network (e.g. for debugging) set this to
+    /// `127.0.0.1` or a specific interface address.  If you override
+    /// `--subnet-block` you must also override this flag to match the new
+    /// bridge IP.
+    #[arg(long, default_value = "10.200.0.1")]
     dns_listen: String,
 
     /// DNS filter listen port
@@ -47,8 +53,15 @@ struct Args {
     #[arg(long, default_value = "")]
     dns_upstream: String,
 
-    /// HTTP proxy listen address (host:port)
-    #[arg(long, default_value = "0.0.0.0:8080")]
+    /// HTTP proxy listen address (host:port).
+    /// Defaults to `10.200.0.1:8080` (the bridge IP) so only agent containers
+    /// on the managed bridge can reach the proxy.  On a multi-NIC host or cloud
+    /// VM, the previous default of `0.0.0.0:8080` exposed the proxy on every
+    /// interface including public ones.  Set to `0.0.0.0:8080` explicitly if
+    /// you need the old behaviour, or to a specific interface address.  If you
+    /// override `--subnet-block` you must also override this flag to match the
+    /// new bridge IP.
+    #[arg(long, default_value = "10.200.0.1:8080")]
     proxy_addr: String,
 
     /// Disable the HTTP proxy entirely
@@ -187,6 +200,20 @@ async fn linux_main(args: Args) -> Result<()> {
     // Initialize Dynamic Rule Manager (S009) — subscribes to Docker death events.
     let dynamic_mgr = dynamic::DynamicRuleManager::new(docker_manager.clone());
     info!("Dynamic Rule Manager initialized");
+
+    // Log effective bind addresses so operators upgrading from <0.2 notice
+    // the default changed from 0.0.0.0 to the bridge IP (10.200.0.1).
+    info!(
+        dns_listen = %args.dns_listen,
+        dns_port = args.dns_port,
+        "DNS filter will bind to {} (override with --dns-listen if needed)",
+        args.dns_listen
+    );
+    info!(
+        proxy_addr = %args.proxy_addr,
+        "HTTP proxy will bind to {} (override with --proxy-addr if needed)",
+        args.proxy_addr
+    );
 
     // Initialize DNS filter (FR-003: Tokio task inside outcalld)
     let dns_listen: SocketAddr = format!("{}:{}", args.dns_listen, args.dns_port).parse()?;
