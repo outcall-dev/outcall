@@ -33,7 +33,7 @@ impl LogCapture {
         rules_dir: &PathBuf,
         duration_secs: u64,
     ) -> Result<Vec<String>> {
-        let mut cmd = Command::new("outcalld");
+        let cmd = Command::new("outcalld");
         cmd.env("RUST_LOG", "outcalld=trace,outcall=trace")
             .arg("--socket")
             .arg(host_socket.as_os_str())
@@ -44,7 +44,7 @@ impl LogCapture {
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
 
-        let child = cmd.spawn().context("daemon spawn")?;
+        let mut child = cmd.spawn().context("daemon spawn")?;
         std::thread::sleep(Duration::from_secs(duration_secs));
         let output = child.kill().context("kill")?;
 
