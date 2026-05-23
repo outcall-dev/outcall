@@ -85,8 +85,7 @@ async fn spawn_intercept_daemon(
     ca_key: &PathBuf,
     rules_dir: &PathBuf,
 ) -> Result<(Child, String)> {
-    let child = Command::new("outcalld");
-    child
+    let child = Command::new("outcalld")
         .env("RUST_LOG", "outcalld=trace")
         .arg("--socket")
         .arg(host_socket.as_os_str())

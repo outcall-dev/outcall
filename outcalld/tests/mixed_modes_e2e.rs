@@ -37,8 +37,7 @@ async fn spawn_daemon(
     agent_socket: &PathBuf,
     rules_dir: &PathBuf,
 ) -> Result<(Child, String, String)> {
-    let child = Command::new("outcalld");
-    child
+    let child = Command::new("outcalld")
         .env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(host_socket.as_os_str())
