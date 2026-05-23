@@ -6,24 +6,20 @@
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use hickory_net::runtime::{RuntimeProvider, Time, TokioRuntimeProvider, TokioTime};
 use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::SOA;
 use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::TokioResolver;
-use hickory_resolver::config::{
-    ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts,
-};
-use hickory_net::runtime::{RuntimeProvider, Time, TokioRuntimeProvider, TokioTime};
+use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo, Server};
 use hickory_server::zone_handler::MessageResponseBuilder;
-use hickory_server::server::{
-    Request, RequestHandler, ResponseHandler, ResponseInfo, Server,
-};
 use lru::LruCache;
 use outcall_api::{
     AllowRuleRequest, Decision, DnsCacheEntry, DnsCacheStats, DnsContext, DnsFilterStatus,
@@ -34,8 +30,8 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::dynamic::DynamicRuleManager;
-use crate::rules::RuleEngine;
 use crate::rules::model::EgressMode;
+use crate::rules::RuleEngine;
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -101,7 +97,10 @@ impl RequestHandler for DnsHandler {
                 warn!(error = %e, "invalid DNS request");
                 let mut metadata = Metadata::new(0, MessageType::Response, OpCode::Query);
                 metadata.response_code = ResponseCode::ServFail;
-                return ResponseInfo::from(Header { metadata, counts: HeaderCounts::default() });
+                return ResponseInfo::from(Header {
+                    metadata,
+                    counts: HeaderCounts::default(),
+                });
             }
         };
 
@@ -197,9 +196,7 @@ impl RequestHandler for DnsHandler {
                         decision = "allow", rule = rule_id, from_cache = true,
                         "DNS query allowed (cached)"
                     );
-                    return self
-                        .send_answer(request, &records, response_handle)
-                        .await;
+                    return self.send_answer(request, &records, response_handle).await;
                 }
 
                 self.counters.cache_misses.fetch_add(1, Ordering::Relaxed);
@@ -242,8 +239,9 @@ impl RequestHandler for DnsHandler {
                             filter_private_ips(&hostname, records)
                         };
 
-                        // If filtering emptied the answer set, return SERVFAIL — do NOT
-                        // synthesize a public IP or return NOERROR with zero answers.
+                        // If filtering emptied the answer set, return SERVFAIL. NXDOMAIN
+                        // is negatively cacheable and would incorrectly claim the domain
+                        // does not exist if policy later allows private answers.
                         if records.is_empty() {
                             info!(
                                 %src, %hostname,
@@ -284,8 +282,7 @@ impl RequestHandler for DnsHandler {
                         self.apply_egress_policy(src, &hostname, &matched_egress, &records)
                             .await;
 
-                        self.send_answer(request, &records, response_handle)
-                            .await
+                        self.send_answer(request, &records, response_handle).await
                     }
                     Err(e) => {
                         warn!(%hostname, error = %e, "upstream DNS resolution failed → SERVFAIL");
@@ -376,7 +373,7 @@ impl DnsHandler {
         }
     }
 
-async fn send_nxdomain<R: ResponseHandler>(
+    async fn send_nxdomain<R: ResponseHandler>(
         &self,
         request: &Request,
         mut response_handle: R,
@@ -966,11 +963,7 @@ mod tests {
     fn filter_private_ips_drops_ipv6_link_local() {
         let name = Name::from_ascii("fe80-host.example.com.").expect("name");
         let addr: Ipv6Addr = "fe80::1".parse().unwrap();
-        let rec = Record::from_rdata(
-            name,
-            60,
-            RData::AAAA(hickory_proto::rr::rdata::AAAA(addr)),
-        );
+        let rec = Record::from_rdata(name, 60, RData::AAAA(hickory_proto::rr::rdata::AAAA(addr)));
         let out = filter_private_ips("fe80-host.example.com", vec![rec]);
         assert!(out.is_empty(), "fe80::/10 link-local must be dropped");
     }

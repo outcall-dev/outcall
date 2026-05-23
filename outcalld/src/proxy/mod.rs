@@ -15,8 +15,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -36,6 +36,10 @@ const MAX_CONNECTIONS: usize = 1024;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const IDLE_TIMEOUT_SECS: u64 = 300;
 const MAX_HEADER_BYTES: usize = 8192;
+const DEFAULT_CONNECT_BLOCKED_PORTS: &[u16] = &[
+    20, 21, 22, 23, 25, 53, 110, 119, 143, 389, 445, 465, 587, 636, 993, 995, 1433, 1521, 3306,
+    3389, 5432, 5672, 5900, 6379, 9200, 9300, 11211, 27017,
+];
 /// Bytes to read for SNI peeking — one read() normally covers an entire TLS ClientHello.
 const SNI_PEEK_BYTES: usize = 4096;
 const GRACE_PERIOD_SECS: u64 = 5;
@@ -287,6 +291,13 @@ async fn handle_connect(
         }
     };
 
+    if DEFAULT_CONNECT_BLOCKED_PORTS.contains(&port) {
+        warn!(host = %host, port, "BLOCK CONNECT: known non-HTTPS service port rejected");
+        total_blocked.fetch_add(1, Ordering::Relaxed);
+        let _ = write_error(client, 403, "Forbidden", "CONNECT port is not allowed").await;
+        return;
+    }
+
     // Pre-SNI evaluation on the CONNECT hostname — allows sending 403 before 200.
     let prelim_result = rule_engine
         .evaluate(&build_http_ctx(
@@ -417,6 +428,21 @@ async fn handle_http(
         .map(|(k, v)| (k.to_lowercase(), v.clone()))
         .collect();
 
+    if let Some(header_host) = header_map.get("host") {
+        if !host_header_matches_authority(header_host, &host, port) {
+            warn!(uri_host = %host, port, host_header = %header_host, "BLOCK HTTP: Host header does not match absolute-form URI authority");
+            total_blocked.fetch_add(1, Ordering::Relaxed);
+            let _ = write_error(
+                client,
+                400,
+                "Bad Request",
+                "Host header does not match request URI authority",
+            )
+            .await;
+            return;
+        }
+    }
+
     debug!("HTTP {method} {host}:{port}{path}");
 
     let result = rule_engine
@@ -526,7 +552,9 @@ fn build_http_ctx(
             port,
             protocol: "tcp".into(),
         }),
-        agent: agent_name.map(|n| AgentContext { name: n.to_string() }),
+        agent: agent_name.map(|n| AgentContext {
+            name: n.to_string(),
+        }),
         ..Default::default()
     }
 }
@@ -627,6 +655,18 @@ fn parse_absolute_uri(uri: &str) -> Option<(String, u16, String)> {
     };
 
     Some((host, port, path))
+}
+
+fn host_header_matches_authority(header_host: &str, uri_host: &str, uri_port: u16) -> bool {
+    let header = header_host.trim().trim_end_matches('.').to_lowercase();
+    let uri_host = uri_host.trim().trim_end_matches('.').to_lowercase();
+
+    match header.rsplit_once(':') {
+        Some((host, port)) => {
+            host.eq_ignore_ascii_case(&uri_host) && port.parse::<u16>().is_ok_and(|p| p == uri_port)
+        }
+        None => header == uri_host && (uri_port == 80 || uri_port == 443),
+    }
 }
 
 /// Extract the SNI hostname from a raw TLS ClientHello buffer.
@@ -754,6 +794,20 @@ mod tests {
     }
 
     #[test]
+    fn connect_blocked_ports_include_common_non_https_services() {
+        assert!(DEFAULT_CONNECT_BLOCKED_PORTS.contains(&22));
+        assert!(DEFAULT_CONNECT_BLOCKED_PORTS.contains(&25));
+        assert!(DEFAULT_CONNECT_BLOCKED_PORTS.contains(&6379));
+    }
+
+    #[test]
+    fn connect_blocked_ports_allow_custom_tls_ports() {
+        assert!(!DEFAULT_CONNECT_BLOCKED_PORTS.contains(&443));
+        assert!(!DEFAULT_CONNECT_BLOCKED_PORTS.contains(&8443));
+        assert!(!DEFAULT_CONNECT_BLOCKED_PORTS.contains(&9443));
+    }
+
+    #[test]
     fn parse_absolute_uri_http_default_port() {
         assert_eq!(
             parse_absolute_uri("http://example.com/path"),
@@ -783,6 +837,43 @@ mod tests {
             parse_absolute_uri("https://secure.example.com/data"),
             Some(("secure.example.com".into(), 443, "/data".into()))
         );
+    }
+
+    #[test]
+    fn host_header_match_accepts_same_host_default_port() {
+        assert!(host_header_matches_authority(
+            "example.com",
+            "example.com",
+            80
+        ));
+        assert!(host_header_matches_authority(
+            "example.com",
+            "example.com",
+            443
+        ));
+    }
+
+    #[test]
+    fn host_header_match_accepts_same_host_explicit_port() {
+        assert!(host_header_matches_authority(
+            "example.com:8080",
+            "example.com",
+            8080
+        ));
+    }
+
+    #[test]
+    fn host_header_match_rejects_mismatched_host_or_port() {
+        assert!(!host_header_matches_authority(
+            "evil.com",
+            "example.com",
+            80
+        ));
+        assert!(!host_header_matches_authority(
+            "example.com:8080",
+            "example.com",
+            80
+        ));
     }
 
     #[test]
@@ -872,7 +963,10 @@ mod tests {
     #[test]
     fn build_http_ctx_without_agent_leaves_agent_unset() {
         let ctx = build_http_ctx("GET", "example.com", "/", &HashMap::new(), 443, None);
-        assert!(ctx.agent.is_none(), "agent should be unset when name is None");
+        assert!(
+            ctx.agent.is_none(),
+            "agent should be unset when name is None"
+        );
         assert!(ctx.http.is_some());
         assert_eq!(ctx.http.as_ref().unwrap().method, "GET");
         assert_eq!(ctx.http.as_ref().unwrap().host, "example.com");
@@ -880,7 +974,14 @@ mod tests {
 
     #[test]
     fn build_http_ctx_with_agent_populates_name() {
-        let ctx = build_http_ctx("POST", "api.example.com", "/v1", &HashMap::new(), 443, Some("ci"));
+        let ctx = build_http_ctx(
+            "POST",
+            "api.example.com",
+            "/v1",
+            &HashMap::new(),
+            443,
+            Some("ci"),
+        );
         let agent = ctx.agent.expect("agent should be set");
         assert_eq!(agent.name, "ci");
         assert_eq!(ctx.http.as_ref().unwrap().method, "POST");

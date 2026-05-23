@@ -26,6 +26,8 @@ use outcall_api::{ActiveRule, AllowRuleRequest, AllowRuleResult, FlushDynamicRes
 
 use crate::docker::{ContainerEvent, ContainerEventKind, DockerManager};
 
+const MAX_DYNAMIC_RULES_PER_CONTAINER: usize = 256;
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// In-memory record of one active dynamic nftables rule.
@@ -81,10 +83,7 @@ impl DynamicRuleManager {
         if let Some(ref proto) = req.protocol {
             match proto.as_str() {
                 "tcp" | "udp" => {}
-                _ => anyhow::bail!(
-                    "invalid protocol '{}': must be 'tcp' or 'udp'",
-                    proto
-                ),
+                _ => anyhow::bail!("invalid protocol '{}': must be 'tcp' or 'udp'", proto),
             }
         }
 
@@ -103,32 +102,32 @@ impl DynamicRuleManager {
             }
         }
 
-        {
-            let state = self.state.lock().await;
-            if let Some(existing) = state.rules.get(&req.container).and_then(|rules| {
-                rules.iter().find(|r| {
-                    r.src_ip == req.src_ip
-                        && r.destination == req.destination
-                        && r.protocol == req.protocol
-                        && r.port == req.port
-                })
-            }) {
-                return Ok(AllowRuleResult {
-                    nft_handle: existing.nft_handle,
-                });
-            }
+        let dst_ip = resolve_destination(&req.destination).await?;
+
+        // Serialize duplicate checks, per-container caps, nftables mutation, and
+        // in-memory recording so a DNS flood cannot race past the cap.
+        let mut state = self.state.lock().await;
+        let container_rules = state.rules.entry(req.container.clone()).or_default();
+        if let Some(existing) = container_rules.iter().find(|r| {
+            r.src_ip == req.src_ip
+                && r.destination == req.destination
+                && r.protocol == req.protocol
+                && r.port == req.port
+        }) {
+            return Ok(AllowRuleResult {
+                nft_handle: existing.nft_handle,
+            });
         }
 
-        let dst_ip = resolve_destination(&req.destination).await?;
-        let handle = {
-            // Serialize all nftables operations (FR-008).
-            let _lock = self.state.lock().await;
-            nft_insert(&req.src_ip, &dst_ip, req.protocol.as_deref(), req.port).await?
-        };
+        if container_rules.len() >= MAX_DYNAMIC_RULES_PER_CONTAINER {
+            anyhow::bail!(
+                "dynamic rule cap exceeded for container '{}' (max {})",
+                req.container,
+                MAX_DYNAMIC_RULES_PER_CONTAINER
+            );
+        }
 
-        // Record the rule in memory (outside the nft-critical lock is fine —
-        // the Mutex is still held for the state update below).
-        let mut state = self.state.lock().await;
+        let handle = nft_insert(&req.src_ip, &dst_ip, req.protocol.as_deref(), req.port).await?;
         let record = DynamicRuleRecord {
             container: req.container.clone(),
             src_ip: req.src_ip,
@@ -138,7 +137,7 @@ impl DynamicRuleManager {
             nft_handle: handle,
             inserted_at: now_iso8601(),
         };
-        state.rules.entry(req.container).or_default().push(record);
+        container_rules.push(record);
 
         Ok(AllowRuleResult { nft_handle: handle })
     }

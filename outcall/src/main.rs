@@ -10,8 +10,8 @@ use outcall_api::{
     ApproveRuleResult, BridgeStatus, ContainerCreateResult, ContainerInfo, ContainerInspectResult,
     ContainerRemoveResult, ContainerStopResult, DnsCacheDetail, DnsFilterStatus, EvalContext,
     EvaluateRequest, ImagePullResult, NetworkCreateRequest, NetworkCreateResult,
-    NetworkDestroyRequest, NetworkDestroyResult, NetworkStatus, PendingRuleRequest,
-    ProxyStatus, RejectRuleRequest, RejectRuleResult,
+    NetworkDestroyRequest, NetworkDestroyResult, NetworkStatus, PendingRuleRequest, ProxyStatus,
+    RejectRuleRequest, RejectRuleResult,
 };
 use serde::Deserialize;
 
@@ -387,23 +387,23 @@ fn main() -> Result<()> {
                 let _ = outcall::agent_boot::init_outcall(&project_dir)?;
                 return Ok(());
             }
-            
+
             if list {
                 return outcall::agent_boot::list_agents();
             }
-            
+
             if stop {
                 let default_name = outcall::agent_boot::auto_detect_name();
                 let name = agent_name.as_deref().unwrap_or(&default_name);
                 return outcall::agent_boot::stop_agent(name);
             }
-            
+
             if logs {
                 let default_name = outcall::agent_boot::auto_detect_name();
                 let name = agent_name.as_deref().unwrap_or(&default_name);
                 return outcall::agent_boot::agent_logs(name, follow);
             }
-            
+
             // Boot agent
             let project_dir = std::env::current_dir()?;
             let flags = outcall::agent_config::AgentCliFlags {
@@ -449,9 +449,7 @@ fn main() -> Result<()> {
         Commands::Requests { action } => match action {
             RequestsAction::List => cmd_requests_list(&cli.socket),
             RequestsAction::Approve { id } => cmd_requests_approve(&cli.socket, &id),
-            RequestsAction::Reject { id, reason } => {
-                cmd_requests_reject(&cli.socket, &id, reason)
-            }
+            RequestsAction::Reject { id, reason } => cmd_requests_reject(&cli.socket, &id, reason),
         },
         Commands::Ui { port, no_open } => cmd_ui(&cli.socket, port, !no_open),
     }
@@ -467,8 +465,7 @@ fn cmd_requests_list(socket: &str) -> Result<()> {
         anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
     }
 
-    let requests: Vec<PendingRuleRequest> =
-        serde_json::from_value(resp.data.context("no data")?)?;
+    let requests: Vec<PendingRuleRequest> = serde_json::from_value(resp.data.context("no data")?)?;
 
     if requests.is_empty() {
         println!("No pending rule requests.");
@@ -726,8 +723,8 @@ fn bridge_connection(
 
         // Check query string: look for ?token=<TOKEN> or &token=<TOKEN>.
         let query_ok = path
-            .splitn(2, '?')
-            .nth(1)
+            .split_once('?')
+            .map(|(_, qs)| qs)
             .map(|qs| {
                 qs.split('&').any(|pair| {
                     let mut kv = pair.splitn(2, '=');
@@ -795,8 +792,7 @@ fn cmd_rules_reload(socket: &str) -> Result<()> {
     if !resp.success {
         anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
     }
-    let result: outcall_api::ReloadResult =
-        serde_json::from_value(resp.data.context("no data")?)?;
+    let result: outcall_api::ReloadResult = serde_json::from_value(resp.data.context("no data")?)?;
     println!(
         "Reloaded {} rule(s) from {} file(s).",
         result.rules_loaded, result.files_loaded
@@ -1475,9 +1471,7 @@ fn cmd_daemon_start(
     }
 
     // Idempotent: remove any prior container of the same name.
-    let _ = Command::new("docker")
-        .args(["rm", "-f", &name])
-        .output();
+    let _ = Command::new("docker").args(["rm", "-f", &name]).output();
 
     // The daemon binds its Unix sockets inside the container at /run/outcall/.
     // Bind-mounting the host's /run/outcall makes those sockets reachable
@@ -1488,20 +1482,33 @@ fn cmd_daemon_start(
     if let Err(e) = std::fs::create_dir_all(socket_dir) {
         // Non-fatal warning: on macOS the dir is created inside the Docker
         // VM, not on macOS itself, and the host CLI talks via docker exec.
-        eprintln!("note: could not create {socket_dir} on host ({e}); host CLI may need `docker exec {name}` to reach the socket");
+        eprintln!(
+            "note: could not create {socket_dir} on host ({e}); host CLI may need `docker exec {name}` to reach the socket"
+        );
     }
 
     let mut args: Vec<String> = vec![
-        "run".into(), "-d".into(), "--name".into(), name.clone(),
-        "--network".into(), "host".into(),
-        "--cap-add".into(), "NET_ADMIN".into(),
-        "--cap-add".into(), "SYS_ADMIN".into(),
-        "-v".into(), "/var/run/docker.sock:/var/run/docker.sock".into(),
-        "-v".into(), format!("{socket_dir}:{socket_dir}"),
-        "-v".into(), format!("{rules_dir}:/etc/outcall/rules.d:ro"),
-        "--entrypoint".into(), "outcalld".into(),
+        "run".into(),
+        "-d".into(),
+        "--name".into(),
+        name.clone(),
+        "--network".into(),
+        "host".into(),
+        "--cap-add".into(),
+        "NET_ADMIN".into(),
+        "--cap-add".into(),
+        "SYS_ADMIN".into(),
+        "-v".into(),
+        "/var/run/docker.sock:/var/run/docker.sock".into(),
+        "-v".into(),
+        format!("{socket_dir}:{socket_dir}"),
+        "-v".into(),
+        format!("{rules_dir}:/etc/outcall/rules.d:ro"),
+        "--entrypoint".into(),
+        "outcalld".into(),
         image.clone(),
-        "--bridge".into(), bridge.clone(),
+        "--bridge".into(),
+        bridge.clone(),
     ];
     if no_proxy {
         args.push("--no-proxy".into());
@@ -1518,8 +1525,10 @@ fn cmd_daemon_start(
     }
 
     let cid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    println!("Daemon \"{name}\" started ({}, image={image}, bridge={bridge}).",
-        cid.chars().take(12).collect::<String>());
+    println!(
+        "Daemon \"{name}\" started ({}, image={image}, bridge={bridge}).",
+        cid.chars().take(12).collect::<String>()
+    );
     Ok(())
 }
 
@@ -1567,7 +1576,12 @@ fn cmd_daemon_status(name: Option<String>) -> Result<()> {
     use std::process::Command;
     let name = name.unwrap_or_else(|| DEFAULT_DAEMON_NAME.to_string());
     let output = Command::new("docker")
-        .args(["inspect", "--format", "{{.State.Running}}\t{{.Config.Image}}", &name])
+        .args([
+            "inspect",
+            "--format",
+            "{{.State.Running}}\t{{.Config.Image}}",
+            &name,
+        ])
         .output()
         .context("failed to invoke docker inspect")?;
     if !output.status.success() {
@@ -1580,7 +1594,11 @@ fn cmd_daemon_status(name: Option<String>) -> Result<()> {
     let image = parts.next().unwrap_or("?");
     println!(
         "Daemon \"{name}\": {} (image={image})",
-        if running == "true" { "running" } else { "stopped" }
+        if running == "true" {
+            "running"
+        } else {
+            "stopped"
+        }
     );
     Ok(())
 }

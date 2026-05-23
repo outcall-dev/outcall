@@ -63,6 +63,7 @@ struct SlidingWindow {
     timestamps: Vec<Instant>,
     window: Duration,
     limit: usize,
+    last_seen: Instant,
 }
 
 impl SlidingWindow {
@@ -71,12 +72,14 @@ impl SlidingWindow {
             timestamps: Vec::new(),
             window,
             limit,
+            last_seen: Instant::now(),
         }
     }
 
     /// Records a request and returns `true` if it is within the window limit.
     fn allow(&mut self) -> bool {
         let now = Instant::now();
+        self.last_seen = now;
         self.timestamps
             .retain(|t| now.duration_since(*t) < self.window);
         if self.timestamps.len() >= self.limit {
@@ -84,6 +87,10 @@ impl SlidingWindow {
         }
         self.timestamps.push(now);
         true
+    }
+
+    fn is_stale(&self, now: Instant) -> bool {
+        now.duration_since(self.last_seen) > self.window.saturating_mul(2)
     }
 }
 
@@ -111,7 +118,10 @@ pub struct RuleRequestManager {
 impl RuleRequestManager {
     pub fn new(state_path: String) -> Self {
         let requests = load_rule_requests(&state_path);
-        Self { requests, state_path }
+        Self {
+            requests,
+            state_path,
+        }
     }
 
     /// Return all entries whose status is `Pending`.
@@ -127,7 +137,10 @@ impl RuleRequestManager {
     /// Return all entries regardless of status.
     pub async fn list_all(&self) -> Vec<(String, RuleRequestEntry)> {
         let guard = self.requests.lock().await;
-        guard.iter().map(|(id, e)| (id.clone(), e.clone())).collect()
+        guard
+            .iter()
+            .map(|(id, e)| (id.clone(), e.clone()))
+            .collect()
     }
 
     /// Mark a request `Approved` and persist.  Returns the entry (caller inserts the nft rule).
@@ -409,6 +422,7 @@ async fn permissions_check(
     // FR-014.a: configurable sliding-window rate limit per container.
     {
         let mut rate = state.perm_rate.lock().await;
+        reap_stale_rate_limiters(&mut rate);
         let limiter = rate
             .entry(container_id.clone())
             .or_insert_with(|| SlidingWindow::new(state.perm_limit, state.perm_window));
@@ -478,6 +492,7 @@ async fn rule_request_submit(
     // FR-014.b: configurable sliding-window rate limit per container.
     {
         let mut rate = state.rule_rate.lock().await;
+        reap_stale_rate_limiters(&mut rate);
         let limiter = rate
             .entry(container_id.clone())
             .or_insert_with(|| SlidingWindow::new(state.rule_limit, state.rule_window));
@@ -649,6 +664,11 @@ fn parse_host_port(target: &str) -> (String, u16) {
     (target.to_string(), 443)
 }
 
+fn reap_stale_rate_limiters(rate: &mut HashMap<String, SlidingWindow>) {
+    let now = Instant::now();
+    rate.retain(|_, limiter| !limiter.is_stale(now));
+}
+
 // ── Token / ID generators ─────────────────────────────────────────────────────
 
 fn generate_token() -> String {
@@ -664,25 +684,7 @@ fn generate_request_id() -> String {
 }
 
 fn fill_random(buf: &mut [u8]) {
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(buf);
-    } else {
-        // Fallback (degraded but never blocks): mix time and pid.
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let pid = std::process::id() as u128;
-        let mut x = nanos ^ pid.rotate_left(33);
-        for byte in buf.iter_mut() {
-            x = x
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            *byte = (x >> 56) as u8;
-        }
-    }
+    getrandom::getrandom(buf).expect("secure OS random source unavailable");
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -721,6 +723,23 @@ mod tests {
         assert!(w.allow());
         assert!(w.allow());
         assert!(!w.allow());
+    }
+
+    #[test]
+    fn stale_rate_limiters_are_reaped() {
+        let mut rate = HashMap::new();
+        let mut stale = SlidingWindow::new(1, Duration::from_secs(1));
+        stale.last_seen = Instant::now() - Duration::from_secs(3);
+        rate.insert("stale".to_string(), stale);
+        rate.insert(
+            "fresh".to_string(),
+            SlidingWindow::new(1, Duration::from_secs(1)),
+        );
+
+        reap_stale_rate_limiters(&mut rate);
+
+        assert!(!rate.contains_key("stale"));
+        assert!(rate.contains_key("fresh"));
     }
 
     #[test]

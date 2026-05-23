@@ -5,15 +5,15 @@ use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
-use bollard::Docker;
+use anyhow::{anyhow, Context, Result};
 use bollard::models::{Ipam, IpamConfig};
 use bollard::network::{CreateNetworkOptions, InspectNetworkOptions, ListNetworksOptions};
+use bollard::Docker;
 use tracing::{info, warn};
 
 use outcall_api::{
-    DEFAULT_GATEWAY, DEFAULT_NETWORK_NAME, DEFAULT_SUBNET, NETWORK_PREFIX, NetworkContainer,
-    NetworkCreateRequest, NetworkCreateResult, NetworkDestroyResult, NetworkStatus,
+    NetworkContainer, NetworkCreateRequest, NetworkCreateResult, NetworkDestroyResult,
+    NetworkStatus, DEFAULT_GATEWAY, DEFAULT_NETWORK_NAME, DEFAULT_SUBNET, NETWORK_PREFIX,
 };
 
 use crate::bridge::BridgeManager;

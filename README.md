@@ -1,6 +1,12 @@
 # Outcall
 
-Host-level firewall daemon that governs all outbound traffic from Docker agent containers. Creates isolated networks, applies nftables policies via a managed bridge, and gives operators CLI + API control over what containers can reach.
+![Outcall Banner](https://raw.githubusercontent.com/outcall-dev/assets/main/banner.png)
+
+## Badges
+
+[![CI](https://github.com/Outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/Outcall-dev/outcall/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://github.com/Outcall-dev/outcall/releases/tag/v0.1.8)
+[![Docker](https://img.shields.io/docker/pulls/outcall-dev/outcall.svg)](https://hub.docker.com/r/outcall-dev/outcall)
 
 ## Workspace
 

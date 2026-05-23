@@ -27,7 +27,7 @@ use hyper::body::Bytes;
 use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
 use tokio::net::UnixStream;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tracing::{debug, error, info};
 
@@ -107,7 +107,10 @@ async fn run() -> Result<ExitCode> {
         if sigterm.recv().await.is_none() {
             error!(component = "shim", "SIGTERM receiver hung up unexpectedly");
         }
-        info!(component = "shim", "SIGTERM received — shutting down gracefully");
+        info!(
+            component = "shim",
+            "SIGTERM received — shutting down gracefully"
+        );
         let _ = sigterm_stop_tx.send(true);
     });
 

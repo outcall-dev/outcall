@@ -201,8 +201,14 @@ pub fn router(
         .route("/api/v1/ca/bundle", get(ca_bundle))
         // Rule Request operator endpoints (S010-FR-007)
         .route("/api/v1/requests/rules", get(rule_requests_list))
-        .route("/api/v1/requests/rules/{id}/approve", post(rule_request_approve))
-        .route("/api/v1/requests/rules/{id}/reject", post(rule_request_reject))
+        .route(
+            "/api/v1/requests/rules/{id}/approve",
+            post(rule_request_approve),
+        )
+        .route(
+            "/api/v1/requests/rules/{id}/reject",
+            post(rule_request_reject),
+        )
         .with_state(state)
         // Enforce host-socket UID policy on all API routes (defence in depth;
         // primary protection is the 0600 socket file mode set in main.rs).
@@ -596,10 +602,7 @@ async fn rule_requests_list(
 /// Writes the agent-submitted rule file into the rules directory with a
 /// unique name and reloads the rule engine so the policy takes effect
 /// immediately. Returns the file name written so the operator can audit it.
-async fn rule_request_approve(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn rule_request_approve(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     // Fetch the current entry before mutating so we can check its status.
     let entry = match state.rule_requests.get(&id).await {
         Some(e) => e,
@@ -733,4 +736,3 @@ async fn rule_request_reject(
     )
         .into_response()
 }
-

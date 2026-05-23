@@ -181,6 +181,16 @@ impl RuleEngine {
             .and_then(|r| r.egress.clone())
     }
 
+    /// Return true if any loaded rule explicitly requires the L7 proxy.
+    pub async fn has_proxy_egress_rules(&self) -> bool {
+        self.rule_set.read().await.rules.iter().any(|r| {
+            r.action == RuleAction::Allow
+                && r.egress
+                    .as_ref()
+                    .is_some_and(|e| e.mode == EgressMode::Proxy)
+        })
+    }
+
     /// Validate a rule YAML string without modifying the engine's rule set.
     /// Returns `Ok(())` if the file parses and all CEL expressions compile.
     ///
@@ -235,28 +245,28 @@ fn load_and_compile(rules_dir: &str, intercept_enabled: bool) -> Result<RuleSet>
 
     // FR-038: missing or empty rules dir = empty rule set (no error)
     if !path.exists() {
-        info!(
+        warn!(
             rules_dir,
             "rules directory does not exist — starting with empty rule set"
         );
         return Ok(RuleSet::default());
     }
 
-    // Collect .yaml files in lexicographic order (FR-007)
+    // Collect .yaml/.yml files in lexicographic order (FR-007)
     let mut yaml_files: Vec<_> = WalkDir::new(path)
         .max_depth(1)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "yaml"))
+        .filter(|e| is_rule_file(e.path()))
         .map(|e| e.path().to_path_buf())
         .collect();
     yaml_files.sort();
 
     if yaml_files.is_empty() {
-        info!(
+        warn!(
             rules_dir,
-            "no .yaml files found — starting with empty rule set"
+            "no .yaml/.yml files found — starting with empty rule set"
         );
         return Ok(RuleSet::default());
     }
@@ -339,6 +349,14 @@ fn load_and_compile(rules_dir: &str, intercept_enabled: bool) -> Result<RuleSet>
     // Rules are already in filename/position order from the loop above.
     // A stable sort by priority preserves that order within the same priority level.
     all_rules.sort_by_key(|r| r.priority);
+
+    if all_rules.is_empty() {
+        warn!(
+            rules_dir,
+            files = yaml_files.len(),
+            "rule files loaded but no rules were defined — default-deny will block all traffic"
+        );
+    }
 
     info!(
         total_rules = all_rules.len(),
@@ -848,8 +866,14 @@ fn count_files(dir: &str) -> usize {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "yaml"))
+        .filter(|e| is_rule_file(e.path()))
         .count()
+}
+
+fn is_rule_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext, "yaml" | "yml"))
 }
 
 /// Collect non-fatal warnings (unused defs, etc.) — FR-016.
@@ -866,7 +890,7 @@ fn collect_warnings(rules_dir: &str) -> Result<Vec<String>> {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "yaml"))
+        .filter(|e| is_rule_file(e.path()))
         .collect();
     yaml_files.sort_by_key(|e| e.path().to_path_buf());
 

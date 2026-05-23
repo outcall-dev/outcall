@@ -1,11 +1,11 @@
-# Outcall v0.1.0
+# Outcall v0.1.0-beta.1
 
 Initial public release. Outcall is a host-level firewall daemon that governs
 all outbound traffic from Docker agent containers. It creates isolated
 networks, applies nftables policies via a managed bridge, and gives operators
 CLI + API control over what containers can reach.
 
-## What's in v0.1.0
+## What's in v0.1.0-beta.1
 
 ### Daemon (`outcalld`)
 
@@ -13,15 +13,26 @@ CLI + API control over what containers can reach.
 - CEL-based rule engine with hot reload via the host API (S003).
 - Agent shim API on a dedicated Unix socket — permission checks, check-in,
   rule requests (S004/S005).
-- HTTP/HTTPS proxy with SNI peeking (no decryption by default; opt-in TLS
-  interception via operator-provisioned CA, S006/S011).
-- DNS filter with allow/deny by query, optional cache, and graceful
-  degradation if the listener can't bind (S007).
+- HTTP/HTTPS proxy with SNI peeking. TLS interception is not implemented in
+  this beta; HTTPS method/path/body matching is not available yet.
+- DNS filter with allow/deny by query, bounded cache, A/AAAA handling, and
+  private-IP response stripping to block DNS rebinding by default (S007).
 - Docker manager that creates, lists, inspects, and tears down agent
   containers; auto-applies the `managed-by=outcalld` label (S008).
 - Dynamic nftables rules with bidirectional CEL ↔ nftables coordination (S009).
 - Read-only operator dashboard served from the host socket (S010).
 - `agent.name` CEL context — write rules per-agent, not just per-image (S013).
+- Bridge and proxy default bind addresses now use `10.200.0.1` instead of
+  `0.0.0.0`, limiting exposure to the managed agent bridge by default.
+- `--no-proxy` now refuses to start when loaded rules require
+  `egress.mode: proxy`, avoiding silent enforcement gaps.
+- Agent API session tokens now require OS cryptographic randomness; there is
+  no predictable fallback RNG.
+- Agent API rate-limit maps now reap stale container entries.
+- Plain HTTP requests with mismatched absolute-form URI authority and `Host:`
+  header are rejected.
+- CONNECT rejects known non-HTTPS service ports by default while still allowing
+  rule-approved custom TLS ports.
 
 ### CLI (`outcall`)
 
@@ -34,6 +45,8 @@ CLI + API control over what containers can reach.
 - `outcall daemon {start,stop,status,logs}` — drives the daemon container
   via Docker; `--build-from <Dockerfile>` for local builds.
 - `outcall rules reload` — atomic reload from `rules.d/`.
+- `outcall requests list|approve|reject` — operator approval flow for
+  agent-submitted rule requests.
 - `outcall ui [--port 8080]` — built-in TCP↔Unix-socket bridge that opens
   the dashboard in your browser. No socat needed.
 - `outcall --version` / `outcalld --version`.
@@ -49,8 +62,12 @@ outcall ui
 
 ### Tests
 
-- `cargo test --workspace` — 21 lib tests + Linux-only integration tests
-  (proxy HTTP/HTTPS, bridge, dynamic rules).
+- `cargo test --workspace` — unit and integration tests across all five crates
+  (proxy HTTP/HTTPS, bridge, DNS, dynamic rules, API, CLI, agent shim, UI).
+- CI runs `cargo check`, `cargo test`, `cargo fmt`, `cargo clippy`,
+  `cargo audit`, `cargo geiger`, and `cargo deny` in the application repo.
+- Root CI runs the Docker E2E, bypass, and payload suites against the full
+  multi-repo workspace.
 - `scripts/full-test.sh` — release-grade Linux harness that does
   `brew uninstall → brew tap → brew install`, drives the daemon container
   via the new `outcall daemon start`, applies a rule set covering every
@@ -67,13 +84,14 @@ outcall ui
   (lima/colima/UTM) or a privileged Docker container.
 - **No bottle yet.** The brew formula builds from source via cargo
   (~1-2 minutes on first install). A pre-built bottle is on the v0.2 list.
-- **Agent shim path still uses caller-supplied `container_id`** (issue #4).
-  Real HTTPS/apt traffic is unaffected — that transits the proxy path,
-  which fully resolves `agent.name` from the TCP peer IP.
+- **TLS interception is not shipped yet.** The proxy sees HTTPS CONNECT host
+  and SNI only; method/path/body filtering requires the future S011 work.
+- **No signed release artifacts yet.** SHA256 sums are produced; Sigstore/SBOM
+  signing is deferred to v0.2.
 
 ## Upgrading
 
-This is the first public release; no upgrade path applies. Install with
+This is the first public beta; no upgrade path applies. Install with
 `brew tap outcall-dev/outcall && brew install outcall`.
 
 ## Contributors

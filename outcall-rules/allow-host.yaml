@@ -1,0 +1,13 @@
+# Allow host bridge IP for API and proxy
+- id: allow-host-api
+  egress:
+    mode: allow
+    ip: 10.99.0.1
+    ports: [8080, 8443, 8888, 8889]
+    protocol: tcp
+- id: allow-host-dns
+  egress:
+    mode: allow
+    ip: 10.99.0.53
+    ports: [53]
+    protocol: udp

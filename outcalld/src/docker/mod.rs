@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use bollard::Docker;
 use bollard::container::NetworkingConfig;
 use bollard::container::{
     CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, StartContainerOptions,
@@ -17,14 +16,15 @@ use bollard::container::{
 use bollard::image::CreateImageOptions;
 use bollard::models::{EndpointSettings, HostConfig};
 use bollard::system::EventsOptions;
+use bollard::Docker;
 use futures::stream::StreamExt;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use outcall_api::{
-    AGENT_SOCKET_CONTAINER_PATH, ContainerCreateRequest, ContainerCreateResult, ContainerInfo,
-    ContainerInspectResult, ContainerRemoveResult, ContainerStopResult, DEFAULT_CPU_SHARES,
-    DEFAULT_MEMORY_LIMIT, DEFAULT_PID_LIMIT, DEFAULT_STOP_TIMEOUT_SECS, ImagePullResult,
+    ContainerCreateRequest, ContainerCreateResult, ContainerInfo, ContainerInspectResult,
+    ContainerRemoveResult, ContainerStopResult, ImagePullResult, AGENT_SOCKET_CONTAINER_PATH,
+    DEFAULT_CPU_SHARES, DEFAULT_MEMORY_LIMIT, DEFAULT_PID_LIMIT, DEFAULT_STOP_TIMEOUT_SECS,
     SHIM_CONTAINER_PATH,
 };
 

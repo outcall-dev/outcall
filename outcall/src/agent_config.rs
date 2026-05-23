@@ -11,51 +11,51 @@ pub struct AgentConfig {
     /// Docker image to use (default: outcall/agent:latest)
     #[serde(default)]
     pub image: Option<String>,
-    
+
     /// Agent name override (default: <folder>-agent)
     #[serde(default)]
     pub name: Option<String>,
-    
+
     /// Additional volume mounts
     #[serde(default)]
     pub volumes: Vec<String>,
-    
+
     /// Environment variables
     #[serde(default)]
     pub env: HashMap<String, String>,
-    
+
     /// Port forwarding
     #[serde(default)]
     pub ports: Vec<String>,
-    
+
     /// Additional Docker capabilities
     #[serde(default)]
     pub capabilities: Vec<String>,
-    
+
     /// Resource limits
     #[serde(default)]
     pub resources: Option<ResourceLimits>,
-    
+
     /// Custom entrypoint
     #[serde(default)]
     pub entrypoint: Option<Vec<String>>,
-    
+
     /// Custom command
     #[serde(default)]
     pub command: Option<Vec<String>>,
-    
+
     /// Working directory inside container
     #[serde(default = "default_workspace")]
     pub workspace: String,
-    
+
     /// Network to connect to (default: outcall-default)
     #[serde(default = "default_network")]
     pub network: String,
-    
+
     /// Whether to run in detached mode
     #[serde(default)]
     pub detach: bool,
-    
+
     /// Whether to auto-pull the image
     #[serde(default = "default_true")]
     pub auto_pull: bool,
@@ -83,26 +83,26 @@ impl AgentConfig {
     /// Load config from `.outcall/agent.yaml` in the given directory
     pub fn load(dir: &Path) -> Result<Self> {
         let config_path = dir.join(".outcall").join("agent.yaml");
-        
+
         if !config_path.exists() {
             return Ok(Self::default());
         }
-        
+
         let contents = std::fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?;
-        
+
         let config: AgentConfig = serde_yaml::from_str(&contents)
             .with_context(|| format!("failed to parse {}", config_path.display()))?;
-        
+
         Ok(config)
     }
-    
+
     /// Save default config template to `.outcall/agent.yaml`
     pub fn save_template(dir: &Path) -> Result<PathBuf> {
         let outcall_dir = dir.join(".outcall");
         std::fs::create_dir_all(&outcall_dir)
             .with_context(|| format!("failed to create {}", outcall_dir.display()))?;
-        
+
         let config_path = outcall_dir.join("agent.yaml");
         let template = r#"# Outcall Agent Configuration
 # This file customizes how `outcall agent` boots containers for this project.
@@ -151,13 +151,13 @@ impl AgentConfig {
 # Auto-pull image if not present
 # auto_pull: true
 "#;
-        
+
         std::fs::write(&config_path, template)
             .with_context(|| format!("failed to write {}", config_path.display()))?;
-        
+
         Ok(config_path)
     }
-    
+
     /// Merge CLI flags into config (CLI takes precedence)
     pub fn merge(&mut self, cli: &AgentCliFlags) {
         if let Some(ref image) = cli.image {
@@ -176,12 +176,14 @@ impl AgentConfig {
             self.detach = true;
         }
     }
-    
+
     /// Get the effective image name
     pub fn effective_image(&self) -> String {
-        self.image.clone().unwrap_or_else(|| "outcall/agent:latest".to_string())
+        self.image
+            .clone()
+            .unwrap_or_else(|| "outcall/agent:latest".to_string())
     }
-    
+
     /// Get the effective name for a given project directory
     pub fn effective_name(&self, project_dir: &Path) -> String {
         self.name.clone().unwrap_or_else(|| {

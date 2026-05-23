@@ -178,6 +178,12 @@ async fn linux_main(args: Args) -> Result<()> {
     let rule_engine = Arc::new(rules::RuleEngine::load(&args.rules_dir, intercept_enabled)?);
     info!(rules_dir = %args.rules_dir, "rule engine loaded");
 
+    if args.no_proxy && rule_engine.has_proxy_egress_rules().await {
+        anyhow::bail!(
+            "--no-proxy cannot be used while active rules require egress.mode: proxy; remove those rules or run the proxy"
+        );
+    }
+
     // Initialize bridge (S001) — creates outcall0 + applies base nftables ruleset.
     let mut bridge_mgr = bridge::BridgeManager::new(Some(&args.bridge)).await?;
     bridge_mgr.init().await?;
@@ -186,16 +192,17 @@ async fn linux_main(args: Args) -> Result<()> {
 
     // Initialize Docker Manager (S008).
     // EC-008 graceful degradation: unavailable Docker does NOT stop the daemon.
-    let docker_manager = match docker::DockerManager::new(&args.agent_socket_host_path, &args.shim_host_path)? {
-        Some(mgr) => {
-            info!("Docker Manager initialized");
-            mgr
-        }
-        None => {
-            info!("Docker Manager unavailable — continuing in degraded mode");
-            Arc::new(docker::DockerManager::new_unavailable())
-        }
-    };
+    let docker_manager =
+        match docker::DockerManager::new(&args.agent_socket_host_path, &args.shim_host_path)? {
+            Some(mgr) => {
+                info!("Docker Manager initialized");
+                mgr
+            }
+            None => {
+                info!("Docker Manager unavailable — continuing in degraded mode");
+                Arc::new(docker::DockerManager::new_unavailable())
+            }
+        };
 
     // Initialize Dynamic Rule Manager (S009) — subscribes to Docker death events.
     let dynamic_mgr = dynamic::DynamicRuleManager::new(docker_manager.clone());
