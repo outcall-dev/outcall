@@ -24,7 +24,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: target
+          shared-key: "outcall"
+          cache-on-failure: false
 
       - name: Clear stale hickory artifacts
         run: rm -rf ~/.cargo/registry/cache ~/.cargo/registry/src
@@ -46,7 +47,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: target
+          shared-key: "outcall"
+          cache-on-failure: false
 
       - name: cargo test
         run: cargo test --workspace --all-targets --locked
@@ -79,7 +81,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: target
+          shared-key: "outcall"
+          cache-on-failure: false
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -96,7 +99,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: target
+          shared-key: "outcall"
+          cache-on-failure: false
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
@@ -118,7 +122,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: target
+          shared-key: "outcall"
+          cache-on-failure: false
 
       - name: Install cargo-geiger
         uses: taiki-e/install-action@cargo-geiger
@@ -162,7 +167,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: target
+          shared-key: "outcall"
+          cache-on-failure: false
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@cargo-deny
