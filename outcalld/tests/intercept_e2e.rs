@@ -85,8 +85,9 @@ async fn spawn_intercept_daemon(
     ca_key: &PathBuf,
     rules_dir: &PathBuf,
 ) -> Result<(Child, String)> {
-    let cmd = Command::new("outcalld");
-    cmd.env("RUST_LOG", "outcalld=trace")
+    let child = Command::new("outcalld");
+    child
+        .env("RUST_LOG", "outcalld=trace")
         .arg("--socket")
         .arg(host_socket.as_os_str())
         .arg("--agent-socket-host-path")
@@ -103,7 +104,7 @@ async fn spawn_intercept_daemon(
         .context("failed to spawn outcalld with CA")?;
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    Ok((cmd, host_socket.to_string_lossy().to_string()))
+    Ok((child, host_socket.to_string_lossy().to_string()))
 }
 
 // ── Test: Intercept mode rejects when no CA loaded ─────────────────────────
@@ -133,7 +134,7 @@ rules:
     let agent_sock = tmp.path().join("agent.sock");
 
     // Spawn daemon without CA flags.
-    let cmd = Command::new("outcalld");
+    let mut cmd = Command::new("outcalld");
     cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(host_sock.as_os_str())
@@ -182,7 +183,7 @@ rules:
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
 
-    let cmd = Command::new("outcalld");
+    let mut cmd = Command::new("outcalld");
     cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(host_sock.as_os_str())
