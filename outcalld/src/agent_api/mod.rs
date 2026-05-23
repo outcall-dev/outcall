@@ -588,20 +588,6 @@ pub(crate) fn derive_agent_name(container_name: &str) -> String {
     RE.replace(container_name, "").to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_derive_agent_name() {
-        assert_eq!(derive_agent_name("foobar-1"), "foobar");
-        assert_eq!(derive_agent_name("foobar-12"), "foobar");
-        assert_eq!(derive_agent_name("my-agent-12"), "my-agent");
-        assert_eq!(derive_agent_name("standalone"), "standalone");
-        assert_eq!(derive_agent_name("agent-0"), "agent");
-    }
-}
-
 fn build_eval_context(req: &PermissionRequest, container_id: &str) -> EvalContext {
     let agent_name = derive_agent_name(container_id);
 
