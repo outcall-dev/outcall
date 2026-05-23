@@ -141,7 +141,7 @@ async fn agent_checkin_unknown_pid_returns_403() {
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (daemon, _host, agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, _host, agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -177,7 +177,7 @@ async fn agent_permissions_check_no_token_returns_401() {
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (daemon, _host, agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, _host, agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -218,7 +218,7 @@ async fn agent_rule_request_submit_no_token_returns_401() {
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (daemon, _host, agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, _host, agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -258,7 +258,7 @@ async fn host_rule_evaluate_dns_blocked_returns_block() {
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -305,7 +305,7 @@ async fn host_rule_evaluate_dns_allowed_returns_allow() {
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -354,7 +354,7 @@ async fn host_api_rejects_malformed_json_with_error_response() {
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -385,7 +385,7 @@ async fn host_api_unknown_endpoint_returns_404() {
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 

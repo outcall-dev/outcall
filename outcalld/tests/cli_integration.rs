@@ -113,7 +113,7 @@ async fn cli_bridge_up_and_down_cycle() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir)
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -135,7 +135,7 @@ async fn cli_dns_status_reports_filter_state() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir)
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -167,7 +167,7 @@ rules:
     fs::write(rules_dir.join("test.yaml"), yaml).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir)
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -189,7 +189,7 @@ async fn cli_dns_test_allowed_host_shows_allow_decision() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir)
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -211,7 +211,7 @@ async fn cli_dns_cache_shows_entries_after_queries() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir)
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -236,7 +236,7 @@ async fn cli_dns_flush_reports_cleared_entries() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir)
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -262,7 +262,7 @@ async fn cli_proxy_status_reports_proxy_state() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir)
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -286,7 +286,7 @@ async fn cli_network_list_returns_table_or_empty() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir)
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -308,7 +308,7 @@ async fn cli_network_create_succeeds_or_already_exists() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir)
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -332,7 +332,7 @@ async fn cli_unknown_subcommand_exits_nonzero() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir)
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -351,7 +351,7 @@ async fn cli_custom_socket_path_is_respected() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("custom.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir)
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
         .await
         .expect("daemon spawned");
 

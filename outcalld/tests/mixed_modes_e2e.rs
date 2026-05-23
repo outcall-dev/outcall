@@ -109,7 +109,7 @@ rules:
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -172,7 +172,7 @@ rules:
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -233,7 +233,7 @@ rules:
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 
