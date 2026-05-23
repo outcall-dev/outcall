@@ -85,7 +85,7 @@ async fn spawn_intercept_daemon(
     ca_key: &PathBuf,
     rules_dir: &PathBuf,
 ) -> Result<(Child, String)> {
-    let mut cmd = Command::new("outcalld");
+    let cmd = Command::new("outcalld");
     cmd.env("RUST_LOG", "outcalld=trace")
         .arg("--socket")
         .arg(host_socket.as_os_str())
@@ -133,7 +133,7 @@ rules:
     let agent_sock = tmp.path().join("agent.sock");
 
     // Spawn daemon without CA flags.
-    let mut cmd = Command::new("outcalld");
+    let cmd = Command::new("outcalld");
     cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(host_sock.as_os_str())
@@ -144,7 +144,7 @@ rules:
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let child = cmd.spawn().expect("daemon spawn");
+    let mut child = cmd.spawn().expect("daemon spawn");
 
     // Give daemon time to fail parsing/validating the rule set.
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -154,7 +154,7 @@ rules:
     // b) Start but reject intercept rules at runtime
     // We check the daemon process is still running — if it crashed with
     // a validation error on startup, it's also acceptable.
-    let status = child.kill().expect("kill");
+    let _ = child.kill();
 
     // If the daemon is still running, the intercept rejection may be happening
     // at runtime. Either outcome is acceptable for this test — the key is that
@@ -182,7 +182,7 @@ rules:
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
 
-    let mut cmd = Command::new("outcalld");
+    let cmd = Command::new("outcalld");
     cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(host_sock.as_os_str())
@@ -193,7 +193,7 @@ rules:
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let child = cmd.spawn().expect("daemon spawn");
+    let mut child = cmd.spawn().expect("daemon spawn");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Daemon should stay up (no CA needed, no intercept rules).
