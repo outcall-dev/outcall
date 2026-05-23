@@ -93,7 +93,7 @@ async fn dynamic_flush_empty_returns_zero_removed() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir).await.expect("daemon");
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir).await.expect("daemon");
 
     let mut s = UnixStream::connect(&sock).expect("connect");
     let resp = http_post_json::<_, FlushDynamicResult>(&mut s, "/api/v1/rules/flush", &());
@@ -119,7 +119,7 @@ async fn dynamic_insert_rule_returns_valid_handle() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir).await.expect("daemon");
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir).await.expect("daemon");
 
     let req = AllowRuleRequest {
         container: "test-container-1".to_string(),
@@ -157,7 +157,7 @@ async fn dynamic_insert_then_list_includes_new_rule() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir).await.expect("daemon");
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir).await.expect("daemon");
 
     let req = AllowRuleRequest {
         container: "test-container-2".to_string(),
@@ -201,7 +201,7 @@ async fn dynamic_insert_idempotent_returns_same_handle() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir).await.expect("daemon");
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir).await.expect("daemon");
 
     let req = AllowRuleRequest {
         container: "test-container-3".to_string(),
@@ -244,7 +244,7 @@ async fn dynamic_flush_removes_all_rules_reports_count() {
     make_allow_all_rules(&rules_dir).expect("write rules");
 
     let socket = tmp.path().join("outcalld.sock");
-    let (daemon, sock) = spawn_daemon(&socket, &rules_dir).await.expect("daemon");
+    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir).await.expect("daemon");
 
     // Insert two rules
     for i in 0..2 {
