@@ -251,7 +251,7 @@ async fn dynamic_flush_removes_all_rules_reports_count() {
         let req = AllowRuleRequest {
             container: format!("test-container-flush-{i}"),
             src_ip: format!("10.60.0.{}", 10 + i),
-            destination: format!("{}.{}:443", i, i, i, i),
+            destination: format!("10.60.0.{}:443", 10 + i),
             protocol: Some("tcp".to_string()),
             port: Some(443),
         };
