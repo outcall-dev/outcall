@@ -37,8 +37,8 @@ async fn spawn_daemon(
     agent_socket: &PathBuf,
     rules_dir: &PathBuf,
 ) -> Result<(Child, String, String)> {
-    let mut cmd = Command::new("outcalld");
-    cmd.env("RUST_LOG", "outcalld=warn")
+    let child = Command::new("outcalld");
+    child.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(host_socket.as_os_str())
         .arg("--agent-socket-host-path")
@@ -53,7 +53,7 @@ async fn spawn_daemon(
     tokio::time::sleep(Duration::from_millis(300)).await;
     let host = host_socket.to_string_lossy().to_string();
     let agent = agent_socket.to_string_lossy().to_string();
-    Ok((cmd, host, agent))
+    Ok((child, host, agent))
 }
 
 // ── Test: direct_ip rule bypasses proxy ─────────────────────────────────────
