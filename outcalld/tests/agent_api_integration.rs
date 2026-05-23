@@ -148,9 +148,13 @@ async fn agent_checkin_unknown_pid_returns_403() {
     // Check in using PID of the current test process (not a container PID).
     // DockerManager in degraded mode knows no containers → 403.
     let pid = std::process::id();
-    let req = outcall_api::CheckinRequest { pid };
-
-    let resp = agent_post_json::<_, CheckinData>(&agent, "/v1/checkin", &req);
+    // POST with no body — daemon extracts PID from SO_PEERCR
+    let mut sock = UnixStream::connect(&agent).expect("connect");
+    let request = "POST /v1/checkin HTTP/1.0\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+    sock.write_all(request.as_bytes()).expect("send");
+    drop(sock.shutdown(std::net::Shutdown::Write));
+    let body = read_http_body(&mut sock);
+    let resp: Option<ApiResponse<CheckinData>> = serde_json::from_str(&body).ok();
 
     // Daemon may be in degraded Docker mode (no real Docker) — unknown PID
     // is always rejected, whether Docker is present or not.
@@ -183,7 +187,7 @@ async fn agent_permissions_check_no_token_returns_401() {
 
     // Send a permission check with no Authorization header (no session token).
     let req = PermissionRequest {
-        action_type: ActionType::Connect,
+        action_type: ActionType::NetworkCall,
         target: "tcp:443".to_string(),
         metadata: Default::default(),
     };
@@ -223,9 +227,7 @@ async fn agent_rule_request_submit_no_token_returns_401() {
         .expect("daemon spawned");
 
     let req = AgentRuleSubmitRequest {
-        container_id: "test-container".to_string(),
         rule_file: "allow github.com".to_string(),
-        reason: Some("testing".to_string()),
     };
 
     let json = serde_json::to_string(&req).expect("serialize");
