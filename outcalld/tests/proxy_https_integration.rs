@@ -109,7 +109,7 @@ fn rule_engine_from_yaml(yaml: &str) -> (tempfile::TempDir, Arc<RuleEngine>) {
     let mut f = std::fs::File::create(dir.path().join("test.yaml")).expect("create yaml");
     f.write_all(yaml.as_bytes()).expect("write yaml");
     drop(f);
-    let engine = RuleEngine::load(dir.path().to_str().unwrap()).expect("load rules");
+    let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).expect("load rules");
     (dir, Arc::new(engine))
 }
 
