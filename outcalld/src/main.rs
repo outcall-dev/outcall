@@ -115,7 +115,7 @@ struct Args {
 }
 
 /// Parse a rate limit string of the form `<count>/<seconds>`.
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 fn parse_rate(s: &str) -> (usize, std::time::Duration) {
     let (count_s, window_s) = s.split_once('/').unwrap_or((s, "1"));
     let count = count_s.parse().unwrap_or(1);
