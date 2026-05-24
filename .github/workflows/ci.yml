@@ -100,7 +100,7 @@ jobs:
 
       - name: cargo test --ignored (e2e tests via sudo)
         run: |
-          sudo --preserve-env=CARGO_HOME,RUSTUP_HOME,PATH \
+          sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" \
             cargo test --workspace --tests -- --ignored
 
   test-privileged-docker:
@@ -117,9 +117,10 @@ jobs:
             -v "$PWD:/workspace" \
             -w /workspace \
             rust:latest \
-            sh -c 'export PATH="$PWD/target/debug:$PATH" && \
-                   cargo build --workspace --locked && \
-                   cargo test --workspace --tests -- --ignored'
+            bash -c 'apt-get update && apt-get install -y nftables && \
+                     export PATH="$PWD/target/debug:$PATH" && \
+                     cargo build --workspace --locked && \
+                     cargo test --workspace --tests -- --ignored'
 
   fmt:
     name: cargo fmt
