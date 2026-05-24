@@ -111,7 +111,7 @@ jobs:
         run: |
           sudo ip link del outcall0 2>/dev/null || true
           sudo ip link add outcall0 type bridge
-          sudo ip addr add 10.200.0.1/24 dev outcall0
+          sudo ip addr add 172.30.0.1/24 dev outcall0
           sudo ip link set outcall0 up
 
       - name: cargo test --ignored (e2e integration tests)
