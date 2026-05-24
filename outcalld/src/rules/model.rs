@@ -15,7 +15,6 @@ pub enum EgressMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct EgressSpec {
     pub mode: EgressMode,
     #[serde(default)]
