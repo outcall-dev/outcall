@@ -25,7 +25,7 @@ struct Assets;
 /// Returns an Axum router that serves the dashboard under `/ui/`.
 ///
 /// Routes:
-///   GET /ui        → index.html (redirect to /ui/)
+///   GET /ui        → index.html
 ///   GET /ui/       → index.html
 ///   GET /ui/*path  → assets/*path (CSS, JS, images, etc.)
 pub fn router() -> Router {
