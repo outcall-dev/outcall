@@ -62,8 +62,10 @@ docker run -d --rm \
 ```
 
 For local E2E testing, the test harness builds a separate image tagged
-`outcall-e2e` (see `Makefile` at the workspace root). Use that tag only in
-test environments — do not use it for production deployments.
+`outcall-daemon` (see `Makefile` at the workspace root — it uses
+`scripts/e2e/Dockerfile`, which bundles extra debugging tools like `socat`,
+`dnsmasq`, and `tinyproxy` for the bypass + payload test suites). Use that
+tag only in test environments — do not use it for production deployments.
 
 ### Optional flags
 
