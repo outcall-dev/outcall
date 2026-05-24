@@ -66,10 +66,10 @@ test environments — do not use it for production deployments.
 | `--socket <path>` | `/run/outcall/host.sock` | Host API Unix socket |
 | `--bridge <name>` | `outcall0` | Bridge interface name |
 | `--rules-dir <path>` | `/etc/outcall/rules.d` | Directory of rule YAML files |
-| `--dns-listen <ip>` | `0.0.0.0` | DNS filter bind address |
+| `--dns-listen <ip>` | `10.200.0.1` | DNS filter bind address (bridge gateway IP) |
 | `--dns-port <port>` | `53` | DNS filter bind port |
 | `--dns-upstream <list>` | `/etc/resolv.conf` | Comma-separated upstream DNS servers |
-| `--proxy-addr <host:port>` | `0.0.0.0:8080` | HTTP proxy bind address |
+| `--proxy-addr <host:port>` | `10.200.0.1:8080` | HTTP proxy bind address (bridge gateway IP:port) |
 | `--no-proxy` | _off_ | Disable the HTTP proxy entirely |
 | `--agent-socket-host-path <path>` | `/run/outcall/agent.sock` | Agent API Unix socket |
 | `--agent-timeout-secs <n>` | `5` | Server-side rule-evaluation timeout |
