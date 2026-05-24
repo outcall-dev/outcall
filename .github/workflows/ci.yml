@@ -33,8 +33,8 @@ jobs:
       - name: cargo check
         run: cargo check --workspace --all-targets --locked
 
-  test:
-    name: cargo test
+  test-unit:
+    name: cargo test (unit)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,21 +47,64 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "outcall"
+          shared-key: "outcall-unit"
+          cache-on-failure: false
+
+      - name: cargo test
+        run: cargo test --workspace --lib --bins --locked
+
+  test-integration:
+    name: cargo test (integration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "outcall-integration"
           cache-on-failure: false
 
       - name: cargo build
-        # Build first so the outcalld binary is on disk before the
-        # integration tests in outcalld/tests/agent_api_integration.rs
-        # try to spawn it via `Command::new("outcalld")`.
         run: cargo build --workspace --locked
 
       - name: cargo test
-        # Prepend target/debug to PATH so the integration tests can
-        # find the outcalld binary they spawn via `Command::new`.
         run: |
           export PATH="$PWD/target/debug:$PATH"
-          cargo test --workspace --all-targets --locked
+          cargo test --workspace --tests --locked
+
+  test-privileged:
+    name: cargo test (privileged e2e)
+    runs-on: ubuntu-latest
+    # These tests require CAP_NET_ADMIN to manipulate nftables and create
+    # network namespaces. They validate end-to-end firewall enforcement.
+    # We run them inside a container with CAP_NET_ADMIN to match how outcall
+    # is deployed in production (container isolation tool).
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run privileged e2e tests in container
+        run: |
+          docker run --rm \
+            --cap-add=NET_ADMIN \
+            --device /dev/net/tun:/dev/net/tun \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e OUTCALL_PROXY_ADDR=172.30.0.1:8080 \
+            rust:latest \
+            bash -c 'apt-get update && apt-get install -y nftables iproute2 && \
+                     ip link del outcall0 2>/dev/null || true && \
+                     ip link add outcall0 type bridge && \
+                     ip addr add 172.30.0.1/24 dev outcall0 && \
+                     ip link set outcall0 up && \
+                     export PATH="$PWD/target/debug:$PATH" && \
+                     cargo build --workspace --locked && \
+                     cargo test --workspace --tests -- --ignored'
 
   fmt:
     name: cargo fmt

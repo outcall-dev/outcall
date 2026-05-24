@@ -52,14 +52,18 @@ async fn spawn_daemon(
     // Capture stderr so the readiness probe can surface the daemon's
     // exit reason if it dies before binding. Silent failure here
     // surfaces as "connect: ENOENT" later, with no clue why.
-    let mut daemon = Command::new("outcalld")
-        .env("RUST_LOG", "outcalld=warn")
+    let mut cmd = Command::new("outcalld");
+    cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(host_socket.as_os_str())
         .arg("--rules-dir")
         .arg(rules_dir.as_os_str())
         .arg("--agent-socket-host-path")
-        .arg(agent_socket.as_os_str())
+        .arg(agent_socket.as_os_str());
+    if let Ok(proxy_addr) = std::env::var("OUTCALL_PROXY_ADDR") {
+        cmd.arg("--proxy-addr").arg(&proxy_addr);
+    }
+    let mut daemon = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()

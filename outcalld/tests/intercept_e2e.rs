@@ -85,8 +85,8 @@ async fn spawn_intercept_daemon(
     ca_key: &PathBuf,
     rules_dir: &PathBuf,
 ) -> Result<(Child, String)> {
-    let child = Command::new("outcalld")
-        .env("RUST_LOG", "outcalld=trace")
+    let mut cmd = Command::new("outcalld");
+    cmd.env("RUST_LOG", "outcalld=trace")
         .arg("--socket")
         .arg(host_socket.as_os_str())
         .arg("--agent-socket-host-path")
@@ -96,7 +96,11 @@ async fn spawn_intercept_daemon(
         .arg("--ca-cert")
         .arg(ca_cert.as_os_str())
         .arg("--ca-key")
-        .arg(ca_key.as_os_str())
+        .arg(ca_key.as_os_str());
+    if let Ok(proxy_addr) = std::env::var("OUTCALL_PROXY_ADDR") {
+        cmd.arg("--proxy-addr").arg(&proxy_addr);
+    }
+    let child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -191,10 +195,10 @@ rules:
         .arg("--agent-socket-host-path")
         .arg(agent_sock.as_os_str())
         .arg("--rules-dir")
-        .arg(rules_dir.as_os_str())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
+        .arg(rules_dir.as_os_str());
+    if let Ok(proxy_addr) = std::env::var("OUTCALL_PROXY_ADDR") {
+        cmd.arg("--proxy-addr").arg(&proxy_addr);
+    }
     let mut child = cmd.spawn().expect("daemon spawn");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
