@@ -75,7 +75,6 @@ pub struct EnrichSpec {
 
 /// A compiled rule, ready for evaluation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct CompiledRule {
     pub id: String,
     pub file: String,
