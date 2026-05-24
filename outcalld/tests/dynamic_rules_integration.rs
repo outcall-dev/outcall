@@ -58,12 +58,16 @@ fn http_get<R: serde::de::DeserializeOwned>(
 }
 
 async fn spawn_daemon(socket: &PathBuf, rules_dir: &PathBuf) -> Result<(Child, String)> {
-    let daemon = Command::new("outcalld")
-        .env("RUST_LOG", "outcalld=warn")
+    let mut cmd = Command::new("outcalld");
+    cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(socket.as_os_str())
         .arg("--rules-dir")
-        .arg(rules_dir.as_os_str())
+        .arg(rules_dir.as_os_str());
+    if let Ok(proxy_addr) = std::env::var("OUTCALL_PROXY_ADDR") {
+        cmd.arg("--proxy-addr").arg(&proxy_addr);
+    }
+    let daemon = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

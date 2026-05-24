@@ -109,6 +109,7 @@ jobs:
         run: |
           rustup default stable
           sudo env "PATH=/home/runner/.cargo/bin:/home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PWD/target/debug:$PATH" \
+            "OUTCALL_PROXY_ADDR=172.30.0.1:8080" \
             cargo test --workspace --tests -- --ignored
 
   test-privileged-docker:
@@ -124,6 +125,7 @@ jobs:
             --device /dev/net/tun:/dev/net/tun \
             -v "$PWD:/workspace" \
             -w /workspace \
+            -e OUTCALL_PROXY_ADDR=172.30.0.1:8080 \
             rust:latest \
             bash -c 'apt-get update && apt-get install -y nftables iproute2 && \
                      ip link del outcall0 2>/dev/null || true && \
