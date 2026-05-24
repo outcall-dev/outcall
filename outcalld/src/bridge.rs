@@ -49,8 +49,51 @@ impl BridgeManager {
     /// Create (or attach to) the bridge and apply the base nftables ruleset.
     pub async fn init(&mut self) -> Result<(), BridgeError> {
         self.ensure_bridge().await?;
+        self.enable_bridge_netfilter().await;
         self.apply_base_rules().await?;
         Ok(())
+    }
+
+    /// Ensure bridged traffic traverses the nftables `forward` hook.
+    ///
+    /// Without `net.bridge.bridge-nf-call-iptables=1`, the kernel delivers
+    /// frames between two veths on the same bridge at L2, completely
+    /// bypassing the nftables hooks where our drop rules live. That makes
+    /// T-2 (agent-to-agent isolation) silently unenforceable: a pre-shared
+    /// rule meant to drop iifname=outcall0 traffic never even sees the
+    /// packet. Block tests against external destinations still appear to
+    /// pass — those traverse routing, which goes through FORWARD — so this
+    /// failure mode is exactly the kind that ships unnoticed.
+    ///
+    /// Steps:
+    ///   1. `modprobe br_netfilter` — the `bridge-nf-*` sysctls only exist
+    ///      when this module is loaded (or built into the kernel).
+    ///   2. Write `1` to `/proc/sys/net/bridge/bridge-nf-call-iptables`.
+    ///
+    /// Both steps are best-effort: we warn but don't fail. The reasoning
+    /// is operational — if the module can't load or the sysctl can't be
+    /// written, the daemon is still useful for proxy-mediated egress
+    /// rules; only L2-bridged container-to-container enforcement degrades.
+    /// A loud `warn!` makes the gap discoverable instead of silent.
+    async fn enable_bridge_netfilter(&self) {
+        // 1) Module load. Ignore output; if it's already loaded or built
+        // in, modprobe returns 0 anyway. If we lack CAP_SYS_MODULE, this
+        // fails and we just check the sysctl below.
+        let _ = Command::new("modprobe").arg("br_netfilter").output().await;
+
+        // 2) Sysctl write via direct procfs path — sysctl(1) isn't always
+        // installed in minimal containers, procfs always is.
+        const PATH: &str = "/proc/sys/net/bridge/bridge-nf-call-iptables";
+        match tokio::fs::write(PATH, b"1").await {
+            Ok(()) => info!(sysctl = PATH, "bridge netfilter enabled (T-2 enforceable)"),
+            Err(e) => warn!(
+                sysctl = PATH,
+                error = %e,
+                "could not enable bridge-nf-call-iptables; container-to-container traffic on \
+                 the same bridge will bypass nftables hooks (T-2 silently unenforced). \
+                 Load the br_netfilter module on the host or set this sysctl manually."
+            ),
+        }
     }
 
     /// Idempotent bridge setup: create if missing, then bring up.
