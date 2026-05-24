@@ -96,9 +96,10 @@ jobs:
             -v "$PWD:/workspace" \
             -w /workspace \
             rust:latest \
-            sh -c 'export PATH="$PWD/target/debug:$PATH" && \
-                   cargo build --workspace --locked && \
-                   cargo test --workspace --tests -- --ignored'
+            bash -c 'apt-get update && apt-get install -y nftables && \
+                     export PATH="$PWD/target/debug:$PATH" && \
+                     cargo build --workspace --locked && \
+                     cargo test --workspace --tests -- --ignored'
 
   fmt:
     name: cargo fmt
