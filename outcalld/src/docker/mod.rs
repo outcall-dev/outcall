@@ -652,24 +652,13 @@ async fn event_watch_loop(docker: Docker, tx: broadcast::Sender<ContainerEvent>)
 
 // ── Utility functions ─────────────────────────────────────────────────────────
 
-/// Generate 8 random lowercase hex characters from `/dev/urandom`.
+/// Generate 8 random lowercase hex characters via the OS RNG.
 fn random_hex_suffix() -> String {
     let mut buf = [0u8; 4];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(&mut buf);
-    } else {
-        // Fallback: mix time + pid.
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let t = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
-        let v = t ^ (std::process::id() << 8);
-        buf.copy_from_slice(&v.to_le_bytes());
-    }
+    getrandom::getrandom(&mut buf).expect("secure OS random source unavailable");
     buf.iter().fold(String::new(), |mut s, b| {
         use std::fmt::Write;
+        // PRIVATE_INVARIANT_OK: write! to a String (which impls fmt::Write) is infallible.
         write!(&mut s, "{:02x}", b).unwrap();
         s
     })
