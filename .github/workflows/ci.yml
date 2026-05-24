@@ -63,6 +63,34 @@ jobs:
           export PATH="$PWD/target/debug:$PATH"
           cargo test --workspace --all-targets --locked
 
+  test-privileged:
+    name: cargo test (privileged e2e)
+    runs-on: ubuntu-latest
+    # These tests require CAP_NET_ADMIN to manipulate nftables and create
+    # network namespaces. GitHub Actions ubuntu runners have sudo access.
+    # They validate that the firewall actually enforces rules end-to-end.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "outcall-privileged"
+          cache-on-failure: false
+
+      - name: cargo build
+        run: cargo build --workspace --locked
+
+      - name: cargo test --ignored (e2e integration tests)
+        run: |
+          sudo env "PATH=$PWD/target/debug:$PATH" \
+            cargo test --workspace --all-targets -- --ignored
+
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
