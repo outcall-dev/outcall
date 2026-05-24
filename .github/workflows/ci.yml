@@ -110,7 +110,7 @@ jobs:
       - name: cargo test --ignored (e2e integration tests)
         run: |
           rustup default stable
-          sudo bash -c 'source /home/runner/.cargo/env && cargo test --workspace --tests -- --ignored'
+          sudo /home/runner/.cargo/bin/cargo test --workspace --tests -- --ignored
 
   fmt:
     name: cargo fmt
