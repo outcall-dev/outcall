@@ -87,10 +87,12 @@ impl DynamicRuleManager {
             }
         }
 
-        // Validate source IP belongs to the named container to prevent a compromised
-        // operator API from requesting allow rules for another container's IP.
-        // This prevents a container from requesting allow rules for another
-        // container's IP address via a compromised operator API call.
+        // Validate that the named container actually owns src_ip. Prevents a
+        // container from requesting allow rules for another container's IP
+        // via a compromised operator API call. If the lookup returns None,
+        // no container currently claims the IP and the request passes through
+        // — operator-API callers can pre-stage rules for not-yet-launched
+        // containers (api.rs:471).
         if let Some(actual_name) = self.docker.lookup_container_name_by_ip(&req.src_ip).await {
             if actual_name != req.container {
                 anyhow::bail!(
