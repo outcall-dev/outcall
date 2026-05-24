@@ -50,8 +50,18 @@ jobs:
           shared-key: "outcall"
           cache-on-failure: false
 
+      - name: cargo build
+        # Build first so the outcalld binary is on disk before the
+        # integration tests in outcalld/tests/agent_api_integration.rs
+        # try to spawn it via `Command::new("outcalld")`.
+        run: cargo build --workspace --locked
+
       - name: cargo test
-        run: cargo test --workspace --all-targets --locked
+        # Prepend target/debug to PATH so the integration tests can
+        # find the outcalld binary they spawn via `Command::new`.
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          cargo test --workspace --all-targets --locked
 
   fmt:
     name: cargo fmt
