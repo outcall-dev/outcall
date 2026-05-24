@@ -126,7 +126,10 @@ fn parse_rate(s: &str) -> (usize, std::time::Duration) {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter("outcalld=info")
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("outcalld=info")),
+        )
         .init();
 
     let args = Args::parse();
