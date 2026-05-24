@@ -72,7 +72,7 @@ fn default_workspace() -> String {
 }
 
 fn default_network() -> String {
-    "outcall0".to_string()
+    outcall_api::DEFAULT_NETWORK_NAME.to_string()
 }
 
 fn default_true() -> bool {
@@ -143,7 +143,7 @@ impl AgentConfig {
 # workspace: /workspace
 
 # Network to connect to
-# network: outcall0
+# network: outcall-default
 
 # Run in detached mode
 # detach: false
