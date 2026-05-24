@@ -72,10 +72,15 @@ test environments — do not use it for production deployments.
 | `--proxy-addr <host:port>` | `10.200.0.1:8080` | HTTP proxy bind address (bridge gateway IP:port) |
 | `--no-proxy` | _off_ | Disable the HTTP proxy entirely |
 | `--agent-socket-host-path <path>` | `/run/outcall/agent.sock` | Agent API Unix socket |
-| `--agent-timeout-secs <n>` | `5` | Server-side rule-evaluation timeout |
+| `--shim-host-path <path>` | `/usr/local/bin/outcall-agent` | Path to the `outcall-agent` shim binary that's bind-mounted into agent containers |
+| `--agent-timeout-secs <n>` | `5` | Server-side rule-evaluation timeout (S004-FR-015) |
+| `--agent-perm-rate <count/seconds>` | `100/10` | Sliding-window rate limit for permission checks per container |
+| `--agent-rule-rate <count/seconds>` | `10/60` | Sliding-window rate limit for rule submissions per container |
 | `--subnet-block <cidr>` | `10.200.0.0/16` | RFC 1918 block for `/24` auto-allocation |
 
 If port `8080` is already bound on the host, pass `--no-proxy` (or change `--proxy-addr`) to avoid the bind error.
+
+For the TLS-interception flags (`--ca-cert`, `--ca-key`, `--intercept-leaf-ttl-secs`, `--intercept-body-cap-bytes`) — accepted today but no-op until S011 ships — see the [Configuration guide](https://outcall.dev/docs/guides/configuration).
 
 ## Specifications
 
