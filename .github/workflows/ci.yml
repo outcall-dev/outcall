@@ -33,8 +33,8 @@ jobs:
       - name: cargo check
         run: cargo check --workspace --all-targets --locked
 
-  test:
-    name: cargo test
+  test-unit:
+    name: cargo test (unit)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,21 +47,77 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "outcall"
+          shared-key: "outcall-unit"
+          cache-on-failure: false
+
+      - name: cargo test
+        run: cargo test --workspace --lib --bins --locked
+
+  test-integration:
+    name: cargo test (integration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "outcall-integration"
           cache-on-failure: false
 
       - name: cargo build
-        # Build first so the outcalld binary is on disk before the
-        # integration tests in outcalld/tests/agent_api_integration.rs
-        # try to spawn it via `Command::new("outcalld")`.
         run: cargo build --workspace --locked
 
       - name: cargo test
-        # Prepend target/debug to PATH so the integration tests can
-        # find the outcalld binary they spawn via `Command::new`.
         run: |
           export PATH="$PWD/target/debug:$PATH"
-          cargo test --workspace --all-targets --locked
+          cargo test --workspace --tests --locked
+
+  test-privileged-sudo:
+    name: cargo test (privileged e2e - sudo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "outcall-privileged-sudo"
+          cache-on-failure: false
+
+      - name: cargo build
+        run: cargo build --workspace --locked
+
+      - name: cargo test --ignored (e2e tests via sudo)
+        run: |
+          sudo env "PATH=$PWD/target/debug:$PATH" \
+            cargo test --workspace --tests -- --ignored
+
+  test-privileged-docker:
+    name: cargo test (privileged e2e - docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run privileged e2e tests in container
+        run: |
+          docker run --rm \
+            --cap-add=NET_ADMIN \
+            --device /dev/net/tun:/dev/net/tun \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            rust:latest \
+            sh -c "cargo build --workspace --locked && cargo test --workspace --tests -- --ignored"
 
   fmt:
     name: cargo fmt
