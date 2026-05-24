@@ -95,7 +95,7 @@ jobs:
           cache-on-failure: false
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked -- -A warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   audit:
     name: cargo audit
