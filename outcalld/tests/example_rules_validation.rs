@@ -21,6 +21,7 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
+#[ignore = "expects rules.d/examples/ in the parent repo (Outcall-dev/root) working tree; not present in the standalone outcall checkout"]
 fn sentry_github_agent_example_rules_load() {
     let dir = repo_root().join("rules.d/examples/sentry-github-agent");
     assert!(dir.is_dir(), "expected example dir at {}", dir.display());
