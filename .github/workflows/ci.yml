@@ -100,7 +100,7 @@ jobs:
 
       - name: cargo test --ignored (e2e tests via sudo)
         run: |
-          sudo env "PATH=$PWD/target/debug:$PATH" \
+          sudo --preserve-env=CARGO_HOME,RUSTUP_HOME,PATH \
             cargo test --workspace --tests -- --ignored
 
   test-privileged-docker:
@@ -117,7 +117,9 @@ jobs:
             -v "$PWD:/workspace" \
             -w /workspace \
             rust:latest \
-            sh -c "cargo build --workspace --locked && cargo test --workspace --tests -- --ignored"
+            sh -c 'export PATH="$PWD/target/debug:$PATH" && \
+                   cargo build --workspace --locked && \
+                   cargo test --workspace --tests -- --ignored'
 
   fmt:
     name: cargo fmt
