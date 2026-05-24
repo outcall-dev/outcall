@@ -29,7 +29,6 @@ pub struct EgressSpec {
 
 /// Top-level structure of a rule YAML file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct RuleFile {
     /// Must be "1".
     pub version: String,
