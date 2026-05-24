@@ -1,0 +1,22 @@
+version: "1"
+# apt over HTTP and HTTPS to the distro mirror. Uses direct_ip egress
+# because apt opens a raw socket per index file and does its own
+# range requests — the proxy would interfere with parallel fetches.
+#
+# direct_ip means the daemon inserts an nftables allow for each IP
+# returned by DNS for the mirror hostname, scoped to ports 80/443.
+rules:
+  - id: allow-apt-mirror
+    description: "Agent may install packages from the configured apt mirror"
+    condition: |
+      agent.name == "agent-sentry-bot" &&
+      (
+        http.host == "archive.ubuntu.com" ||
+        http.host == "security.ubuntu.com" ||
+        http.host == "ports.ubuntu.com"
+      )
+    action: allow
+    log: true
+    egress:
+      mode: direct_ip
+      ports: [80, 443]

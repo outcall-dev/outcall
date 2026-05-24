@@ -1,0 +1,31 @@
+version: "1"
+# Belt-and-braces: deny any rule evaluation where the resolved IP is
+# private/loopback/link-local. The bridge already drops these at the
+# L3 layer, but a named rule gives us a counter and a log signal
+# when something *tries*.
+#
+# NOTE: at the time of writing, the DNS filter only warns on private
+# IP responses (audit H-2). When that's fixed to filter responses,
+# this rule becomes the audit trail.
+rules:
+  - id: deny-private-network-egress
+    description: "Agent must not connect to private/loopback/link-local IPs"
+    priority: 10
+    condition: |
+      agent.name == "agent-sentry-bot" &&
+      network.ip != "" &&
+      (
+        network.ip.startsWith("10.") ||
+        network.ip.startsWith("127.") ||
+        network.ip.startsWith("169.254.") ||
+        network.ip.startsWith("172.16.") ||
+        network.ip.startsWith("172.17.") ||
+        network.ip.startsWith("172.18.") ||
+        network.ip.startsWith("172.19.") ||
+        network.ip.startsWith("172.2") ||
+        network.ip.startsWith("172.30.") ||
+        network.ip.startsWith("172.31.") ||
+        network.ip.startsWith("192.168.")
+      )
+    action: block
+    log: true

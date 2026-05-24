@@ -1,0 +1,21 @@
+version: "1"
+# Sentry egress. We can't enforce path/method on HTTPS without TLS
+# interception, so we lock down to hostname + port 443 + agent identity.
+#
+# If you need to limit to read-only endpoints, scope the SENTRY_TOKEN
+# itself rather than relying on the network layer.
+rules:
+  - id: allow-https-sentry
+    description: "Agent may call the Sentry API over HTTPS"
+    condition: |
+      agent.name == "agent-sentry-bot" &&
+      network.port == 443 &&
+      (
+        http.host == "sentry.io" ||
+        http.host == "o0.ingest.sentry.io" ||
+        http.host.endsWith(".sentry.io")
+      )
+    action: allow
+    log: true
+    egress:
+      mode: proxy

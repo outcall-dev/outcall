@@ -1,0 +1,18 @@
+version: "1"
+# LLM provider egress. Hostname + port + agent identity. Same pattern
+# as Sentry — limit at the API-token level if you need per-endpoint
+# control.
+#
+# If your provider rotates SNI between regions (e.g. Bedrock or Azure
+# OpenAI), expand the hostname list rather than wildcarding.
+rules:
+  - id: allow-https-anthropic
+    description: "Agent may call the configured LLM provider"
+    condition: |
+      agent.name == "agent-sentry-bot" &&
+      network.port == 443 &&
+      http.host == "api.anthropic.com"
+    action: allow
+    log: true
+    egress:
+      mode: proxy
