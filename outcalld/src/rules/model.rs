@@ -90,7 +90,6 @@ pub struct CompiledRule {
 
 /// The entire compiled rule set, held in an Arc for concurrent evaluation.
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 pub struct RuleSet {
     pub rules: Vec<CompiledRule>,
 }
