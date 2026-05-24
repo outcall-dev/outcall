@@ -171,6 +171,7 @@ fn agent_get<R: serde::de::DeserializeOwned>(
 
 /// An agent with an unknown (non-container) PID is rejected at check-in.
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn agent_checkin_unknown_pid_returns_403() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -211,6 +212,7 @@ async fn agent_checkin_unknown_pid_returns_403() {
 
 /// Calling `/v1/permissions/check` without a valid session token returns 401.
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn agent_permissions_check_no_token_returns_401() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -252,6 +254,7 @@ async fn agent_permissions_check_no_token_returns_401() {
 // ── Test 3: Rule request submit without session → 401 ──────────────────────
 
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn agent_rule_request_submit_no_token_returns_401() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -290,6 +293,7 @@ async fn agent_rule_request_submit_no_token_returns_401() {
 /// Verify the host API `/api/v1/rule/evaluate` accepts a DNS context
 /// and returns ALLOW/BLOCK according to the loaded rules.
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn host_rule_evaluate_dns_blocked_returns_block() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -337,6 +341,7 @@ async fn host_rule_evaluate_dns_blocked_returns_block() {
 }
 
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn host_rule_evaluate_dns_allowed_returns_allow() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -386,6 +391,7 @@ async fn host_rule_evaluate_dns_allowed_returns_allow() {
 // ── Test 5: Host API returns structured errors for bad JSON ───────────────
 
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn host_api_rejects_malformed_json_with_error_response() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -417,6 +423,7 @@ async fn host_api_rejects_malformed_json_with_error_response() {
 // ── Test 6: Host API unknown endpoint returns 404 ─────────────────────────
 
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn host_api_unknown_endpoint_returns_404() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
