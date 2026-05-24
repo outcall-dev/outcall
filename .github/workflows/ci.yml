@@ -107,6 +107,12 @@ jobs:
       - name: cargo build
         run: cargo build --workspace --locked
 
+      - name: Set up outcall0 bridge
+        run: |
+          sudo ip link add outcall0 type bridge || true
+          sudo ip addr add 10.200.0.1/24 dev outcall0 || true
+          sudo ip link set outcall0 up || true
+
       - name: cargo test --ignored (e2e integration tests)
         run: |
           rustup default stable
