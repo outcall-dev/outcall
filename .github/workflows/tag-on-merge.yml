@@ -18,11 +18,14 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Get latest tag
+        id: latest_tag
         run: |
-          latest=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          latest=$(git tag --sort=-version:refname --list 'v*' | head -n1)
+          if [ -z "$latest" ]; then latest="v0.0.0"; fi
           echo "latest=$latest" >> $GITHUB_OUTPUT
 
       - name: Increment patch version
+        id: new_tag
         env:
           LATEST_TAG: ${{ steps.latest_tag.outputs.latest }}
         run: |
