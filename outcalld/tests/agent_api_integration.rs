@@ -49,7 +49,10 @@ async fn spawn_daemon(
     agent_socket: &PathBuf,
     rules_dir: &PathBuf,
 ) -> Result<(Child, String, String)> {
-    let daemon = Command::new("outcalld")
+    // Capture stderr so the readiness probe can surface the daemon's
+    // exit reason if it dies before binding. Silent failure here
+    // surfaces as "connect: ENOENT" later, with no clue why.
+    let mut daemon = Command::new("outcalld")
         .env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(host_socket.as_os_str())
@@ -58,12 +61,46 @@ async fn spawn_daemon(
         .arg("--agent-socket-host-path")
         .arg(agent_socket.as_os_str())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .context("failed to spawn outcalld")?;
+        .context("failed to spawn outcalld (binary not on PATH?)")?;
 
-    // Wait for both sockets to be bound
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Poll for both socket files to appear. The previous 300ms flat
+    // sleep was too short on cold CI runners AND swallowed the actual
+    // exit reason when the daemon died on startup.
+    let timeout = Duration::from_secs(5);
+    let poll_interval = Duration::from_millis(25);
+    let started_at = std::time::Instant::now();
+    loop {
+        if host_socket.exists() && agent_socket.exists() {
+            break;
+        }
+        if let Ok(Some(status)) = daemon.try_wait() {
+            let mut stderr = String::new();
+            if let Some(mut s) = daemon.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld exited before binding sockets (status: {:?}). stderr:\n{}",
+                status,
+                stderr.trim()
+            );
+        }
+        if started_at.elapsed() >= timeout {
+            let _ = daemon.kill();
+            let mut stderr = String::new();
+            if let Some(mut s) = daemon.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld did not bind sockets within {:?}. stderr:\n{}",
+                timeout,
+                stderr.trim()
+            );
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+
     let host = host_socket.to_string_lossy().to_string();
     let agent = agent_socket.to_string_lossy().to_string();
     Ok((daemon, host, agent))

@@ -126,7 +126,9 @@ jobs:
           cache-on-failure: false
 
       - name: Install cargo-geiger
-        uses: taiki-e/install-action@cargo-geiger
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-geiger
 
       - name: cargo geiger (outcalld)
         run: cd outcalld && cargo geiger --all-targets || true
