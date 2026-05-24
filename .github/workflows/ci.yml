@@ -109,8 +109,8 @@ jobs:
 
       - name: cargo test --ignored (e2e integration tests)
         run: |
-          export PATH="/home/runner/.cargo/bin:$PATH"
-          sudo bash -c "export PATH=$PATH && cargo test --workspace --tests -- --ignored"
+          rustup default stable
+          sudo bash -c 'source /home/runner/.cargo/env && cargo test --workspace --tests -- --ignored'
 
   fmt:
     name: cargo fmt
