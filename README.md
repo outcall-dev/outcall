@@ -4,9 +4,9 @@
 
 ## Badges
 
-[![CI](https://github.com/Outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/Outcall-dev/outcall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://github.com/Outcall-dev/outcall/releases/tag/v0.1.8)
-[![Docker](https://img.shields.io/docker/pulls/outcall-dev/outcall.svg)](https://hub.docker.com/r/outcall-dev/outcall)
+[![CI](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://github.com/outcall-dev/outcall/releases/tag/v0.1.8)
+[![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcall-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcall)
 
 ## Workspace
 
@@ -85,8 +85,8 @@ Full functional and interface specs live in the [`outcall-dev/specs`](https://gi
 
 Outcall is security-critical infrastructure. Before deploying it, read:
 
-- [Threat model](https://github.com/Outcall-dev/docs/blob/main/security/threat-model.md) — what Outcall protects against, what it does not, and the trust boundaries you rely on.
-- [Most recent audit](https://github.com/Outcall-dev/docs/blob/main/security/audit-2026-05-14.md) — findings, severities, and what's fixed.
+- [Threat model](https://github.com/outcall-dev/docs/blob/main/security/threat-model.md) — what Outcall protects against, what it does not, and the trust boundaries you rely on.
+- [Most recent audit](https://github.com/outcall-dev/docs/blob/main/security/audit-2026-05-14.md) — findings, severities, and what's fixed.
 - [`SECURITY.md`](./SECURITY.md) — how to report a vulnerability.
 
 For a worked example of a tightly-scoped agent ruleset (Sentry → GitHub PR
