@@ -8,7 +8,6 @@ use outcall_api::RuleAction;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum EgressMode {
     Proxy,
     DirectIp,
