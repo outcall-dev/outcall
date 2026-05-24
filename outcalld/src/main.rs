@@ -378,7 +378,9 @@ async fn linux_main(args: Args) -> Result<()> {
     // Cleanup
     proxy_server.shutdown().await;
     dns_server.shutdown().await;
-    bridge.lock().await.teardown().await.ok();
+    if let Err(e) = bridge.lock().await.teardown().await {
+        tracing::warn!("bridge teardown failed: {e}");
+    }
     agent_server.abort();
     let _ = std::fs::remove_file(&args.socket);
     let _ = std::fs::remove_file(&args.agent_socket_host_path);
