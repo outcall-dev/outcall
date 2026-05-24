@@ -98,10 +98,10 @@ jobs:
       - name: cargo build
         run: cargo build --workspace --locked
 
-      - name: cargo test --ignored (e2e tests via sudo)
+- name: cargo test --ignored (e2e tests via sudo)
         run: |
-          sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" \
-            cargo test --workspace --tests -- --ignored
+          rustup default stable
+          sudo -E cargo test --workspace --tests -- --ignored
 
   test-privileged-docker:
     name: cargo test (privileged e2e - docker)
@@ -112,14 +112,15 @@ jobs:
       - name: Run privileged e2e tests in container
         run: |
           docker run --rm \
+            --network=host \
             --cap-add=NET_ADMIN \
             --device /dev/net/tun:/dev/net/tun \
             -v "$PWD:/workspace" \
             -w /workspace \
             rust:latest \
-            bash -c 'apt-get update && apt-get install -y nftables && \
-                     export PATH="$PWD/target/debug:$PATH" && \
+            bash -c 'apt-get update && apt-get install -y nftables iproute2 && \
                      cargo build --workspace --locked && \
+                     export PATH="$PWD/target/debug:$PATH" && \
                      cargo test --workspace --tests -- --ignored'
 
   fmt:
