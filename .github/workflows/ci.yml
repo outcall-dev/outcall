@@ -109,9 +109,10 @@ jobs:
 
       - name: Set up outcall0 bridge
         run: |
-          sudo ip link add outcall0 type bridge || true
-          sudo ip addr add 10.200.0.1/24 dev outcall0 || true
-          sudo ip link set outcall0 up || true
+          sudo ip link del outcall0 2>/dev/null || true
+          sudo ip link add outcall0 type bridge
+          sudo ip addr add 10.200.0.1/24 dev outcall0
+          sudo ip link set outcall0 up
 
       - name: cargo test --ignored (e2e integration tests)
         run: |
