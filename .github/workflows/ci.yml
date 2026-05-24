@@ -91,15 +91,18 @@ jobs:
       - name: Run privileged e2e tests in container
         run: |
           docker run --rm \
-            --network=host \
             --cap-add=NET_ADMIN \
             --device /dev/net/tun:/dev/net/tun \
             -v "$PWD:/workspace" \
             -w /workspace \
             rust:latest \
             bash -c 'apt-get update && apt-get install -y nftables iproute2 && \
-                     cargo build --workspace --locked && \
+                     ip link del outcall0 2>/dev/null || true && \
+                     ip link add outcall0 type bridge && \
+                     ip addr add 172.30.0.1/24 dev outcall0 && \
+                     ip link set outcall0 up && \
                      export PATH="$PWD/target/debug:$PATH" && \
+                     cargo build --workspace --locked && \
                      cargo test --workspace --tests -- --ignored'
 
   fmt:
