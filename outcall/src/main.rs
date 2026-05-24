@@ -1353,10 +1353,10 @@ fn cmd_ca_init(out_dir: Option<String>) -> Result<()> {
     // Validity: 10 years from now.
     let now = OffsetDateTime::now_utc();
     let y = now.year();
-    let m = now.month() as i32;
-    let d = now.day() as i32;
-    ca_params.not_before = date_time_ymd(y, m.try_into().unwrap(), d.try_into().unwrap());
-    ca_params.not_after = date_time_ymd(y + 10, m.try_into().unwrap(), d.try_into().unwrap());
+    let m = now.month() as u8;
+    let d = now.day();
+    ca_params.not_before = date_time_ymd(y, m, d);
+    ca_params.not_after = date_time_ymd(y + 10, m, d);
     ca_params.subject_alt_names = vec![SanType::DnsName("outcall-ca".try_into()?)];
 
     let ca_key_pair = KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256)
