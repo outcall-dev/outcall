@@ -6,7 +6,7 @@ infrastructure — code style and review depth reflect that.
 ## Quick start
 
 ```sh
-git clone https://github.com/Outcall-dev/outcall
+git clone https://github.com/outcall-dev/outcall
 cd outcall
 cargo test --workspace --all-targets
 ```
@@ -78,7 +78,7 @@ These require Docker and root.
 
 ## Specs come before code
 
-Outcall has a numbered spec corpus in the [specs](https://github.com/Outcall-dev/specs)
+Outcall has a numbered spec corpus in the [specs](https://github.com/outcall-dev/specs)
 repository. For non-trivial features, write or update the spec first,
 land it, then implement. Bug fixes don't need a new spec; behavior
 changes do.
