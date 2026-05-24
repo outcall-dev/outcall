@@ -545,11 +545,12 @@ fn cmd_requests_reject(socket: &str, id: &str, reason: Option<String>) -> Result
 //   Static assets (HTML/JS/CSS) served without token so the browser can fetch
 //   index.html, which must then attach the token to its API calls.
 
-/// Generate a 32-byte (256-bit) random token and hex-encode it.
+/// Generate a 32-byte (256-bit) random token from the OS RNG and hex-encode it.
 fn generate_token() -> String {
     use rand::RngCore;
+    use rand::rngs::OsRng;
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
