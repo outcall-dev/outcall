@@ -109,8 +109,8 @@ jobs:
 
       - name: cargo test --ignored (e2e integration tests)
         run: |
-          sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" \
-            cargo test --workspace --tests -- --ignored
+          rustup default stable
+          sudo -E cargo test --workspace --tests -- --ignored
 
   fmt:
     name: cargo fmt
