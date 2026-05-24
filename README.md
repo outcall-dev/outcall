@@ -37,9 +37,15 @@ Linux only. macOS will build the workspace (cross-platform types compile) but `o
 | Flag | Why |
 |---|---|
 | `--cap-add NET_ADMIN` | Create bridges, configure interfaces, apply nftables |
-| `--cap-add SYS_ADMIN` | Mount /sys writes used by nftables |
 | `--network host` | Daemon must see the host network namespace |
 | `-v /var/run/docker.sock:/var/run/docker.sock` | Manage Docker networks and look up containers by PID |
+
+`SYS_ADMIN` is **not** required by the daemon's current code paths
+(verified against `outcalld/src/bridge.rs`); some kernels are stricter
+about netlink and may surface `EPERM` on bridge bringup. Add
+`--cap-add SYS_ADMIN` only if that happens. The E2E test rig in
+`Makefile` adds it because the harness sets up extra network
+namespaces, not because the daemon itself needs it.
 
 ### Example
 
