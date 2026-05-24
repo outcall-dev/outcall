@@ -1,11 +1,16 @@
-# Outcall v0.1.0-beta.1
+# Outcall v0.1.8
 
 Initial public release. Outcall is a host-level firewall daemon that governs
 all outbound traffic from Docker agent containers. It creates isolated
 networks, applies nftables policies via a managed bridge, and gives operators
 CLI + API control over what containers can reach.
 
-## What's in v0.1.0-beta.1
+This release rolls the v0.1.0-beta.1 initial cut together with the v0.1.x
+hardening waves (audit fixes, default bind tightening, DNS rebinding
+mitigation, `--no-proxy` startup safety, CSPRNG-only session tokens,
+T-2 bridge-netfilter enforcement) into one tagged release.
+
+## What's in v0.1.8
 
 ### Daemon (`outcalld`)
 
@@ -101,4 +106,4 @@ This is the first public beta; no upgrade path applies. Install with
 ---
 
 For the full changelog, see [CHANGELOG.md](CHANGELOG.md).
-For specifications, see the [specs repo](https://github.com/Outcall-dev/specs).
+For specifications, see the [specs repo](https://github.com/outcall-dev/specs).
