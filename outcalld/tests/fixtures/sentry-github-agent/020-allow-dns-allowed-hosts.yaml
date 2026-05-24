@@ -1,0 +1,54 @@
+version: "1"
+# DNS allowlist. The DNS filter rejects everything not in this list with
+# NXDOMAIN — the agent can't even discover IPs for non-allowed hosts.
+#
+# Adjust the apt mirror hostname to your distro/region. The example uses
+# Ubuntu archives; substitute your private mirror as appropriate.
+#
+# Definitions use YAML folded scalars (>) so newlines collapse to spaces
+# before reaching the CEL parser. Plain literals (|) preserve newlines
+# and break CEL parsing.
+definitions:
+  is_sentry_host: >-
+    dns.query == "sentry.io" ||
+    dns.query == "o0.ingest.sentry.io" ||
+    dns.query.endsWith(".sentry.io")
+
+  is_github_host: >-
+    dns.query == "github.com" ||
+    dns.query == "api.github.com" ||
+    dns.query == "codeload.github.com" ||
+    dns.query == "objects.githubusercontent.com" ||
+    dns.query == "raw.githubusercontent.com"
+
+  is_apt_mirror_host: >-
+    dns.query == "archive.ubuntu.com" ||
+    dns.query == "security.ubuntu.com" ||
+    dns.query == "ports.ubuntu.com"
+
+  is_model_provider_host: >-
+    dns.query == "api.anthropic.com"
+
+rules:
+  - id: allow-dns-sentry
+    description: "DNS for Sentry hosts"
+    condition: '$is_sentry_host'
+    action: allow
+
+  - id: allow-dns-github
+    description: "DNS for GitHub hosts"
+    condition: '$is_github_host'
+    action: allow
+
+  - id: allow-dns-apt-mirror
+    description: "DNS for the apt mirror"
+    condition: '$is_apt_mirror_host'
+    action: allow
+    egress:
+      mode: direct_ip
+      ports: [80, 443]
+
+  - id: allow-dns-model-provider
+    description: "DNS for the configured LLM provider"
+    condition: '$is_model_provider_host'
+    action: allow

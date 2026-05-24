@@ -1,0 +1,21 @@
+version: "1"
+# Defense in depth: an agent should never reach any non-standard port.
+# The default-deny already catches this — but a named rule shows up in
+# `outcall rules counters`, so we get a visible signal when the agent
+# probes something it shouldn't.
+#
+# These rules use priority 50 so they evaluate before the allow rules
+# (which default to priority 100). A non-HTTPS port matches and the
+# request is denied with a clear rule id.
+rules:
+  - id: deny-non-standard-ports
+    description: "Agent must not connect to ports other than 80/443/53"
+    priority: 50
+    condition: |
+      agent.name == "agent-sentry-bot" &&
+      network.port != 0 &&
+      network.port != 53 &&
+      network.port != 80 &&
+      network.port != 443
+    action: block
+    log: true

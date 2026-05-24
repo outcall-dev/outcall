@@ -1,0 +1,18 @@
+version: "1"
+# Explicit deny for git-over-HTTPS to GitHub. The agent should only
+# touch repos via the REST API (which we constrain at the token level
+# to non-force, agent/* refs only via branch protection).
+#
+# This rule fires before the github-api allow because its priority
+# (50) beats the default (100). The matched_rule in `outcall rules
+# counters` makes it visible when an agent attempts a git push.
+rules:
+  - id: deny-git-over-https
+    description: "Agent must not push to GitHub via git-over-HTTPS (use the REST API)"
+    priority: 50
+    condition: |
+      agent.name == "agent-sentry-bot" &&
+      http.host == "github.com" &&
+      network.port == 443
+    action: block
+    log: true

@@ -1,0 +1,31 @@
+version: "1"
+# GitHub egress. The agent uses api.github.com for issues, PRs, and
+# branches. It uses codeload/objects.githubusercontent.com to fetch
+# repo tarballs. We explicitly do NOT allow git over HTTPS to
+# github.com — that path is covered by the deny rule in 090-*.
+rules:
+  - id: allow-https-github-api
+    description: "Agent may use the GitHub REST API"
+    condition: |
+      agent.name == "agent-sentry-bot" &&
+      network.port == 443 &&
+      http.host == "api.github.com"
+    action: allow
+    log: true
+    egress:
+      mode: proxy
+
+  - id: allow-https-github-raw-content
+    description: "Agent may fetch raw repo content from GitHub"
+    condition: |
+      agent.name == "agent-sentry-bot" &&
+      network.port == 443 &&
+      (
+        http.host == "codeload.github.com" ||
+        http.host == "objects.githubusercontent.com" ||
+        http.host == "raw.githubusercontent.com"
+      )
+    action: allow
+    log: true
+    egress:
+      mode: proxy
