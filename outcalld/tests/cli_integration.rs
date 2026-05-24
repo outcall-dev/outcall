@@ -85,6 +85,7 @@ fn assert_failure(output: &std::process::Output, context: &str) {
 // ── Test 1: Bridge subcommand group ──────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn cli_bridge_status_reports_bridge_state() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -107,6 +108,7 @@ async fn cli_bridge_status_reports_bridge_state() {
 }
 
 #[tokio::test]
+#[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn cli_bridge_up_and_down_cycle() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -129,6 +131,7 @@ async fn cli_bridge_up_and_down_cycle() {
 // ── Test 2: DNS subcommand group ─────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn cli_dns_status_reports_filter_state() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -151,6 +154,7 @@ async fn cli_dns_status_reports_filter_state() {
 }
 
 #[tokio::test]
+#[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn cli_dns_test_blocked_host_shows_block_decision() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -183,6 +187,7 @@ rules:
 }
 
 #[tokio::test]
+#[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn cli_dns_test_allowed_host_shows_allow_decision() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -205,6 +210,7 @@ async fn cli_dns_test_allowed_host_shows_allow_decision() {
 }
 
 #[tokio::test]
+#[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn cli_dns_cache_shows_entries_after_queries() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -230,6 +236,7 @@ async fn cli_dns_cache_shows_entries_after_queries() {
 }
 
 #[tokio::test]
+#[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn cli_dns_flush_reports_cleared_entries() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -256,6 +263,7 @@ async fn cli_dns_flush_reports_cleared_entries() {
 // ── Test 3: Proxy subcommand group ────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn cli_proxy_status_reports_proxy_state() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -280,6 +288,7 @@ async fn cli_proxy_status_reports_proxy_state() {
 // ── Test 4: Network subcommand group ─────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn cli_network_list_returns_table_or_empty() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -302,6 +311,7 @@ async fn cli_network_list_returns_table_or_empty() {
 }
 
 #[tokio::test]
+#[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn cli_network_create_succeeds_or_already_exists() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -345,6 +355,7 @@ async fn cli_unknown_subcommand_exits_nonzero() {
 // ── Test 6: Custom socket path is respected ─────────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn cli_custom_socket_path_is_respected() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();

@@ -87,6 +87,7 @@ rules:
 // ── Test 1: Flush on empty state returns zero removed ─────────────────────
 
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn dynamic_flush_empty_returns_zero_removed() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -113,6 +114,7 @@ async fn dynamic_flush_empty_returns_zero_removed() {
 // ── Test 2: Insert a dynamic allow rule returns a valid nft handle ───────
 
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn dynamic_insert_rule_returns_valid_handle() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -151,6 +153,7 @@ async fn dynamic_insert_rule_returns_valid_handle() {
 // ── Test 3: After insert, rule appears in active list ─────────────────────
 
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn dynamic_insert_then_list_includes_new_rule() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -195,6 +198,7 @@ async fn dynamic_insert_then_list_includes_new_rule() {
 // ── Test 4: Inserting the same rule twice returns same handle (idempotent) ─
 
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn dynamic_insert_idempotent_returns_same_handle() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -238,6 +242,7 @@ async fn dynamic_insert_idempotent_returns_same_handle() {
 // ── Test 5: Flush removes all dynamic rules and reports count ─────────────
 
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn dynamic_flush_removes_all_rules_reports_count() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();

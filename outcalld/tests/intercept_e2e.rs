@@ -112,6 +112,7 @@ async fn spawn_intercept_daemon(
 /// We verify that starting the daemon with no CA flag fails if a rule requests
 /// intercept mode.
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn intercept_rule_rejected_when_no_ca() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -167,6 +168,7 @@ rules:
 
 /// S011-AS-004: Daemon starts cleanly without CA when no rules use intercept.
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn daemon_starts_without_ca_when_no_intercept_rules() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -206,6 +208,7 @@ rules:
 /// blocks GET, and applies path scoping.
 /// This test requires S011 intercept implementation.
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn intercept_method_scope_allows_post_blocks_get() {
     // This test requires S011 intercept implementation.
     // When implemented, it will:
@@ -222,6 +225,7 @@ async fn intercept_method_scope_allows_post_blocks_get() {
 
 /// S011-AS-006: Leaf cert cached and reused for repeated requests.
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn intercept_leaf_cert_cached_for_repeated_requests() {
     // Requires S011 intercept implementation.
     // Will verify `outcall ca status --json` shows leaf_cache_size: 1
@@ -234,6 +238,7 @@ async fn intercept_leaf_cert_cached_for_repeated_requests() {
 /// S011-AS-008: A non-intercept rule on the same daemon continues to use
 /// SNI-peek mode (no leaf cert generated).
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn non_intercept_rule_uses_sni_peek_not_decryption() {
     // Requires S011 intercept implementation + mixed rule set
     // (intercept rule for host A, proxy rule for host B).

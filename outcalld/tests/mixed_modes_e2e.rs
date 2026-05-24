@@ -61,6 +61,7 @@ async fn spawn_daemon(
 /// FR-014: A rule with `mode: direct_ip` bypasses the proxy and connects
 /// directly to the destination IP. No CONNECT, no SNI peek.
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn direct_ip_rule_bypasses_proxy() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -91,6 +92,7 @@ rules:
 /// A rule with `mode: proxy` (default) uses SNI peek. The proxy should
 /// be able to ALLOW/BLOCK based on the SNI hostname without decrypting.
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn proxy_mode_uses_sni_peek_not_decryption() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -153,6 +155,7 @@ rules:
 /// A rule set can contain multiple rules with different modes (proxy,
 /// intercept, direct_ip). Each must behave correctly without affecting others.
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn mixed_modes_coexist_in_single_ruleset() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
@@ -216,6 +219,7 @@ rules:
 /// When multiple rules with different modes match the same request,
 /// the first matching rule wins (S003-FR-026).
 #[tokio::test]
+#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
 async fn first_matching_rule_wins_across_modes() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
