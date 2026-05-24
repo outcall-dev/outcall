@@ -108,8 +108,9 @@ jobs:
       - name: cargo test --ignored (e2e tests via sudo)
         run: |
           rustup default stable
-          sudo env "PATH=/home/runner/.cargo/bin:/home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PWD/target/debug:$PATH" \
-            "OUTCALL_PROXY_ADDR=172.30.0.1:8080" \
+          sudo env \
+            PATH=/home/runner/.cargo/bin:/home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PWD/target/debug:$PATH \
+            OUTCALL_PROXY_ADDR=172.30.0.1:8080 \
             cargo test --workspace --tests -- --ignored
 
   test-privileged-docker:
