@@ -10,7 +10,7 @@ a description, reproducer, and the version you're running
 We acknowledge within 3 business days and aim to publish a fix within
 30 days for high/critical issues. If you do not hear back within 5
 business days, please escalate via a private GitHub Security Advisory
-at <https://github.com/Outcall-dev/outcall/security/advisories>.
+at <https://github.com/outcall-dev/outcall/security/advisories>.
 
 ## Supported versions
 
@@ -29,11 +29,13 @@ to fail closed and to keep an agent inside a container limited to a
 named set of network destinations.
 
 For the threat model, what we protect against and what we explicitly do
-not, see [`docs/security/threat-model.md`](../docs/security/threat-model.md)
+not, see [`security/threat-model.md`](https://github.com/outcall-dev/docs/blob/main/security/threat-model.md)
 in the docs repository.
 
 The most recent internal audit is at
-[`docs/security/audit-2026-05-14.md`](../docs/security/audit-2026-05-14.md).
+[`security/audit-2026-05-20.md`](https://github.com/outcall-dev/docs/blob/main/security/audit-2026-05-20.md);
+[`security/audit-2026-05-14.md`](https://github.com/outcall-dev/docs/blob/main/security/audit-2026-05-14.md)
+is the prior audit one cycle back.
 
 ## Coordinated disclosure
 
