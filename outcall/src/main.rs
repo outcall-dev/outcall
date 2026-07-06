@@ -718,17 +718,27 @@ fn cmd_recipe_alias(socket: &str, recipe: &str, args: RecipeLaunchArgs) -> Resul
 }
 
 fn cmd_start(socket: &str, recipe: Option<&str>, mut args: RecipeLaunchArgs) -> Result<()> {
-    let recipe = match recipe {
-        Some(id) if outcall::recipes::get_recipe(id).is_some() => id,
+    let selection = match recipe {
+        Some(id) if outcall::recipes::get_recipe(id).is_some() => RecipeSelection {
+            recipe: recipe_or_bail(id)?,
+            source: RecipeSource::Explicit,
+        },
         Some(id) if id.starts_with('-') => {
             args.args.insert(0, id.to_string());
-            detect_default_recipe()?.id
+            detect_default_recipe()?
         }
-        Some(id) => id,
-        None => detect_default_recipe()?.id,
+        Some(id) => RecipeSelection {
+            recipe: recipe_or_bail(id)?,
+            source: RecipeSource::Explicit,
+        },
+        None => detect_default_recipe()?,
     };
-    println!("Starting with recipe: {recipe}");
-    cmd_recipe_alias(socket, recipe, args)
+    println!(
+        "Starting with recipe: {} ({})",
+        selection.recipe.id,
+        selection.source.label()
+    );
+    cmd_recipe_alias(socket, selection.recipe.id, args)
 }
 
 // ── Recipe commands ───────────────────────────────────────────────────────
@@ -767,10 +777,16 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
     println!("  ensured {}", rules_dir.display());
 
     if load_default_recipe(&project_dir)?.is_none() {
-        if let [recipe] = detect_recipe_candidates().as_slice() {
-            let selected = save_default_recipe(&project_dir, recipe.id)?;
-            println!("  wrote {}", selected.display());
-            println!("  selected default recipe: {}", recipe.id);
+        if let Ok(selection) = detect_default_recipe() {
+            if !matches!(selection.source, RecipeSource::SavedDefault) {
+                let selected = save_default_recipe(&project_dir, selection.recipe.id)?;
+                println!("  wrote {}", selected.display());
+                println!(
+                    "  selected default recipe: {} ({})",
+                    selection.recipe.id,
+                    selection.source.label()
+                );
+            }
         }
     }
 
@@ -995,6 +1011,29 @@ fn detect_recipe_candidates() -> Vec<&'static outcall::recipes::Recipe> {
         .collect::<Vec<_>>()
 }
 
+struct RecipeSelection {
+    recipe: &'static outcall::recipes::Recipe,
+    source: RecipeSource,
+}
+
+enum RecipeSource {
+    Explicit,
+    SavedDefault,
+    ProjectContext,
+    HostAuth,
+}
+
+impl RecipeSource {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::SavedDefault => "saved project default",
+            Self::ProjectContext => "project context",
+            Self::HostAuth => "host auth",
+        }
+    }
+}
+
 fn default_recipe_path(project_dir: &std::path::Path) -> std::path::PathBuf {
     project_dir.join(".outcall").join("default-recipe")
 }
@@ -1024,10 +1063,13 @@ fn load_default_recipe(
     Ok(Some(recipe))
 }
 
-fn detect_default_recipe() -> Result<&'static outcall::recipes::Recipe> {
+fn detect_default_recipe() -> Result<RecipeSelection> {
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
     if let Some(recipe) = load_default_recipe(&project_dir)? {
-        return Ok(recipe);
+        return Ok(RecipeSelection {
+            recipe,
+            source: RecipeSource::SavedDefault,
+        });
     }
 
     let context_candidates = outcall::recipes::RECIPES
@@ -1035,7 +1077,12 @@ fn detect_default_recipe() -> Result<&'static outcall::recipes::Recipe> {
         .filter(|recipe| recipe_has_project_context(&project_dir, recipe))
         .collect::<Vec<_>>();
     match context_candidates.as_slice() {
-        [recipe] => return Ok(recipe),
+        [recipe] => {
+            return Ok(RecipeSelection {
+                recipe,
+                source: RecipeSource::ProjectContext,
+            });
+        }
         [] => {}
         many => {
             let ids = many
@@ -1053,7 +1100,10 @@ fn detect_default_recipe() -> Result<&'static outcall::recipes::Recipe> {
     let candidates = detect_recipe_candidates();
 
     match candidates.as_slice() {
-        [recipe] => Ok(recipe),
+        [recipe] => Ok(RecipeSelection {
+            recipe,
+            source: RecipeSource::HostAuth,
+        }),
         [] => anyhow::bail!(
             "could not infer which agent to start; no Claude or Codex auth candidates were found.\n\
              Run `outcall doctor`, then choose one explicitly:\n  outcall claude\n  outcall codex"
