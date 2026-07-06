@@ -93,13 +93,16 @@ echo
 if [ "$os" = "Linux" ]; then
   echo "Next:"
   echo "  cd /path/to/your/project"
+  echo "  outcall start"
+  echo
+  echo "If Outcall cannot infer the provider, choose one explicitly:"
   echo "  outcall claude"
-  echo "  # or:"
   echo "  outcall codex"
   echo
   echo "If the first run stops on a prerequisite, inspect it with:"
+  echo "  outcall doctor"
   echo "  outcall doctor claude"
-  echo "  # or: outcall doctor codex"
+  echo "  outcall doctor codex"
 else
   echo "Note: the CLI is installed, but the daemon is Linux-only."
   echo "Use a Linux host or VM to run isolated agent containers."

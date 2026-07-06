@@ -9,6 +9,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **CLI:** top-level `outcall start [claude|codex]` command. With an explicit
+  provider it behaves like the provider alias; without one it auto-selects
+  Claude or Codex only when the host has an unambiguous matching auth setup.
 - **CLI:** top-level `outcall run <claude|codex>` command for the shortest
   first-run path. It performs scaffold generation, prerequisite checks, smoke
   verification, and then launches the actual isolated agent container.
@@ -23,10 +26,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **Onboarding docs:** README, installation, quickstart, CLI reference, and
   website copy now lead with `curl -fsSL https://outcall.dev/install.sh | sh`
-  followed by `outcall run claude` or `outcall run codex`.
+  followed by `outcall start`, with explicit `outcall claude` / `outcall codex`
+  fallbacks when detection is ambiguous.
 - **Daemon bootstrap:** the CLI now defaults to the matching versioned daemon
   image tag instead of `latest`, and the installer preloads that image when
   Docker is available.
+- **CI:** installer smoke now proves the one-command first-run path for both
+  Claude and Codex, not just Claude.
 
 ## [0.1.9] - 2026-07-06
 
