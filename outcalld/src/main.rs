@@ -185,7 +185,14 @@ async fn linux_main(args: Args) -> Result<()> {
     }
 
     // Initialize bridge (S001) — creates outcall0 + applies base nftables ruleset.
-    let mut bridge_mgr = bridge::BridgeManager::new(Some(&args.bridge)).await?;
+    let (bridge_gateway_ip, bridge_gateway_prefix_len) =
+        bridge::first_gateway_from_subnet_block(&args.subnet_block)?;
+    let mut bridge_mgr = bridge::BridgeManager::new(
+        Some(&args.bridge),
+        bridge_gateway_ip,
+        bridge_gateway_prefix_len,
+    )
+    .await?;
     bridge_mgr.init().await?;
     let bridge = Arc::new(Mutex::new(bridge_mgr));
     info!(bridge = %args.bridge, "bridge initialized");

@@ -1,3 +1,4 @@
+use std::net::Ipv4Addr;
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
@@ -29,18 +30,26 @@ pub enum BridgeError {
 /// later to allow specific flows.
 pub struct BridgeManager {
     name: String,
+    gateway_ip: Ipv4Addr,
+    gateway_prefix_len: u8,
     handle: Handle,
     index: Option<u32>,
 }
 
 impl BridgeManager {
     /// Create a new bridge manager. Does not touch the kernel yet.
-    pub async fn new(name: Option<&str>) -> Result<Self, BridgeError> {
+    pub async fn new(
+        name: Option<&str>,
+        gateway_ip: Ipv4Addr,
+        gateway_prefix_len: u8,
+    ) -> Result<Self, BridgeError> {
         let (conn, handle, _) = rtnetlink::new_connection().map_err(BridgeError::Connection)?;
         tokio::spawn(conn);
 
         Ok(Self {
             name: name.unwrap_or(outcall_api::DEFAULT_BRIDGE_NAME).to_string(),
+            gateway_ip,
+            gateway_prefix_len,
             handle,
             index: None,
         })
@@ -49,6 +58,7 @@ impl BridgeManager {
     /// Create (or attach to) the bridge and apply the base nftables ruleset.
     pub async fn init(&mut self) -> Result<(), BridgeError> {
         self.ensure_bridge().await?;
+        self.ensure_gateway_address().await?;
         self.enable_bridge_netfilter().await;
         self.apply_base_rules().await?;
         Ok(())
@@ -136,6 +146,26 @@ impl BridgeManager {
             .map_err(BridgeError::Operation)?;
 
         info!(bridge = %self.name, index = idx, "bridge is up");
+        Ok(())
+    }
+
+    /// Ensure the bridge owns the gateway IP used by the default DNS and proxy listeners.
+    async fn ensure_gateway_address(&self) -> Result<(), BridgeError> {
+        let idx = self.index.expect("bridge index set during ensure_bridge");
+        self.handle
+            .address()
+            .add(idx, self.gateway_ip, self.gateway_prefix_len)
+            .replace()
+            .execute()
+            .await
+            .context("assign bridge gateway address")
+            .map_err(BridgeError::Operation)?;
+        info!(
+            bridge = %self.name,
+            gateway = %self.gateway_ip,
+            prefix_len = self.gateway_prefix_len,
+            "bridge gateway address configured"
+        );
         Ok(())
     }
 
@@ -355,5 +385,47 @@ impl BridgeManager {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+}
+
+pub fn first_gateway_from_subnet_block(cidr: &str) -> Result<(Ipv4Addr, u8)> {
+    let (ip_str, prefix_str) = cidr
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid subnet block \"{cidr}\": missing prefix"))?;
+    let base: Ipv4Addr = ip_str
+        .parse()
+        .with_context(|| format!("invalid IP in subnet block \"{cidr}\""))?;
+    let prefix: u8 = prefix_str
+        .parse()
+        .with_context(|| format!("invalid prefix in subnet block \"{cidr}\""))?;
+    if prefix > 24 {
+        anyhow::bail!("subnet block must be /24 or larger (got /{prefix})");
+    }
+
+    let total = u32::from_be_bytes(base.octets());
+    let first_24 = total & !0xff;
+    let mut gateway_octets = Ipv4Addr::from(first_24.to_be_bytes()).octets();
+    gateway_octets[3] = 1;
+    Ok((Ipv4Addr::from(gateway_octets), 24))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_gateway_from_subnet_block;
+
+    #[test]
+    fn derives_first_gateway_for_default_block() {
+        let (gateway, prefix_len) =
+            first_gateway_from_subnet_block("10.200.0.0/16").expect("gateway");
+        assert_eq!(gateway.to_string(), "10.200.0.1");
+        assert_eq!(prefix_len, 24);
+    }
+
+    #[test]
+    fn derives_first_gateway_for_non_default_block() {
+        let (gateway, prefix_len) =
+            first_gateway_from_subnet_block("172.30.8.0/20").expect("gateway");
+        assert_eq!(gateway.to_string(), "172.30.8.1");
+        assert_eq!(prefix_len, 24);
     }
 }
