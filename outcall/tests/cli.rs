@@ -274,6 +274,7 @@ fn cli_recipe_subcommands_parse_without_daemon() {
         vec!["recipe", "list"],
         vec!["recipe", "show", "claude"],
         vec!["recipe", "doctor", "codex"],
+        vec!["recipe", "test", "claude", "--help"],
     ] {
         let out = outcall(&args);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -293,4 +294,32 @@ fn cli_recipe_unknown_recipe_exits_nonzero() {
         !out.status.success(),
         "unknown recipe should fail with a useful error"
     );
+}
+
+#[test]
+fn cli_top_level_doctor_parses_without_daemon() {
+    for args in [vec!["doctor"], vec!["doctor", "codex"]] {
+        let out = outcall(&args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "doctor command {:?} should not require daemon: {}",
+            args,
+            stderr
+        );
+    }
+}
+
+#[test]
+fn cli_top_level_init_help_parses() {
+    for args in [vec!["init", "--help"], vec!["init", "claude", "--help"]] {
+        let out = outcall(&args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "init help {:?} should parse: {}",
+            args,
+            stderr
+        );
+    }
 }

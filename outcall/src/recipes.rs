@@ -497,7 +497,7 @@ fn write_new(path: &Path, contents: &str, force: bool, written: &mut Vec<PathBuf
     Ok(())
 }
 
-fn ensure_outcall_gitignore(project_dir: &Path) -> Result<Option<PathBuf>> {
+pub fn ensure_outcall_gitignore(project_dir: &Path) -> Result<Option<PathBuf>> {
     let path = project_dir.join(".outcall").join(".gitignore");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     if existing.lines().any(|line| line.trim() == "auth/") {
