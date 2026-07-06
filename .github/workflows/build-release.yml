@@ -58,10 +58,11 @@ jobs:
           cp target/${{ matrix.target }}/release/outcall-agent release/${{ matrix.target }}/
           cp README.md release/${{ matrix.target }}/ || true
           tar -czf release/${{ matrix.target }}.tar.gz -C release/${{ matrix.target }} .
+          checksum_file=release/${{ matrix.target }}.tar.gz.sha256
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum release/${{ matrix.target }}.tar.gz > release/${{ matrix.target }}/SHA256SUMS.txt
+            sha256sum release/${{ matrix.target }}.tar.gz > "$checksum_file"
           else
-            shasum -a 256 release/${{ matrix.target }}.tar.gz > release/${{ matrix.target }}/SHA256SUMS.txt
+            shasum -a 256 release/${{ matrix.target }}.tar.gz > "$checksum_file"
           fi
 
       - name: Upload to Release
@@ -71,7 +72,8 @@ jobs:
           prerelease: true
           files: |
             release/${{ matrix.target }}.tar.gz
-            release/${{ matrix.target }}/SHA256SUMS.txt
+            release/${{ matrix.target }}.tar.gz.sha256
+          overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -143,5 +145,6 @@ jobs:
           files: |
             release/outcalld-image-linux-amd64.tar.gz
             release/outcalld-image-linux-arm64.tar.gz
+          overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
