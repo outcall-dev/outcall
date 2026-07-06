@@ -20,14 +20,35 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
+use outcall_api::{ApiResponse, EvaluateResult};
+
 // ── Raw HTTP helper (reused from agent_api_integration.rs) ───────────────────
 
-fn read_http_body(sock: &mut UnixStream) -> String {
+fn read_http_response(sock: &mut UnixStream) -> String {
     let mut buf = String::new();
     let _ = sock.read_to_string(&mut buf);
-    buf.split_once("\r\n\r\n")
-        .map(|(_, body)| body.to_string())
-        .unwrap_or_default()
+    buf
+}
+
+fn http_body(response: &str) -> &str {
+    if let Some((_, body)) = response.split_once("\r\n\r\n") {
+        return body;
+    }
+    if let Some((_, body)) = response.split_once("\n\n") {
+        return body;
+    }
+    response
+}
+
+fn http_json_post(path: &str, json: &str) -> String {
+    format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
+        json.len()
+    )
+}
+
+fn parse_api_response<T: serde::de::DeserializeOwned>(body: &str) -> Option<ApiResponse<T>> {
+    serde_json::from_str(body).ok()
 }
 
 // ── Daemon spawn helper ───────────────────────────────────────────────────────
@@ -163,16 +184,11 @@ rules:
 
     let json = serde_json::to_string(&req).expect("serialize");
     let mut sock = UnixStream::connect(&host).expect("connect host");
-    let http_req = format!(
-        "POST /api/v1/rule/evaluate HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
-        json.len()
-    );
+    let http_req = http_json_post("/api/v1/rule/evaluate", &json);
     sock.write_all(http_req.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
 
-    let resp: outcall_api::ApiResponse<outcall_api::EvaluateResult> =
-        serde_json::from_str(&body).expect("parse response");
+    let resp = parse_api_response::<EvaluateResult>(http_body(&response)).expect("parse response");
 
     assert!(resp.success);
     let result = resp.data.expect("missing data");
@@ -227,16 +243,11 @@ rules:
 
     let json = serde_json::to_string(&req).expect("serialize");
     let mut sock = UnixStream::connect(&host).expect("connect host");
-    let http_req = format!(
-        "POST /api/v1/rule/evaluate HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
-        json.len()
-    );
+    let http_req = http_json_post("/api/v1/rule/evaluate", &json);
     sock.write_all(http_req.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
 
-    let resp: outcall_api::ApiResponse<outcall_api::EvaluateResult> =
-        serde_json::from_str(&body).expect("parse response");
+    let resp = parse_api_response::<EvaluateResult>(http_body(&response)).expect("parse response");
 
     assert!(resp.success);
     let result = resp.data.expect("missing data");
@@ -289,16 +300,11 @@ rules:
 
     let json = serde_json::to_string(&req).expect("serialize");
     let mut sock = UnixStream::connect(&host).expect("connect host");
-    let http_req = format!(
-        "POST /api/v1/rule/evaluate HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
-        json.len()
-    );
+    let http_req = http_json_post("/api/v1/rule/evaluate", &json);
     sock.write_all(http_req.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
 
-    let resp: outcall_api::ApiResponse<outcall_api::EvaluateResult> =
-        serde_json::from_str(&body).expect("parse response");
+    let resp = parse_api_response::<EvaluateResult>(http_body(&response)).expect("parse response");
 
     assert!(resp.success);
     let result = resp.data.expect("missing data");
