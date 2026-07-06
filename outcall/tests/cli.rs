@@ -62,9 +62,20 @@ fn outcall_in_dir_with_env(
 // ── Clap argument parsing ───────────────────────────────────────────────────
 
 #[test]
-fn cli_missing_subcommand_exits_nonzero() {
-    let out = outcall(&["--socket", "/tmp/nonexistent.sock"]);
-    assert!(!out.status.success(), "should fail with no subcommand");
+fn cli_without_subcommand_prints_onboarding() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_with_env(temp.path(), &[], &[("ANTHROPIC_API_KEY", "test-key")]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "expected onboarding output: {stderr}");
+    assert!(
+        stdout.contains("Recommended first command:\n  outcall start"),
+        "expected start recommendation, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("outcall setup"),
+        "expected setup shortcut in onboarding output, got: {stdout}"
+    );
 }
 
 #[test]
@@ -375,6 +386,7 @@ fn cli_top_level_setup_help_parses() {
     for args in [
         vec!["setup", "--help"],
         vec!["setup", "claude", "--help"],
+        vec!["setup", "--auth", "mount", "--help"],
         vec!["setup", "codex", "--auth", "mount", "--help"],
     ] {
         let out = outcall(&args);
@@ -651,5 +663,40 @@ fn cli_top_level_start_ambiguous_auth_error_explains_saved_default() {
     assert!(
         stderr.contains("Future `outcall start` runs will reuse the saved project default."),
         "ambiguous start error should explain the one-time explicit choice, got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_top_level_setup_without_recipe_uses_detected_provider() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_with_env(
+        temp.path(),
+        &["setup", "--no-build"],
+        &[("ANTHROPIC_API_KEY", "test-key")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Setting up recipe: claude"),
+        "setup should auto-detect claude before deeper checks, got stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn cli_top_level_setup_without_recipe_shows_same_ambiguity_guidance_as_start() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_with_env(
+        temp.path(),
+        &["setup"],
+        &[
+            ("ANTHROPIC_API_KEY", "test-anthropic"),
+            ("CODEX_API_KEY", "test-codex"),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "ambiguous setup should fail");
+    assert!(
+        stderr.contains("Future `outcall start` runs will reuse the saved project default."),
+        "setup ambiguity should explain the one-time explicit choice, got: {stderr}"
     );
 }

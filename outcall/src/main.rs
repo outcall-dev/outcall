@@ -16,14 +16,19 @@ use outcall_api::{
 use serde::Deserialize;
 
 #[derive(Parser)]
-#[command(name = "outcall", about = "Outcall host CLI", version)]
+#[command(
+    name = "outcall",
+    about = "Outcall host CLI",
+    version,
+    arg_required_else_help = false
+)]
 struct Cli {
     /// Path to the outcalld host socket
     #[arg(long, default_value = outcall_api::DEFAULT_HOST_SOCKET, global = true)]
     socket: String,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(clap::Args, Clone)]
@@ -129,8 +134,8 @@ enum Commands {
     },
     /// Initialize, verify, and smoke-test a first-time recipe setup
     Setup {
-        /// Recipe ID, e.g. claude or codex
-        recipe: String,
+        /// Optional recipe ID, e.g. claude or codex
+        recipe: Option<String>,
         /// Overwrite existing generated files
         #[arg(long)]
         force: bool,
@@ -516,21 +521,22 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Bridge { action } => match action {
+        None => cmd_onboarding(),
+        Some(Commands::Bridge { action }) => match action {
             BridgeAction::Status => cmd_bridge_status(&cli.socket),
             BridgeAction::Up => cmd_bridge_up(&cli.socket),
             BridgeAction::Down => cmd_bridge_down(&cli.socket),
         },
-        Commands::Dns { action } => match action {
+        Some(Commands::Dns { action }) => match action {
             DnsAction::Status => cmd_dns_status(&cli.socket),
             DnsAction::Test { hostname, r#type } => cmd_dns_test(&cli.socket, &hostname, &r#type),
             DnsAction::Cache { entries } => cmd_dns_cache(&cli.socket, entries),
             DnsAction::Flush => cmd_dns_flush(&cli.socket),
         },
-        Commands::Proxy { action } => match action {
+        Some(Commands::Proxy { action }) => match action {
             ProxyAction::Status => cmd_proxy_status(&cli.socket),
         },
-        Commands::Container { action } => match action {
+        Some(Commands::Container { action }) => match action {
             ContainerAction::Create {
                 image,
                 network,
@@ -548,7 +554,7 @@ fn main() -> Result<()> {
             }
             ContainerAction::Pull { image } => cmd_container_pull(&cli.socket, &image),
         },
-        Commands::Agent {
+        Some(Commands::Agent {
             name,
             image,
             network,
@@ -561,7 +567,7 @@ fn main() -> Result<()> {
             init,
             agent_name,
             args,
-        } => {
+        }) => {
             if init {
                 let project_dir = std::env::current_dir()?;
                 let _ = outcall::agent_boot::init_outcall(&project_dir)?;
@@ -595,7 +601,7 @@ fn main() -> Result<()> {
             };
             outcall::agent_boot::boot_agent(&project_dir, flags, args)
         }
-        Commands::Network { action } => match action {
+        Some(Commands::Network { action }) => match action {
             NetworkAction::Create {
                 name,
                 subnet,
@@ -605,16 +611,23 @@ fn main() -> Result<()> {
             NetworkAction::List => cmd_network_list(&cli.socket),
             NetworkAction::Destroy { name } => cmd_network_destroy(&cli.socket, name),
         },
-        Commands::Init { recipe, force } => cmd_init(recipe.as_deref(), force),
-        Commands::Doctor { recipe } => cmd_doctor(recipe.as_deref()),
-        Commands::Setup {
+        Some(Commands::Init { recipe, force }) => cmd_init(recipe.as_deref(), force),
+        Some(Commands::Doctor { recipe }) => cmd_doctor(recipe.as_deref()),
+        Some(Commands::Setup {
             recipe,
             force,
             no_build,
             auth,
             force_auth_copy,
-        } => cmd_setup(&cli.socket, &recipe, force, no_build, auth, force_auth_copy),
-        Commands::Run {
+        }) => cmd_setup(
+            &cli.socket,
+            recipe.as_deref(),
+            force,
+            no_build,
+            auth,
+            force_auth_copy,
+        ),
+        Some(Commands::Run {
             recipe,
             force,
             no_build,
@@ -622,7 +635,7 @@ fn main() -> Result<()> {
             force_auth_copy,
             detach,
             args,
-        } => cmd_run(
+        }) => cmd_run(
             &cli.socket,
             &recipe,
             force,
@@ -632,15 +645,17 @@ fn main() -> Result<()> {
             detach,
             args,
         ),
-        Commands::Start { recipe, launch } => cmd_start(&cli.socket, recipe.as_deref(), launch),
-        Commands::Claude(args) => cmd_recipe_alias(&cli.socket, "claude", args),
-        Commands::Codex(args) => cmd_recipe_alias(&cli.socket, "codex", args),
-        Commands::Ca { action } => match action {
+        Some(Commands::Start { recipe, launch }) => {
+            cmd_start(&cli.socket, recipe.as_deref(), launch)
+        }
+        Some(Commands::Claude(args)) => cmd_recipe_alias(&cli.socket, "claude", args),
+        Some(Commands::Codex(args)) => cmd_recipe_alias(&cli.socket, "codex", args),
+        Some(Commands::Ca { action }) => match action {
             CaAction::Init { out } => cmd_ca_init(out),
             CaAction::Bundle => cmd_ca_bundle(&cli.socket),
             CaAction::Status => cmd_ca_status(&cli.socket),
         },
-        Commands::Daemon { action } => match action {
+        Some(Commands::Daemon { action }) => match action {
             DaemonAction::Start {
                 image,
                 bridge,
@@ -664,15 +679,15 @@ fn main() -> Result<()> {
             DaemonAction::Status { name } => cmd_daemon_status(name),
             DaemonAction::Logs { name, follow, tail } => cmd_daemon_logs(name, follow, tail),
         },
-        Commands::Rules { action } => match action {
+        Some(Commands::Rules { action }) => match action {
             RulesAction::Reload => cmd_rules_reload(&cli.socket),
         },
-        Commands::Requests { action } => match action {
+        Some(Commands::Requests { action }) => match action {
             RequestsAction::List => cmd_requests_list(&cli.socket),
             RequestsAction::Approve { id } => cmd_requests_approve(&cli.socket, &id),
             RequestsAction::Reject { id, reason } => cmd_requests_reject(&cli.socket, &id, reason),
         },
-        Commands::Recipe { action } => match action {
+        Some(Commands::Recipe { action }) => match action {
             RecipeAction::List => cmd_recipe_list(),
             RecipeAction::Show { id } => cmd_recipe_show(&id),
             RecipeAction::Init { id, force } => cmd_recipe_init(&id, force),
@@ -700,8 +715,21 @@ fn main() -> Result<()> {
                 force_auth_copy,
             } => cmd_recipe_test(&cli.socket, &id, no_build, auth, force_auth_copy),
         },
-        Commands::Ui { port, no_open } => cmd_ui(&cli.socket, port, !no_open),
+        Some(Commands::Ui { port, no_open }) => cmd_ui(&cli.socket, port, !no_open),
     }
+}
+
+fn cmd_onboarding() -> Result<()> {
+    println!("Outcall");
+    println!();
+    print_first_run_recommendation();
+    println!();
+    println!("Common commands:");
+    println!("  outcall start         # initialize and launch the isolated agent");
+    println!("  outcall setup         # initialize, verify, and smoke-test without launching");
+    println!("  outcall doctor        # inspect Docker, scaffold, and auth detection");
+    println!("  outcall recipe list   # show built-in recipes");
+    Ok(())
 }
 
 fn cmd_recipe_alias(socket: &str, recipe: &str, args: RecipeLaunchArgs) -> Result<()> {
@@ -764,6 +792,7 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
         println!();
         println!("Next:");
         println!("  outcall start");
+        println!("  outcall setup         # repeat first-run checks without launching");
         println!("  outcall start --detach");
         return Ok(());
     }
@@ -794,6 +823,7 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
     println!("Suggested next steps:");
     println!("  outcall doctor");
     println!("  outcall start");
+    println!("  outcall setup");
     println!("  outcall claude         # fallback if auto-detect is ambiguous");
     println!("  outcall codex");
     Ok(())
@@ -871,15 +901,28 @@ fn cmd_doctor(recipe: Option<&str>) -> Result<()> {
 
 fn cmd_setup(
     socket: &str,
-    id: &str,
+    id: Option<&str>,
     force: bool,
     no_build: bool,
     auth_mode: RecipeAuthMode,
     force_auth_copy: bool,
 ) -> Result<()> {
+    let selection = match id {
+        Some(id) => RecipeSelection {
+            recipe: recipe_or_bail(id)?,
+            source: RecipeSource::Explicit,
+        },
+        None => detect_default_recipe()?,
+    };
+    println!(
+        "Setting up recipe: {} ({})",
+        selection.recipe.id,
+        selection.source.label()
+    );
+    println!();
     cmd_setup_inner(
         socket,
-        id,
+        selection.recipe.id,
         force,
         no_build,
         auth_mode,
@@ -913,9 +956,9 @@ fn cmd_setup_inner(
         println!();
         println!("Setup complete.");
         println!("Next:");
-        let recommended = recommended_recipe_command(recipe);
-        println!("  {}", recommended);
-        println!("  {} --detach", recommended);
+        println!("  outcall start");
+        println!("  outcall start --detach");
+        println!("  {}", recommended_recipe_command(recipe));
     }
     Ok(())
 }

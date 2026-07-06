@@ -43,8 +43,12 @@ pull.
 The CLI ships a small built-in recipe registry for common agent runtimes:
 
 ```sh
+outcall
 outcall start
 ```
+
+Running bare `outcall` prints the recommended first command for the current
+project and host, plus the shortest useful next commands.
 
 If Outcall cannot infer the provider cleanly, choose one explicitly:
 
@@ -85,8 +89,15 @@ outcall recipe run <recipe>
 The intermediate shortcut is:
 
 ```sh
-outcall setup <recipe>
-outcall recipe run <recipe>
+outcall setup
+outcall start
+```
+
+You can still pin the provider explicitly when needed:
+
+```sh
+outcall setup claude
+outcall setup codex
 ```
 
 Recipes do not mount your whole home directory. By default they copy only the
