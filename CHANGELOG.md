@@ -9,6 +9,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **CLI:** when Claude or Codex detection is unambiguous, bare `outcall` now
+  runs the first-time setup and launch flow directly instead of stopping at
+  printed onboarding output.
 - **CLI:** bare `outcall` now prints project-aware onboarding instead of
   exiting on a missing subcommand.
 - **CLI:** top-level `outcall start [claude|codex]` command. With an explicit
@@ -26,6 +29,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- **First-run failures:** recipe setup now checks Docker access before build or
+  daemon work begins, so first-time users get a direct Docker socket error
+  instead of a later `docker build` failure.
 - **CLI:** `outcall setup` now accepts an optional provider and follows the
   same saved-default, project-context, and host-auth detection order as
   `outcall start`.
