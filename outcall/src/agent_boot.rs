@@ -1,6 +1,7 @@
 //! Agent boot command implementation (S014).
 
 use anyhow::{Context, Result};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -99,12 +100,11 @@ pub fn boot_agent_with_config(
     }
 
     // Detached mode
-    if config.detach {
-        args.push("-d".to_string());
-    } else {
-        // Interactive mode: allocate TTY and keep stdin open
-        args.push("-it".to_string());
-    }
+    args.extend(docker_stdio_args(
+        config.detach,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    ));
 
     // Labels for tracking
     args.extend_from_slice(&["--label".to_string(), "outcall.agent=true".to_string()]);
@@ -177,6 +177,19 @@ pub fn boot_agent_with_config(
     }
 
     Ok(())
+}
+
+fn docker_stdio_args(detach: bool, stdin_is_tty: bool, stdout_is_tty: bool) -> Vec<String> {
+    if detach {
+        return vec!["-d".to_string()];
+    }
+    if stdin_is_tty && stdout_is_tty {
+        return vec!["-it".to_string()];
+    }
+    if stdin_is_tty {
+        return vec!["-i".to_string()];
+    }
+    Vec::new()
 }
 
 /// Stop a running agent
@@ -341,5 +354,30 @@ fn ensure_image(image: &str) -> Result<()> {
 
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::docker_stdio_args;
+
+    #[test]
+    fn docker_stdio_args_use_detach_when_requested() {
+        assert_eq!(docker_stdio_args(true, true, true), vec!["-d"]);
+    }
+
+    #[test]
+    fn docker_stdio_args_use_tty_for_interactive_terminals() {
+        assert_eq!(docker_stdio_args(false, true, true), vec!["-it"]);
+    }
+
+    #[test]
+    fn docker_stdio_args_keep_stdin_without_tty_stdout() {
+        assert_eq!(docker_stdio_args(false, true, false), vec!["-i"]);
+    }
+
+    #[test]
+    fn docker_stdio_args_use_plain_stdio_for_non_tty_contexts() {
+        assert!(docker_stdio_args(false, false, false).is_empty());
     }
 }

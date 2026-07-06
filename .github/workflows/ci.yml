@@ -138,6 +138,63 @@ jobs:
                      cargo build --workspace --locked && \
                      cargo test --workspace --tests -- --ignored --test-threads=1'
 
+  installer-smoke:
+    name: installer smoke (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "outcall-installer-smoke"
+          cache-on-failure: false
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --locked
+
+      - name: Package local release archive
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' outcall/Cargo.toml | head -n1)
+          mkdir -p release-smoke/x86_64-unknown-linux-gnu
+          cp target/release/outcall release-smoke/x86_64-unknown-linux-gnu/
+          cp target/release/outcalld release-smoke/x86_64-unknown-linux-gnu/
+          cp target/release/outcall-agent release-smoke/x86_64-unknown-linux-gnu/
+          tar -czf release-smoke/x86_64-unknown-linux-gnu.tar.gz -C release-smoke/x86_64-unknown-linux-gnu .
+          printf '%s' "$VERSION" > release-smoke/VERSION
+
+      - name: Enable bridge netfilter
+        run: |
+          sudo modprobe br_netfilter || true
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1 || true
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1 || true
+
+      - name: Install from local installer
+        run: |
+          VERSION=$(cat release-smoke/VERSION)
+          export OUTCALL_VERSION="$VERSION"
+          export OUTCALL_RELEASE_BASE_URL="file://$PWD/release-smoke"
+          export OUTCALL_BIN_DIR="$RUNNER_TEMP/outcall-bin"
+          sh scripts/install.sh
+          "$OUTCALL_BIN_DIR/outcall" --version
+          "$OUTCALL_BIN_DIR/outcalld" --version
+          "$OUTCALL_BIN_DIR/outcall-agent" --version
+
+      - name: Smoke test clean-project Claude setup
+        run: |
+          export PATH="$RUNNER_TEMP/outcall-bin:$PATH"
+          export ANTHROPIC_API_KEY=dummy-smoke-key
+          project_dir="$RUNNER_TEMP/outcall-smoke-project"
+          rm -rf "$project_dir"
+          mkdir -p "$project_dir"
+          cd "$project_dir"
+          outcall setup claude
+          test -f .outcall/recipes/claude/recipe.yaml
+          test -f .outcall/agent.yaml
+
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
