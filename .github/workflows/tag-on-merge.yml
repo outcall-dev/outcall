@@ -10,6 +10,7 @@ jobs:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
     steps:
       - uses: actions/checkout@v4
@@ -28,10 +29,12 @@ jobs:
           echo "tag=v$version" >> $GITHUB_OUTPUT
 
       - name: Create and push tag
+        id: push_tag
         env:
           NEW_TAG: ${{ steps.workspace_version.outputs.tag }}
         run: |
           if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+            echo "created=false" >> "$GITHUB_OUTPUT"
             echo "Tag $NEW_TAG already exists; nothing to do."
             exit 0
           fi
@@ -39,3 +42,14 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
           git push origin "$NEW_TAG"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch release build
+        if: steps.push_tag.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_TAG: ${{ steps.workspace_version.outputs.tag }}
+        run: |
+          gh workflow run build-release.yml \
+            --ref main \
+            -f tag="$NEW_TAG"
