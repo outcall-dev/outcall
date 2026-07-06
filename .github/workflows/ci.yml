@@ -164,6 +164,13 @@ jobs:
           cp target/release/outcalld release-smoke/x86_64-unknown-linux-gnu/
           cp target/release/outcall-agent release-smoke/x86_64-unknown-linux-gnu/
           tar -czf release-smoke/x86_64-unknown-linux-gnu.tar.gz -C release-smoke/x86_64-unknown-linux-gnu .
+          docker build \
+            -t ghcr.io/outcall-dev/outcalld:v"$VERSION" \
+            -t ghcr.io/outcall-dev/outcalld:latest \
+            .
+          docker save \
+            ghcr.io/outcall-dev/outcalld:v"$VERSION" \
+            ghcr.io/outcall-dev/outcalld:latest | gzip > release-smoke/outcalld-image-linux-amd64.tar.gz
           printf '%s' "$VERSION" > release-smoke/VERSION
 
       - name: Enable bridge netfilter
@@ -183,7 +190,7 @@ jobs:
           "$OUTCALL_BIN_DIR/outcalld" --version
           "$OUTCALL_BIN_DIR/outcall-agent" --version
 
-      - name: Smoke test clean-project Claude setup
+      - name: Smoke test one-command Claude run
         run: |
           export PATH="$RUNNER_TEMP/outcall-bin:$PATH"
           export ANTHROPIC_API_KEY=dummy-smoke-key
@@ -191,9 +198,10 @@ jobs:
           rm -rf "$project_dir"
           mkdir -p "$project_dir"
           cd "$project_dir"
-          outcall setup claude
+          outcall run claude -- --version
           test -f .outcall/recipes/claude/recipe.yaml
           test -f .outcall/agent.yaml
+          docker inspect claude-agent >/dev/null
 
   fmt:
     name: cargo fmt

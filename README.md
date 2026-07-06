@@ -5,7 +5,7 @@
 ## Badges
 
 [![CI](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.19-blue.svg)](https://github.com/outcall-dev/outcall/releases)
+[![Version](https://img.shields.io/badge/version-0.1.20-blue.svg)](https://github.com/outcall-dev/outcall/releases)
 [![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcalld-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcalld)
 
 ## Workspace
@@ -33,6 +33,10 @@ Linux only. macOS will build the workspace (cross-platform types compile) but `o
 ```sh
 curl -fsSL https://outcall.dev/install.sh | sh
 ```
+
+On Linux, the installer also preloads the matching `outcalld` Docker image when
+Docker is available, so `outcall run <recipe>` does not need a first-run
+registry pull.
 
 ## First-time recipe flow
 

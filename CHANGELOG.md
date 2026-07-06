@@ -15,12 +15,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Install script:** `https://outcall.dev/install.sh` installs release
   binaries directly into `~/.local/bin` without cloning the repository or
   building from source first.
+- **Release assets:** publish Docker-loadable daemon image archives for
+  `linux/amd64` and `linux/arm64` so first-time installs can preload the
+  matching `outcalld` image from the GitHub Release itself.
 
 ### Changed
 
 - **Onboarding docs:** README, installation, quickstart, CLI reference, and
   website copy now lead with `curl -fsSL https://outcall.dev/install.sh | sh`
   followed by `outcall run claude` or `outcall run codex`.
+- **Daemon bootstrap:** the CLI now defaults to the matching versioned daemon
+  image tag instead of `latest`, and the installer preloads that image when
+  Docker is available.
 
 ## [0.1.9] - 2026-07-06
 

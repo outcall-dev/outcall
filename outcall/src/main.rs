@@ -278,7 +278,7 @@ enum RequestsAction {
 enum DaemonAction {
     /// Start the outcalld daemon as a Docker container
     Start {
-        /// Daemon container image (default: ghcr.io/outcall-dev/outcalld:latest)
+        /// Daemon container image (default: ghcr.io/outcall-dev/outcalld:v<CURRENT_VERSION>)
         #[arg(long)]
         image: Option<String>,
         /// Bridge interface name (default: outcall0)
@@ -2231,7 +2231,8 @@ fn cmd_ca_status(socket: &str) -> Result<()> {
 // recommended isolation boundary on Linux hosts.
 
 const DEFAULT_DAEMON_NAME: &str = "outcall-daemon";
-const DEFAULT_DAEMON_IMAGE: &str = "ghcr.io/outcall-dev/outcalld:latest";
+const DEFAULT_DAEMON_IMAGE: &str =
+    concat!("ghcr.io/outcall-dev/outcalld:v", env!("CARGO_PKG_VERSION"));
 
 fn cmd_daemon_start(
     image: Option<String>,
@@ -2310,7 +2311,16 @@ fn cmd_daemon_start(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("docker run failed: {}", stderr.trim());
+        let stderr = stderr.trim();
+        if stderr.contains("unauthorized")
+            || stderr.contains("pull access denied")
+            || stderr.contains("manifest unknown")
+        {
+            anyhow::bail!(
+                "docker run failed: {stderr}\nHint: preload the matching daemon image via the install script, or pass `outcall daemon start --image <image>`."
+            );
+        }
+        anyhow::bail!("docker run failed: {stderr}");
     }
 
     let cid = String::from_utf8_lossy(&output.stdout).trim().to_string();
