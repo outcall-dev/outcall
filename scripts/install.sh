@@ -93,8 +93,11 @@ echo
 if [ "$os" = "Linux" ]; then
   echo "Next:"
   echo "  cd /path/to/your/project"
+  echo "  outcall doctor claude"
   echo "  outcall run claude"
-  echo "  # or: outcall run codex"
+  echo "  # or:"
+  echo "  outcall doctor codex"
+  echo "  outcall run codex"
 else
   echo "Note: the CLI is installed, but the daemon is Linux-only."
   echo "Use a Linux host or VM to run isolated agent containers."
