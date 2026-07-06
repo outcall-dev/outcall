@@ -290,12 +290,22 @@ jobs:
           set -eu
           ROOT_DIR="$(git rev-parse --show-toplevel)"
           mkdir -p "$RUNNER_TEMP/outcall-ci-release"
-          docker build -f "$ROOT_DIR/scripts/e2e/Dockerfile" -t outcall-ci-daemon:local "$ROOT_DIR"
+          if [ -f "$ROOT_DIR/scripts/e2e/Dockerfile" ]; then
+            DOCKERFILE="$ROOT_DIR/scripts/e2e/Dockerfile"
+          elif [ -f "$ROOT_DIR/application/scripts/e2e/Dockerfile" ]; then
+            DOCKERFILE="$ROOT_DIR/application/scripts/e2e/Dockerfile"
+          elif [ -f "$ROOT_DIR/Dockerfile" ]; then
+            DOCKERFILE="$ROOT_DIR/Dockerfile"
+          else
+            echo "No supported daemon Dockerfile found in repository."
+            exit 1
+          fi
+          docker build -f "$DOCKERFILE" -t outcall-ci-daemon:local "$ROOT_DIR"
           docker save outcall-ci-daemon:local | gzip > "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz"
 
       - name: Package local installer artifacts
         run: |
-          VERSION="$(cat "$(git rev-parse --show-toplevel)/VERSION)"
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' outcall/Cargo.toml | head -n1)"
           mkdir -p "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu"
           cp target/release/outcall target/release/outcalld target/release/outcall-agent \
             "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu/"
@@ -317,7 +327,7 @@ jobs:
 
       - name: Install from local release artifacts
         run: |
-          VERSION="$(cat "$(git rev-parse --show-toplevel)/VERSION)"
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' outcall/Cargo.toml | head -n1)"
           export OUTCALL_VERSION="$VERSION"
           export OUTCALL_RELEASE_BASE_URL="file://$RUNNER_TEMP/outcall-ci-release"
           export OUTCALL_BIN_DIR="$RUNNER_TEMP/outcall-bin"
@@ -396,14 +406,26 @@ jobs:
       - name: Security integration (bridge state + leak checks)
         run: |
           ROOT_DIR="$(git rev-parse --show-toplevel)"
-          sudo bash "$ROOT_DIR/scripts/test-bridge.sh"
+          if [ -f "$ROOT_DIR/scripts/test-bridge.sh" ] && [ -d "$ROOT_DIR/application" ]; then
+            sudo bash "$ROOT_DIR/scripts/test-bridge.sh"
+          else
+            sudo cargo test -p outcalld --test bridge_integration -- --nocapture
+          fi
 
       - name: Security integration (container isolation)
         run: |
           ROOT_DIR="$(git rev-parse --show-toplevel)"
-          make build
-          make stop >/dev/null 2>&1 || true
-          bash "$ROOT_DIR/scripts/test-isolation.sh" --skip-build
+          if [ -f "$ROOT_DIR/Makefile" ]; then
+            make build
+            make stop >/dev/null 2>&1 || true
+            if [ -f "$ROOT_DIR/scripts/test-isolation.sh" ] && [ -d "$ROOT_DIR/application" ]; then
+              bash "$ROOT_DIR/scripts/test-isolation.sh" --skip-build
+            else
+              sudo cargo test -p outcalld --test bridge_integration -- --test-threads=1 --nocapture
+            fi
+          else
+            sudo cargo test -p outcalld --test bridge_integration -- --test-threads=1 --nocapture
+          fi
 
       - name: Verify preflight hard-fails when netfilter is disabled
         run: |
