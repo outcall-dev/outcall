@@ -1436,6 +1436,7 @@ fn cmd_recipe_run(
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
     ensure_recipe_initialized(&project_dir, recipe)?;
     ensure_linux_runtime_host()?;
+    ensure_bridge_netfilter_enforceable()?;
     ensure_docker_access()?;
 
     let image = outcall::recipes::recipe_image_name(recipe);
@@ -1472,6 +1473,7 @@ fn cmd_recipe_test(
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
     ensure_recipe_initialized(&project_dir, recipe)?;
     ensure_linux_runtime_host()?;
+    ensure_bridge_netfilter_enforceable()?;
     ensure_docker_access()?;
 
     let image = outcall::recipes::recipe_image_name(recipe);
@@ -1833,6 +1835,50 @@ fn ensure_linux_runtime_host() -> Result<()> {
     Ok(())
 }
 
+fn ensure_bridge_netfilter_enforceable() -> Result<()> {
+    if std::env::consts::OS != "linux" {
+        return Ok(());
+    }
+
+    let (iptables, ip6tables) = bridge_netfilter_values()?;
+
+    if iptables != "1" || ip6tables != "1" {
+        anyhow::bail!(
+            "Secure unattended mode requires bridge netfilter enforcement.\n\
+             Current values are:\n\
+             - /proc/sys/net/bridge/bridge-nf-call-iptables = {iptables}\n\
+             - /proc/sys/net/bridge/bridge-nf-call-ip6tables = {ip6tables}\n\
+             Set both to `1` (for example via `modprobe br_netfilter` and `sysctl -w`)"
+        )
+    }
+
+    Ok(())
+}
+
+fn bridge_netfilter_values() -> Result<(String, String)> {
+    fn read_bridge_sysctl(path: &str) -> Result<String> {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {path}"))
+            .map(|value| value.trim().to_string())
+    }
+
+    Ok((
+        read_bridge_sysctl("/proc/sys/net/bridge/bridge-nf-call-iptables")?,
+        read_bridge_sysctl("/proc/sys/net/bridge/bridge-nf-call-ip6tables")?,
+    ))
+}
+
+fn bridge_netfilter_enforceable() -> bool {
+    if std::env::consts::OS != "linux" {
+        return false;
+    }
+
+    match bridge_netfilter_values() {
+        Ok((iptables, ip6tables)) => iptables == "1" && ip6tables == "1",
+        Err(_) => false,
+    }
+}
+
 fn build_recipe_image(
     project_dir: &std::path::Path,
     recipe: &outcall::recipes::Recipe,
@@ -1900,6 +1946,14 @@ fn doctor_br_netfilter() {
     if std::env::consts::OS != "linux" {
         println!("  INFO br_netfilter: Linux-only prerequisite");
         return;
+    }
+
+    if bridge_netfilter_enforceable() {
+        println!("  PASS secure unattended mode: bridge netfilter enforcement enabled");
+    } else {
+        println!(
+            "  WARN secure unattended mode: bridge netfilter enforcement not fully enabled (run set up check via `outcall doctor` output below)"
+        );
     }
 
     doctor_proc_value(

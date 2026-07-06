@@ -268,6 +268,161 @@ jobs:
           test -f .outcall/agent.yaml
           docker inspect codex-agent >/dev/null
 
+  secure-install-runtime:
+    name: secure install + runtime + security validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl tar gzip iproute2 nftables iptables make
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --locked
+
+      - name: Build daemon image for local preload
+        run: |
+          mkdir -p "$RUNNER_TEMP/outcall-ci-release"
+          docker build -f scripts/e2e/Dockerfile -t outcall-ci-daemon:local .
+          docker save outcall-ci-daemon:local | gzip > "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz"
+
+      - name: Package local installer artifacts
+        run: |
+          VERSION=$(cat VERSION)
+          mkdir -p "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu"
+          cp target/release/outcall target/release/outcalld target/release/outcall-agent \
+            "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu/"
+          tar -czf "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu.tar.gz" \
+            -C "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu" .
+
+      - name: Enforce bridge netfilter (hard preflight requirement)
+        run: |
+          set -eu
+          sudo modprobe br_netfilter
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+          IPV4="$(cat /proc/sys/net/bridge/bridge-nf-call-iptables | tr -d '[:space:]')"
+          IPV6="$(cat /proc/sys/net/bridge/bridge-nf-call-ip6tables | tr -d '[:space:]')"
+          [ "$IPV4" = "1" ] && [ "$IPV6" = "1" ] || {
+            echo "bridge netfilter enforceable check failed: ipv4=$IPV4 ipv6=$IPV6"
+            exit 1
+          }
+
+      - name: Install from local release artifacts
+        run: |
+          VERSION="$(cat VERSION)"
+          export OUTCALL_VERSION="$VERSION"
+          export OUTCALL_RELEASE_BASE_URL="file://$RUNNER_TEMP/outcall-ci-release"
+          export OUTCALL_BIN_DIR="$RUNNER_TEMP/outcall-bin"
+          mkdir -p "$OUTCALL_BIN_DIR"
+          sh scripts/install.sh
+          "$OUTCALL_BIN_DIR/outcall" --version
+          "$OUTCALL_BIN_DIR/outcalld" --version
+          "$OUTCALL_BIN_DIR/outcall-agent" --version
+
+      - name: Usage smoke (Claude)
+        run: |
+          set -eu
+          export PATH="$RUNNER_TEMP/outcall-bin:$PATH"
+          PROJECT_DIR="$RUNNER_TEMP/outcall-smoke-claude"
+          HOME_DIR="$RUNNER_TEMP/outcall-smoke-home-claude"
+          rm -rf "$PROJECT_DIR" "$HOME_DIR"
+          mkdir -p "$PROJECT_DIR" "$HOME_DIR"
+          export HOME="$HOME_DIR"
+          export ANTHROPIC_API_KEY=dummy-smoke-key
+          unset CODEX_API_KEY CODEX_ACCESS_TOKEN
+          cd "$PROJECT_DIR"
+
+          set +e
+          timeout 180 outcall start -- --version
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::group::docker ps"
+            docker ps -a || true
+            echo "::endgroup::"
+            echo "::group::daemon logs"
+            docker logs outcall-daemon --tail 120 || true
+            echo "::endgroup::"
+            echo "::group::agent logs"
+            docker logs claude-agent --tail 120 || true
+            echo "::endgroup::"
+            exit "$status"
+          fi
+          test -f .outcall/recipes/claude/recipe.yaml
+          test -f .outcall/agent.yaml
+          docker inspect claude-agent >/dev/null
+
+      - name: Usage smoke (Codex)
+        run: |
+          set -eu
+          export PATH="$RUNNER_TEMP/outcall-bin:$PATH"
+          PROJECT_DIR="$RUNNER_TEMP/outcall-smoke-codex"
+          HOME_DIR="$RUNNER_TEMP/outcall-smoke-home-codex"
+          rm -rf "$PROJECT_DIR" "$HOME_DIR"
+          mkdir -p "$PROJECT_DIR" "$HOME_DIR"
+          export HOME="$HOME_DIR"
+          export CODEX_API_KEY=dummy-smoke-key
+          unset ANTHROPIC_API_KEY CODEX_ACCESS_TOKEN
+          cd "$PROJECT_DIR"
+
+          set +e
+          timeout 180 outcall start -- --version
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::group::docker ps"
+            docker ps -a || true
+            echo "::endgroup::"
+            echo "::group::daemon logs"
+            docker logs outcall-daemon --tail 120 || true
+            echo "::endgroup::"
+            echo "::group::agent logs"
+            docker logs codex-agent --tail 120 || true
+            echo "::endgroup::"
+            exit "$status"
+          fi
+          test -f .outcall/recipes/codex/recipe.yaml
+          test -f .outcall/agent.yaml
+          docker inspect codex-agent >/dev/null
+
+      - name: Security integration (bridge state + leak checks)
+        run: |
+          sudo bash scripts/test-bridge.sh
+
+      - name: Security integration (container isolation)
+        run: |
+          make build
+          make stop >/dev/null 2>&1 || true
+          bash scripts/test-isolation.sh --skip-build
+
+      - name: Verify preflight hard-fails when netfilter is disabled
+        run: |
+          set -eu
+          export PATH="$RUNNER_TEMP/outcall-bin:$PATH"
+          PROJECT_DIR="$RUNNER_TEMP/outcall-smoke-claude"
+          cd "$PROJECT_DIR"
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=0
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=0
+          set +e
+          outcall recipe test claude --no-build > /tmp/outcall-preflight.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "preflight unexpectedly passed when bridge netfilter was disabled"
+            echo "--- preflight output ---"
+            cat /tmp/outcall-preflight.log
+            exit 1
+          fi
+          grep -q "Secure unattended mode requires bridge netfilter enforcement" /tmp/outcall-preflight.log
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
