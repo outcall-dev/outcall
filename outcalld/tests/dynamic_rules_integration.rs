@@ -63,17 +63,47 @@ async fn spawn_daemon(socket: &PathBuf, rules_dir: &PathBuf) -> Result<(Child, S
         .arg("--socket")
         .arg(socket.as_os_str())
         .arg("--rules-dir")
-        .arg(rules_dir.as_os_str());
-    if let Ok(proxy_addr) = std::env::var("OUTCALL_PROXY_ADDR") {
-        cmd.arg("--proxy-addr").arg(&proxy_addr);
-    }
-    let daemon = cmd
+        .arg(rules_dir.as_os_str())
+        .arg("--no-proxy");
+    let mut daemon = cmd
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .context("failed to spawn outcalld")?;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let timeout = Duration::from_secs(5);
+    let poll_interval = Duration::from_millis(25);
+    let started_at = std::time::Instant::now();
+    loop {
+        if socket.exists() {
+            break;
+        }
+        if let Ok(Some(status)) = daemon.try_wait() {
+            let mut stderr = String::new();
+            if let Some(mut s) = daemon.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld exited before binding socket (status: {:?}). stderr:\n{}",
+                status,
+                stderr.trim()
+            );
+        }
+        if started_at.elapsed() >= timeout {
+            let _ = daemon.kill();
+            let mut stderr = String::new();
+            if let Some(mut s) = daemon.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld did not bind socket within {:?}. stderr:\n{}",
+                timeout,
+                stderr.trim()
+            );
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+
     Ok((daemon, socket.to_string_lossy().to_string()))
 }
 

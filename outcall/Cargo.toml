@@ -1,12 +1,12 @@
 [package]
 name = "outcall"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2024"
 description = "CLI client for outcalld"
 license = "Apache-2.0"
 
 [dependencies]
-outcall-api = { path = "../outcall-api", version = "0.1.15" }
+outcall-api = { path = "../outcall-api", version = "0.1.16" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

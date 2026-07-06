@@ -44,17 +44,47 @@ async fn spawn_daemon(
         .arg("--agent-socket-host-path")
         .arg(agent_socket.as_os_str())
         .arg("--rules-dir")
-        .arg(rules_dir.as_os_str());
-    if let Ok(proxy_addr) = std::env::var("OUTCALL_PROXY_ADDR") {
-        cmd.arg("--proxy-addr").arg(&proxy_addr);
-    }
-    let child = cmd
+        .arg(rules_dir.as_os_str())
+        .arg("--no-proxy");
+    let mut child = cmd
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .context("failed to spawn outcalld")?;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let timeout = Duration::from_secs(5);
+    let poll_interval = Duration::from_millis(25);
+    let started_at = std::time::Instant::now();
+    loop {
+        if host_socket.exists() && agent_socket.exists() {
+            break;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let mut stderr = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld exited before binding sockets (status: {:?}). stderr:\n{}",
+                status,
+                stderr.trim()
+            );
+        }
+        if started_at.elapsed() >= timeout {
+            let _ = child.kill();
+            let mut stderr = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld did not bind sockets within {:?}. stderr:\n{}",
+                timeout,
+                stderr.trim()
+            );
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+
     let host = host_socket.to_string_lossy().to_string();
     let agent = agent_socket.to_string_lossy().to_string();
     Ok((child, host, agent))
@@ -81,7 +111,7 @@ rules:
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (_daemon, _host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, _host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -89,6 +119,7 @@ rules:
     // Current outcalld does not implement direct_ip mode — this test
     // documents the expected behavior when the mode is implemented.
     eprintln!("NOTE: direct_ip mode (FR-014) not yet implemented in outcalld");
+    let _ = daemon.kill();
 }
 
 // ── Test: proxy mode uses SNI peek (no decryption) ───────────────────────────
