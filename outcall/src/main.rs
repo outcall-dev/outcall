@@ -167,6 +167,13 @@ enum Commands {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
+    /// Start an isolated Claude/Codex container, auto-detecting the provider when possible
+    Start {
+        /// Optional recipe ID, e.g. claude or codex
+        recipe: Option<String>,
+        #[command(flatten)]
+        launch: RecipeLaunchArgs,
+    },
     /// Initialize and launch an isolated Claude Code container
     Claude(RecipeLaunchArgs),
     /// Initialize and launch an isolated Codex container
@@ -625,6 +632,7 @@ fn main() -> Result<()> {
             detach,
             args,
         ),
+        Commands::Start { recipe, launch } => cmd_start(&cli.socket, recipe.as_deref(), launch),
         Commands::Claude(args) => cmd_recipe_alias(&cli.socket, "claude", args),
         Commands::Codex(args) => cmd_recipe_alias(&cli.socket, "codex", args),
         Commands::Ca { action } => match action {
@@ -707,6 +715,15 @@ fn cmd_recipe_alias(socket: &str, recipe: &str, args: RecipeLaunchArgs) -> Resul
         args.detach,
         args.args,
     )
+}
+
+fn cmd_start(socket: &str, recipe: Option<&str>, args: RecipeLaunchArgs) -> Result<()> {
+    let recipe = match recipe {
+        Some(id) => id,
+        None => detect_default_recipe()?.id,
+    };
+    println!("Starting with recipe: {recipe}");
+    cmd_recipe_alias(socket, recipe, args)
 }
 
 // ── Recipe commands ───────────────────────────────────────────────────────
@@ -917,6 +934,38 @@ fn recipe_has_user_auth_paths(recipe: &outcall::recipes::Recipe) -> bool {
         .iter()
         .map(|path| outcall::recipes::expanded_path(path))
         .any(|path| path.exists())
+}
+
+fn recipe_has_env_auth(recipe: &outcall::recipes::Recipe) -> bool {
+    recipe
+        .auth_env
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+}
+
+fn detect_default_recipe() -> Result<&'static outcall::recipes::Recipe> {
+    let candidates = outcall::recipes::RECIPES
+        .iter()
+        .filter(|recipe| recipe_has_env_auth(recipe) || recipe_has_user_auth_paths(recipe))
+        .collect::<Vec<_>>();
+
+    match candidates.as_slice() {
+        [recipe] => Ok(recipe),
+        [] => anyhow::bail!(
+            "could not infer which agent to start; no Claude or Codex auth candidates were found.\n\
+             Run `outcall doctor`, then choose one explicitly:\n  outcall claude\n  outcall codex"
+        ),
+        many => {
+            let ids = many
+                .iter()
+                .map(|recipe| recipe.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "found auth candidates for multiple agents ({ids}); choose one explicitly:\n  outcall claude\n  outcall codex"
+            )
+        }
+    }
 }
 
 fn cmd_recipe_list() -> Result<()> {

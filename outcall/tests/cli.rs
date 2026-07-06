@@ -24,6 +24,20 @@ fn outcall_in_dir(dir: &std::path::Path, args: &[&str]) -> std::process::Output 
         .expect("cargo run failed")
 }
 
+fn outcall_in_dir_clean_env(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    let manifest = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+    Command::new("cargo")
+        .args(["run", "-q", "--manifest-path", &manifest, "--"])
+        .args(args)
+        .current_dir(dir)
+        .env("HOME", dir)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("CODEX_ACCESS_TOKEN")
+        .env_remove("CODEX_API_KEY")
+        .output()
+        .expect("cargo run failed")
+}
+
 // ── Clap argument parsing ───────────────────────────────────────────────────
 
 #[test]
@@ -372,6 +386,24 @@ fn cli_top_level_run_help_parses() {
 }
 
 #[test]
+fn cli_top_level_start_help_parses() {
+    for args in [
+        vec!["start", "--help"],
+        vec!["start", "claude", "--help"],
+        vec!["start", "codex", "--auth", "mount", "--help"],
+    ] {
+        let out = outcall(&args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "start help {:?} should parse: {}",
+            args,
+            stderr
+        );
+    }
+}
+
+#[test]
 fn cli_top_level_recipe_alias_help_parses() {
     for args in [
         vec!["claude", "--help"],
@@ -388,6 +420,18 @@ fn cli_top_level_recipe_alias_help_parses() {
             stderr
         );
     }
+}
+
+#[test]
+fn cli_top_level_start_without_detectable_auth_exits_usefully() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_clean_env(temp.path(), &["start"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "start with no auth should fail");
+    assert!(
+        stderr.contains("could not infer which agent to start"),
+        "expected a useful detection error, got: {stderr}"
+    );
 }
 
 #[test]

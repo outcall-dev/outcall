@@ -54,6 +54,13 @@ auth/context sources, build the recipe image, ensure the daemon and default
 network exist, run a smoke container with the recipe entrypoint, and then start
 the real isolated agent container.
 
+If the machine only has one supported provider configured, `outcall start`
+will auto-select it:
+
+```sh
+outcall start
+```
+
 If the first run stops on a prerequisite, inspect the host and recipe checks
 directly:
 
