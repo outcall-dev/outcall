@@ -289,6 +289,7 @@ jobs:
         run: |
           set -eu
           ROOT_DIR="$(git rev-parse --show-toplevel)"
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' outcall/Cargo.toml | head -n1)"
           mkdir -p "$RUNNER_TEMP/outcall-ci-release"
           if [ -f "$ROOT_DIR/scripts/e2e/Dockerfile" ]; then
             DOCKERFILE="$ROOT_DIR/scripts/e2e/Dockerfile"
@@ -296,12 +297,20 @@ jobs:
             DOCKERFILE="$ROOT_DIR/application/scripts/e2e/Dockerfile"
           elif [ -f "$ROOT_DIR/Dockerfile" ]; then
             DOCKERFILE="$ROOT_DIR/Dockerfile"
+          elif [ -f "$ROOT_DIR/../application/scripts/e2e/Dockerfile" ]; then
+            DOCKERFILE="$ROOT_DIR/../application/scripts/e2e/Dockerfile"
+            ROOT_DIR="$(cd "$ROOT_DIR/.." && pwd)"
+          elif [ -f "$ROOT_DIR/../Dockerfile" ]; then
+            DOCKERFILE="$ROOT_DIR/../Dockerfile"
+            ROOT_DIR="$(cd "$ROOT_DIR/.." && pwd)"
           else
             echo "No supported daemon Dockerfile found in repository."
             exit 1
           fi
-          docker build -f "$DOCKERFILE" -t outcall-ci-daemon:local "$ROOT_DIR"
-          docker save outcall-ci-daemon:local | gzip > "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz"
+          docker build -f "$DOCKERFILE" \
+            -t "ghcr.io/outcall-dev/outcalld:v$VERSION" \
+            -t "ghcr.io/outcall-dev/outcalld:latest" "$ROOT_DIR"
+          docker save "ghcr.io/outcall-dev/outcalld:v$VERSION" | gzip > "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz"
 
       - name: Package local installer artifacts
         run: |
