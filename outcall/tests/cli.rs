@@ -372,6 +372,25 @@ fn cli_top_level_run_help_parses() {
 }
 
 #[test]
+fn cli_top_level_recipe_alias_help_parses() {
+    for args in [
+        vec!["claude", "--help"],
+        vec!["claude", "--auth", "mount", "--help"],
+        vec!["codex", "--help"],
+        vec!["codex", "--detach", "--help"],
+    ] {
+        let out = outcall(&args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "recipe alias help {:?} should parse: {}",
+            args,
+            stderr
+        );
+    }
+}
+
+#[test]
 fn cli_top_level_init_recipe_works_in_clean_project() {
     let temp = tempdir().expect("tempdir");
     let out = outcall_in_dir(temp.path(), &["init", "claude"]);

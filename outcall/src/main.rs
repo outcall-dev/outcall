@@ -26,6 +26,28 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(clap::Args, Clone)]
+struct RecipeLaunchArgs {
+    /// Overwrite existing generated files
+    #[arg(long)]
+    force: bool,
+    /// Skip docker build and use the local recipe image as-is
+    #[arg(long)]
+    no_build: bool,
+    /// How to transfer provider auth/config into the container
+    #[arg(long, value_enum, default_value_t = RecipeAuthMode::Auto)]
+    auth: RecipeAuthMode,
+    /// Re-copy staged auth files even if they already exist
+    #[arg(long)]
+    force_auth_copy: bool,
+    /// Run in detached mode
+    #[arg(short, long)]
+    detach: bool,
+    /// Arguments passed to the recipe agent entrypoint
+    #[arg(trailing_var_arg = true)]
+    args: Vec<String>,
+}
+
 #[derive(clap::Subcommand)]
 enum Commands {
     /// Manage the network bridge
@@ -116,7 +138,7 @@ enum Commands {
         #[arg(long)]
         no_build: bool,
         /// How to transfer provider auth/config into the container
-        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Copy)]
+        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Auto)]
         auth: RecipeAuthMode,
         /// Re-copy staged auth files even if they already exist
         #[arg(long)]
@@ -133,7 +155,7 @@ enum Commands {
         #[arg(long)]
         no_build: bool,
         /// How to transfer provider auth/config into the container
-        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Copy)]
+        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Auto)]
         auth: RecipeAuthMode,
         /// Re-copy staged auth files even if they already exist
         #[arg(long)]
@@ -145,6 +167,10 @@ enum Commands {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
+    /// Initialize and launch an isolated Claude Code container
+    Claude(RecipeLaunchArgs),
+    /// Initialize and launch an isolated Codex container
+    Codex(RecipeLaunchArgs),
     /// Manage the TLS interception CA (S011)
     Ca {
         #[command(subcommand)]
@@ -217,7 +243,7 @@ enum RecipeAction {
         #[arg(long)]
         no_build: bool,
         /// How to transfer provider auth/config into the container
-        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Copy)]
+        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Auto)]
         auth: RecipeAuthMode,
         /// Re-copy staged auth files even if they already exist
         #[arg(long)]
@@ -237,7 +263,7 @@ enum RecipeAction {
         #[arg(long)]
         no_build: bool,
         /// How to transfer provider auth/config into the container
-        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Copy)]
+        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Auto)]
         auth: RecipeAuthMode,
         /// Re-copy staged auth files even if they already exist
         #[arg(long)]
@@ -245,14 +271,29 @@ enum RecipeAction {
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 enum RecipeAuthMode {
+    /// Automatically choose copy when recipe files exist, otherwise env-only
+    Auto,
     /// Copy selected provider files into .outcall/auth/<recipe>/home
     Copy,
     /// Mount selected provider files directly from the host home directory
     Mount,
     /// Pass only matching environment variables
     EnvOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecipeAuthHint {
+    None,
+    EnvOnly,
+    Copy,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AuthStageResult {
+    found_auth: bool,
+    effective_mode: RecipeAuthMode,
 }
 
 #[derive(clap::Subcommand)]
@@ -584,6 +625,8 @@ fn main() -> Result<()> {
             detach,
             args,
         ),
+        Commands::Claude(args) => cmd_recipe_alias(&cli.socket, "claude", args),
+        Commands::Codex(args) => cmd_recipe_alias(&cli.socket, "codex", args),
         Commands::Ca { action } => match action {
             CaAction::Init { out } => cmd_ca_init(out),
             CaAction::Bundle => cmd_ca_bundle(&cli.socket),
@@ -653,6 +696,19 @@ fn main() -> Result<()> {
     }
 }
 
+fn cmd_recipe_alias(socket: &str, recipe: &str, args: RecipeLaunchArgs) -> Result<()> {
+    cmd_run(
+        socket,
+        recipe,
+        args.force,
+        args.no_build,
+        args.auth,
+        args.force_auth_copy,
+        args.detach,
+        args.args,
+    )
+}
+
 // ── Recipe commands ───────────────────────────────────────────────────────
 
 fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
@@ -673,8 +729,8 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
         println!("  ensured {}", rules_dir.display());
         println!();
         println!("Next:");
-        println!("  outcall run {}", recipe.id);
-        println!("  outcall run {} --detach", recipe.id);
+        println!("  outcall {}", recipe.id);
+        println!("  outcall {} --detach", recipe.id);
         return Ok(());
     }
 
@@ -690,7 +746,7 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
     println!("Suggested next steps:");
     println!("  outcall doctor");
     println!("  outcall recipe list");
-    println!("  outcall run claude     # or: outcall run codex");
+    println!("  outcall claude         # or: outcall codex");
     Ok(())
 }
 
@@ -794,8 +850,9 @@ fn cmd_setup_inner(
         println!();
         println!("Setup complete.");
         println!("Next:");
-        println!("  outcall run {}", recipe.id);
-        println!("  outcall run {} --detach", recipe.id);
+        let recommended = recommended_recipe_command(recipe);
+        println!("  {}", recommended);
+        println!("  {} --detach", recommended);
     }
     Ok(())
 }
@@ -830,6 +887,36 @@ fn recipe_or_bail(id: &str) -> Result<&'static outcall::recipes::Recipe> {
             .join(", ");
         format!("unknown recipe \"{id}\"; available recipes: {ids}")
     })
+}
+
+fn auth_hint(env_auth: bool, file_auth: bool) -> RecipeAuthHint {
+    match (env_auth, file_auth) {
+        (true, false) => RecipeAuthHint::EnvOnly,
+        (_, true) => RecipeAuthHint::Copy,
+        (false, false) => RecipeAuthHint::None,
+    }
+}
+
+fn recommended_recipe_command(recipe: &outcall::recipes::Recipe) -> String {
+    recommended_recipe_command_with_hint(recipe, RecipeAuthHint::Copy)
+}
+
+fn recommended_recipe_command_with_hint(
+    recipe: &outcall::recipes::Recipe,
+    hint: RecipeAuthHint,
+) -> String {
+    match hint {
+        RecipeAuthHint::EnvOnly => format!("outcall {} --auth env-only", recipe.id),
+        RecipeAuthHint::Copy | RecipeAuthHint::None => format!("outcall {}", recipe.id),
+    }
+}
+
+fn recipe_has_user_auth_paths(recipe: &outcall::recipes::Recipe) -> bool {
+    recipe
+        .user_paths
+        .iter()
+        .map(|path| outcall::recipes::expanded_path(path))
+        .any(|path| path.exists())
 }
 
 fn cmd_recipe_list() -> Result<()> {
@@ -877,7 +964,7 @@ fn cmd_recipe_init(id: &str, force: bool) -> Result<()> {
     }
     println!();
     println!("Next:");
-    println!("  outcall run {}", recipe.id);
+    println!("  {}", recommended_recipe_command(recipe));
     println!(
         "  outcall recipe run {}   # lower-level equivalent",
         recipe.id
@@ -923,19 +1010,20 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
 
     println!();
     println!("Auth candidates:");
-    let mut any_auth = false;
+    let mut env_auth = false;
+    let mut file_auth = false;
     for key in recipe.auth_env {
         let present = std::env::var_os(key).is_some();
-        any_auth |= present;
+        env_auth |= present;
         doctor_bool("env", key, present);
     }
     for path in recipe.user_paths {
         let expanded = outcall::recipes::expanded_path(path);
         let present = expanded.exists();
-        any_auth |= present;
+        file_auth |= present;
         doctor_bool("user path", path, present);
     }
-    if !any_auth {
+    if !env_auth && !file_auth {
         println!("  WARN no auth candidates found; choose env, copy, or mount before running");
     }
 
@@ -957,8 +1045,8 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
     println!();
     println!("Network reminder:");
     println!(
-        "  `outcall run {}` handles init, daemon, network, smoke test, and launch.",
-        recipe.id
+        "  `{}` handles init, daemon, network, smoke test, and launch.",
+        recommended_recipe_command(recipe)
     );
     println!(
         "  Run `outcall recipe test {}` for a full smoke check.",
@@ -966,6 +1054,12 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
     );
     println!(
         "  Copy or mount only selected auth/config paths; do not mount the whole home directory."
+    );
+    println!();
+    println!("Recommended first command:");
+    println!(
+        "  {}",
+        recommended_recipe_command_with_hint(recipe, auth_hint(env_auth, file_auth))
     );
     Ok(())
 }
@@ -989,7 +1083,7 @@ fn cmd_recipe_run(
     }
 
     let mut config = recipe_agent_config(recipe, &image, detach);
-    stage_recipe_auth(
+    let auth_result = stage_recipe_auth(
         &project_dir,
         recipe,
         auth_mode,
@@ -1001,7 +1095,7 @@ fn cmd_recipe_run(
 
     println!(
         "Starting recipe \"{}\" with auth mode {:?}.",
-        recipe.id, auth_mode
+        recipe.id, auth_result.effective_mode
     );
     outcall::agent_boot::boot_agent_with_config(&project_dir, config, args)
 }
@@ -1023,7 +1117,7 @@ fn cmd_recipe_test(
     }
 
     let mut config = recipe_agent_config(recipe, &image, true);
-    let auth_summary = stage_recipe_auth(
+    let auth_result = stage_recipe_auth(
         &project_dir,
         recipe,
         auth_mode,
@@ -1032,7 +1126,7 @@ fn cmd_recipe_test(
     )?;
     ensure_recipe_runtime_ready(socket)?;
 
-    if !auth_summary {
+    if !auth_result.found_auth {
         anyhow::bail!(
             "no auth material found for recipe \"{}\"; run `outcall doctor {}` and add one of the listed env vars or user paths",
             recipe.id,
@@ -1068,7 +1162,7 @@ fn stage_recipe_auth(
     auth_mode: RecipeAuthMode,
     force_auth_copy: bool,
     config: &mut outcall::agent_config::AgentConfig,
-) -> Result<bool> {
+) -> Result<AuthStageResult> {
     let mut found_auth = false;
     for key in recipe.auth_env {
         if let Ok(value) = std::env::var(key) {
@@ -1077,7 +1171,26 @@ fn stage_recipe_auth(
         }
     }
 
-    match auth_mode {
+    let effective_mode = match auth_mode {
+        RecipeAuthMode::Auto if recipe_has_user_auth_paths(recipe) => RecipeAuthMode::Copy,
+        RecipeAuthMode::Auto => RecipeAuthMode::EnvOnly,
+        mode => mode,
+    };
+
+    if auth_mode == RecipeAuthMode::Auto {
+        println!(
+            "Auto auth mode selected: {}.",
+            match effective_mode {
+                RecipeAuthMode::Copy => "copy",
+                RecipeAuthMode::Mount => "mount",
+                RecipeAuthMode::EnvOnly => "env-only",
+                RecipeAuthMode::Auto => "auto",
+            }
+        );
+    }
+
+    match effective_mode {
+        RecipeAuthMode::Auto => unreachable!("auto mode should resolve before staging"),
         RecipeAuthMode::Copy => {
             let staged = outcall::recipes::stage_auth_copy(&project_dir, recipe, force_auth_copy)?;
             if staged.copied.is_empty() {
@@ -1108,7 +1221,10 @@ fn stage_recipe_auth(
         RecipeAuthMode::EnvOnly => {}
     }
 
-    Ok(found_auth)
+    Ok(AuthStageResult {
+        found_auth,
+        effective_mode,
+    })
 }
 
 fn ensure_recipe_runtime_ready(socket: &str) -> Result<()> {
