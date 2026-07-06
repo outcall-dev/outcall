@@ -108,7 +108,8 @@ jobs:
       - name: cargo test --ignored (e2e tests via sudo)
         run: |
           sudo env \
-            PATH=/home/runner/.cargo/bin:/home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PWD/target/debug:$PATH \
+            PATH=/home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PWD/target/debug:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            RUSTC=/home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc \
             OUTCALL_PROXY_ADDR=172.30.0.1:8080 \
             /home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo test --workspace --tests -- --ignored --test-threads=1
 

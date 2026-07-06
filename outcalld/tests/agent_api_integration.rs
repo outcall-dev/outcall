@@ -59,10 +59,8 @@ async fn spawn_daemon(
         .arg("--rules-dir")
         .arg(rules_dir.as_os_str())
         .arg("--agent-socket-host-path")
-        .arg(agent_socket.as_os_str());
-    if let Ok(proxy_addr) = std::env::var("OUTCALL_PROXY_ADDR") {
-        cmd.arg("--proxy-addr").arg(&proxy_addr);
-    }
+        .arg(agent_socket.as_os_str())
+        .arg("--no-proxy");
     let mut daemon = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
