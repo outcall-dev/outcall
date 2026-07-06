@@ -290,6 +290,12 @@ enum DaemonAction {
         /// Container name (default: outcall-daemon)
         #[arg(long)]
         name: Option<String>,
+        /// Host path for the daemon API unix socket
+        #[arg(long)]
+        socket: Option<String>,
+        /// Host path for the agent API unix socket
+        #[arg(long)]
+        agent_socket_host_path: Option<String>,
         /// Disable the in-daemon HTTP proxy (passes --no-proxy to outcalld)
         #[arg(long)]
         no_proxy: bool,
@@ -589,9 +595,20 @@ fn main() -> Result<()> {
                 bridge,
                 rules_dir,
                 name,
+                socket,
+                agent_socket_host_path,
                 no_proxy,
                 build_from,
-            } => cmd_daemon_start(image, bridge, rules_dir, name, no_proxy, build_from),
+            } => cmd_daemon_start(
+                image,
+                bridge,
+                rules_dir,
+                name,
+                socket,
+                agent_socket_host_path,
+                no_proxy,
+                build_from,
+            ),
             DaemonAction::Stop { name } => cmd_daemon_stop(name),
             DaemonAction::Status { name } => cmd_daemon_status(name),
             DaemonAction::Logs { name, follow, tail } => cmd_daemon_logs(name, follow, tail),
@@ -1088,12 +1105,12 @@ fn stage_recipe_auth(
 }
 
 fn ensure_recipe_runtime_ready(socket: &str) -> Result<()> {
-    ensure_daemon_ready()?;
+    ensure_daemon_ready(socket)?;
     ensure_default_network(socket)?;
     Ok(())
 }
 
-fn ensure_daemon_ready() -> Result<()> {
+fn ensure_daemon_ready(socket: &str) -> Result<()> {
     let output = std::process::Command::new("docker")
         .args([
             "inspect",
@@ -1108,13 +1125,48 @@ fn ensure_daemon_ready() -> Result<()> {
             if output.status.success()
                 && String::from_utf8_lossy(&output.stdout).trim() == "true" =>
         {
-            Ok(())
+            wait_for_daemon_socket(socket)
         }
         _ => {
             println!("Starting outcall-daemon...");
-            cmd_daemon_start(None, None, None, None, false, None)
+            let agent_socket = std::path::Path::new(socket)
+                .parent()
+                .map(|parent| parent.join("agent.sock"))
+                .and_then(|path| path.into_os_string().into_string().ok());
+            cmd_daemon_start(
+                None,
+                None,
+                None,
+                None,
+                Some(socket.to_string()),
+                agent_socket,
+                false,
+                None,
+            )?;
+            wait_for_daemon_socket(socket)
         }
     }
+}
+
+fn wait_for_daemon_socket(socket: &str) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let mut last_error = None;
+    for _ in 0..50 {
+        match UnixStream::connect(socket) {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+
+    let last_error = last_error
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "unknown error".to_string());
+    anyhow::bail!("cannot connect to outcalld at {socket} after startup wait: {last_error}");
 }
 
 fn ensure_default_network(socket: &str) -> Result<()> {
@@ -1304,7 +1356,7 @@ fn cmd_requests_reject(socket: &str, id: &str, reason: Option<String>) -> Result
 // The host API is served on a Unix domain socket; browsers can't open Unix
 // sockets directly. `outcall ui` listens on 127.0.0.1:<port> and forwards each
 // connection into the daemon's host socket, byte-for-byte. Equivalent to:
-//   socat TCP-LISTEN:8080,reuseaddr,fork UNIX-CONNECT:/run/outcall/host.sock
+//   socat TCP-LISTEN:8080,reuseaddr,fork UNIX-CONNECT:/tmp/outcall/host.sock
 //
 // One OS thread per connection. Fine for a single-operator dashboard;
 // blocking I/O keeps the CLI free of an async runtime dependency.
@@ -2239,6 +2291,8 @@ fn cmd_daemon_start(
     bridge: Option<String>,
     rules_dir: Option<String>,
     name: Option<String>,
+    socket: Option<String>,
+    agent_socket_host_path: Option<String>,
     no_proxy: bool,
     build_from: Option<String>,
 ) -> Result<()> {
@@ -2248,6 +2302,9 @@ fn cmd_daemon_start(
     let image = image.unwrap_or_else(|| DEFAULT_DAEMON_IMAGE.to_string());
     let bridge = bridge.unwrap_or_else(|| outcall_api::DEFAULT_BRIDGE_NAME.to_string());
     let rules_dir = rules_dir.unwrap_or_else(|| "/etc/outcall/rules.d".to_string());
+    let socket = socket.unwrap_or_else(|| outcall_api::DEFAULT_HOST_SOCKET.to_string());
+    let agent_socket_host_path =
+        agent_socket_host_path.unwrap_or_else(|| outcall_api::DEFAULT_AGENT_SOCKET.to_string());
 
     if let Some(dockerfile) = build_from {
         println!("Building image {image} from {dockerfile}…");
@@ -2263,17 +2320,17 @@ fn cmd_daemon_start(
     // Idempotent: remove any prior container of the same name.
     let _ = Command::new("docker").args(["rm", "-f", &name]).output();
 
-    // The daemon binds its Unix sockets inside the container at /run/outcall/.
-    // Bind-mounting the host's /run/outcall makes those sockets reachable
-    // from host-installed tools (e.g. brew-installed `outcall`, `outcall ui`,
-    // anything calling DEFAULT_HOST_SOCKET). The directory must exist on
-    // the host before docker run, so we create it idempotently.
-    let socket_dir = "/run/outcall";
+    // Bind-mount the host socket directory so the daemon's unix sockets are
+    // reachable from the installed CLI and agent containers.
+    let socket_dir = std::path::Path::new(&socket)
+        .parent()
+        .context("daemon socket path must have a parent directory")?;
     if let Err(e) = std::fs::create_dir_all(socket_dir) {
         // Non-fatal warning: on macOS the dir is created inside the Docker
         // VM, not on macOS itself, and the host CLI talks via docker exec.
         eprintln!(
-            "note: could not create {socket_dir} on host ({e}); host CLI may need `docker exec {name}` to reach the socket"
+            "note: could not create {} on host ({e}); host CLI may need `docker exec {name}` to reach the socket",
+            socket_dir.display()
         );
     }
 
@@ -2291,12 +2348,16 @@ fn cmd_daemon_start(
         "-v".into(),
         "/var/run/docker.sock:/var/run/docker.sock".into(),
         "-v".into(),
-        format!("{socket_dir}:{socket_dir}"),
+        format!("{}:{}", socket_dir.display(), socket_dir.display()),
         "-v".into(),
         format!("{rules_dir}:/etc/outcall/rules.d:ro"),
         "--entrypoint".into(),
         "outcalld".into(),
         image.clone(),
+        "--socket".into(),
+        socket.clone(),
+        "--agent-socket-host-path".into(),
+        agent_socket_host_path.clone(),
         "--bridge".into(),
         bridge.clone(),
     ];

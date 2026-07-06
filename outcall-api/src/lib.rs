@@ -14,10 +14,10 @@ pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 10;
 
 /// Default path for the host API unix socket.
-pub const DEFAULT_HOST_SOCKET: &str = "/run/outcall/host.sock";
+pub const DEFAULT_HOST_SOCKET: &str = "/tmp/outcall/host.sock";
 
 /// Default path for the agent API unix socket (bind-mounted into containers).
-pub const DEFAULT_AGENT_SOCKET: &str = "/run/outcall/agent.sock";
+pub const DEFAULT_AGENT_SOCKET: &str = "/tmp/outcall/agent.sock";
 
 /// Default bridge interface name.
 pub const DEFAULT_BRIDGE_NAME: &str = "outcall0";

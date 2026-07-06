@@ -5,7 +5,7 @@
 ## Badges
 
 [![CI](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.20-blue.svg)](https://github.com/outcall-dev/outcall/releases)
+[![Version](https://img.shields.io/badge/version-0.1.21-blue.svg)](https://github.com/outcall-dev/outcall/releases)
 [![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcalld-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcalld)
 
 ## Workspace
@@ -99,7 +99,7 @@ docker run -d --rm \
     --cap-add NET_ADMIN \
     --cap-add SYS_ADMIN \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    -v /run/outcall:/run/outcall \
+    -v /tmp/outcall:/tmp/outcall \
     -v /etc/outcall:/etc/outcall \
     ghcr.io/outcall-dev/outcalld:latest \
     --bridge outcall0
@@ -112,7 +112,7 @@ published from `Dockerfile`.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--socket <path>` | `/run/outcall/host.sock` | Host API Unix socket |
+| `--socket <path>` | `/tmp/outcall/host.sock` | Host API Unix socket |
 | `--bridge <name>` | `outcall0` | Bridge interface name |
 | `--rules-dir <path>` | `/etc/outcall/rules.d` | Directory of rule YAML files |
 | `--dns-listen <ip>` | `10.200.0.1` | DNS filter bind address (bridge gateway IP) |
@@ -120,7 +120,7 @@ published from `Dockerfile`.
 | `--dns-upstream <list>` | `/etc/resolv.conf` | Comma-separated upstream DNS servers |
 | `--proxy-addr <host:port>` | `10.200.0.1:8080` | HTTP proxy bind address (bridge gateway IP:port) |
 | `--no-proxy` | _off_ | Disable the HTTP proxy entirely |
-| `--agent-socket-host-path <path>` | `/run/outcall/agent.sock` | Agent API Unix socket |
+| `--agent-socket-host-path <path>` | `/tmp/outcall/agent.sock` | Agent API Unix socket |
 | `--shim-host-path <path>` | `/usr/local/bin/outcall-agent` | Path to the `outcall-agent` shim binary that's bind-mounted into agent containers |
 | `--agent-timeout-secs <n>` | `5` | Server-side rule-evaluation timeout (S004-FR-015) |
 | `--agent-perm-rate <count/seconds>` | `100/10` | Sliding-window rate limit for permission checks per container |

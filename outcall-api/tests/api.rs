@@ -502,8 +502,8 @@ mod constants {
 
     #[test]
     fn default_sockets_have_expected_paths() {
-        assert_eq!(DEFAULT_HOST_SOCKET, "/run/outcall/host.sock");
-        assert_eq!(DEFAULT_AGENT_SOCKET, "/run/outcall/agent.sock");
+        assert_eq!(DEFAULT_HOST_SOCKET, "/tmp/outcall/host.sock");
+        assert_eq!(DEFAULT_AGENT_SOCKET, "/tmp/outcall/agent.sock");
     }
 
     #[test]
