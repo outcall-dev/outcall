@@ -16,6 +16,15 @@ pub fn boot_agent(
     let mut config = AgentConfig::load(project_dir)?;
     config.merge(&cli_flags);
 
+    boot_agent_with_config(project_dir, config, entrypoint_args)
+}
+
+/// Boot an agent container with a fully resolved config.
+pub fn boot_agent_with_config(
+    project_dir: &Path,
+    config: AgentConfig,
+    entrypoint_args: Vec<String>,
+) -> Result<()> {
     let image = config.effective_image();
     let name = config.effective_name(project_dir);
     let workspace = &config.workspace;

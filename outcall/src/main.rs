@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use outcall_api::{
     ApproveRuleResult, BridgeStatus, ContainerCreateResult, ContainerInfo, ContainerInspectResult,
     ContainerRemoveResult, ContainerStopResult, DnsCacheDetail, DnsFilterStatus, EvalContext,
@@ -156,6 +156,36 @@ enum RecipeAction {
         /// Recipe ID, e.g. claude or codex
         id: String,
     },
+    /// Build the recipe image, stage auth, and start the agent
+    Run {
+        /// Recipe ID, e.g. claude or codex
+        id: String,
+        /// Skip docker build and use the local recipe image as-is
+        #[arg(long)]
+        no_build: bool,
+        /// How to transfer provider auth/config into the container
+        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Copy)]
+        auth: RecipeAuthMode,
+        /// Re-copy staged auth files even if they already exist
+        #[arg(long)]
+        force_auth_copy: bool,
+        /// Run in detached mode
+        #[arg(short, long)]
+        detach: bool,
+        /// Arguments passed to the recipe agent entrypoint
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RecipeAuthMode {
+    /// Copy selected provider files into .outcall/auth/<recipe>/home
+    Copy,
+    /// Mount selected provider files directly from the host home directory
+    Mount,
+    /// Pass only matching environment variables
+    EnvOnly,
 }
 
 #[derive(clap::Subcommand)]
@@ -485,6 +515,14 @@ fn main() -> Result<()> {
             RecipeAction::Show { id } => cmd_recipe_show(&id),
             RecipeAction::Init { id, force } => cmd_recipe_init(&id, force),
             RecipeAction::Doctor { id } => cmd_recipe_doctor(&id),
+            RecipeAction::Run {
+                id,
+                no_build,
+                auth,
+                force_auth_copy,
+                detach,
+                args,
+            } => cmd_recipe_run(&id, no_build, auth, force_auth_copy, detach, args),
         },
         Commands::Ui { port, no_open } => cmd_ui(&cli.socket, port, !no_open),
     }
@@ -552,7 +590,7 @@ fn cmd_recipe_init(id: &str, force: bool) -> Result<()> {
         recipe.id, recipe.id
     );
     println!("  outcall network create");
-    println!("  outcall agent");
+    println!("  outcall recipe run {}", recipe.id);
     Ok(())
 }
 
@@ -623,10 +661,124 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
 
     println!();
     println!("Network reminder:");
-    println!("  Run `outcall network create` before `outcall agent`.");
+    println!(
+        "  Run `outcall network create` before `outcall recipe run {}`.",
+        recipe.id
+    );
     println!(
         "  Copy or mount only selected auth/config paths; do not mount the whole home directory."
     );
+    Ok(())
+}
+
+fn cmd_recipe_run(
+    id: &str,
+    no_build: bool,
+    auth_mode: RecipeAuthMode,
+    force_auth_copy: bool,
+    detach: bool,
+    args: Vec<String>,
+) -> Result<()> {
+    let recipe = recipe_or_bail(id)?;
+    let project_dir = std::env::current_dir().context("failed to get current directory")?;
+    ensure_recipe_initialized(&project_dir, recipe)?;
+
+    let image = outcall::recipes::recipe_image_name(recipe);
+    if !no_build {
+        build_recipe_image(&project_dir, recipe, &image)?;
+    }
+
+    let mut config = outcall::agent_config::AgentConfig {
+        image: Some(image),
+        name: Some(format!("{}-agent", recipe.id)),
+        workspace: "/workspace".to_string(),
+        network: outcall_api::DEFAULT_NETWORK_NAME.to_string(),
+        detach,
+        auto_pull: false,
+        entrypoint: Some(vec![recipe.id.to_string()]),
+        ..Default::default()
+    };
+
+    for key in recipe.auth_env {
+        if let Ok(value) = std::env::var(key) {
+            config.env.insert((*key).to_string(), value);
+        }
+    }
+
+    match auth_mode {
+        RecipeAuthMode::Copy => {
+            let staged = outcall::recipes::stage_auth_copy(&project_dir, recipe, force_auth_copy)?;
+            if staged.copied.is_empty() {
+                println!("No user auth files copied for recipe \"{}\".", recipe.id);
+            } else {
+                println!("Staged auth files:");
+                for (src, dest) in &staged.copied {
+                    println!("  {} -> {}", src.display(), dest.display());
+                }
+                config
+                    .volumes
+                    .push(format!("{}:/home/node", staged.home_dir.display()));
+            }
+        }
+        RecipeAuthMode::Mount => {
+            let mounts = outcall::recipes::auth_mounts_from_user_paths(recipe);
+            if mounts.is_empty() {
+                println!(
+                    "No existing user auth paths found to mount for recipe \"{}\".",
+                    recipe.id
+                );
+            }
+            config.volumes.extend(mounts);
+        }
+        RecipeAuthMode::EnvOnly => {}
+    }
+
+    println!(
+        "Starting recipe \"{}\" with auth mode {:?}.",
+        recipe.id, auth_mode
+    );
+    outcall::agent_boot::boot_agent_with_config(&project_dir, config, args)
+}
+
+fn ensure_recipe_initialized(
+    project_dir: &std::path::Path,
+    recipe: &outcall::recipes::Recipe,
+) -> Result<()> {
+    let dockerfile = outcall::recipes::recipe_dockerfile(project_dir, recipe);
+    if dockerfile.exists() {
+        return Ok(());
+    }
+
+    println!(
+        "Recipe files for \"{}\" are missing; initializing defaults.",
+        recipe.id
+    );
+    let written = outcall::recipes::init_recipe(project_dir, recipe, false)?;
+    for path in written {
+        println!("  wrote {}", path.display());
+    }
+    Ok(())
+}
+
+fn build_recipe_image(
+    project_dir: &std::path::Path,
+    recipe: &outcall::recipes::Recipe,
+    image: &str,
+) -> Result<()> {
+    let dockerfile = outcall::recipes::recipe_dockerfile(project_dir, recipe);
+    println!("Building recipe image {image}...");
+    let status = std::process::Command::new("docker")
+        .arg("build")
+        .arg("-t")
+        .arg(image)
+        .arg("-f")
+        .arg(&dockerfile)
+        .arg(".")
+        .status()
+        .context("failed to invoke docker build")?;
+    if !status.success() {
+        anyhow::bail!("docker build failed (exit {:?})", status.code());
+    }
     Ok(())
 }
 

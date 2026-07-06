@@ -5,7 +5,7 @@
 ## Badges
 
 [![CI](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.9-blue.svg)](https://github.com/outcall-dev/outcall/releases)
+[![Version](https://img.shields.io/badge/version-0.1.10-blue.svg)](https://github.com/outcall-dev/outcall/releases)
 [![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcalld-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcalld)
 
 ## Workspace
@@ -36,14 +36,17 @@ The CLI ships a small built-in recipe registry for common agent runtimes:
 outcall recipe list
 outcall recipe init claude
 outcall recipe doctor claude
+outcall recipe run claude
 outcall recipe init codex
 outcall recipe doctor codex
+outcall recipe run codex --auth env-only
 ```
 
 Recipes generate `.outcall/` scaffolding for Dockerfiles, egress rules, agent
-config, and context/auth transfer notes. They do not mount your whole home
-directory; inspect the generated `context.md` and use `doctor` to choose explicit
-auth/config paths before running an agent.
+config, and context/auth transfer notes. `recipe run` builds the local recipe
+image, stages selected auth/config into `.outcall/auth/<id>/home` by default,
+and starts the agent through the same container boot path as `outcall agent`.
+Recipes do not mount your whole home directory.
 
 ## Running `outcalld`
 

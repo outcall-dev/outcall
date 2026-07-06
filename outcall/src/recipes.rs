@@ -19,6 +19,13 @@ pub struct Recipe {
     pub project_paths: &'static [&'static str],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthStaging {
+    pub home_dir: PathBuf,
+    pub copied: Vec<(PathBuf, PathBuf)>,
+    pub missing: Vec<&'static str>,
+}
+
 const CLAUDE_AUTH_ENV: &[&str] = &["ANTHROPIC_API_KEY"];
 const CLAUDE_USER_PATHS: &[&str] = &["~/.claude", "~/.claude.json"];
 const CLAUDE_PROJECT_PATHS: &[&str] = &["CLAUDE.md", ".claude/settings.json"];
@@ -345,8 +352,136 @@ pub fn init_recipe(project_dir: &Path, recipe: &Recipe, force: bool) -> Result<V
         force,
         &mut written,
     )?;
+    if let Some(path) = ensure_outcall_gitignore(project_dir)? {
+        written.push(path);
+    }
 
     Ok(written)
+}
+
+pub fn recipe_image_name(recipe: &Recipe) -> String {
+    format!("outcall-recipe-{}:local", recipe.id)
+}
+
+pub fn recipe_dockerfile(project_dir: &Path, recipe: &Recipe) -> PathBuf {
+    project_dir
+        .join(".outcall")
+        .join("recipes")
+        .join(recipe.id)
+        .join("Dockerfile")
+}
+
+pub fn stage_auth_copy(project_dir: &Path, recipe: &Recipe, force: bool) -> Result<AuthStaging> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    stage_auth_copy_with_home(project_dir, recipe, home.as_deref(), force)
+}
+
+fn stage_auth_copy_with_home(
+    project_dir: &Path,
+    recipe: &Recipe,
+    home: Option<&Path>,
+    force: bool,
+) -> Result<AuthStaging> {
+    let home_dir = project_dir
+        .join(".outcall")
+        .join("auth")
+        .join(recipe.id)
+        .join("home");
+    std::fs::create_dir_all(&home_dir)
+        .with_context(|| format!("failed to create {}", home_dir.display()))?;
+    secure_dir(&project_dir.join(".outcall").join("auth"))?;
+    secure_dir(&project_dir.join(".outcall").join("auth").join(recipe.id))?;
+    secure_dir(&home_dir)?;
+
+    let mut copied = Vec::new();
+    let mut missing = Vec::new();
+    for candidate in recipe.user_paths {
+        let src = expanded_path_with_home(candidate, home);
+        if !src.exists() {
+            missing.push(*candidate);
+            continue;
+        }
+        let relative = candidate.strip_prefix("~/").unwrap_or(candidate);
+        let dest = home_dir.join(relative);
+        copy_path(&src, &dest, force)
+            .with_context(|| format!("failed to copy {} to {}", src.display(), dest.display()))?;
+        copied.push((src, dest));
+    }
+
+    Ok(AuthStaging {
+        home_dir,
+        copied,
+        missing,
+    })
+}
+
+pub fn auth_mounts_from_user_paths(recipe: &Recipe) -> Vec<String> {
+    let mut mounts = Vec::new();
+    for candidate in recipe.user_paths {
+        let src = expanded_path(candidate);
+        if !src.exists() {
+            continue;
+        }
+        let relative = candidate.strip_prefix("~/").unwrap_or(candidate);
+        mounts.push(format!("{}:/home/node/{}", src.display(), relative));
+    }
+    mounts
+}
+
+fn copy_path(src: &Path, dest: &Path, force: bool) -> Result<()> {
+    if dest.exists() {
+        if force {
+            if dest.is_dir() {
+                std::fs::remove_dir_all(dest)
+                    .with_context(|| format!("failed to remove {}", dest.display()))?;
+            } else {
+                std::fs::remove_file(dest)
+                    .with_context(|| format!("failed to remove {}", dest.display()))?;
+            }
+        } else {
+            return Ok(());
+        }
+    }
+
+    if src.is_dir() {
+        std::fs::create_dir_all(dest)
+            .with_context(|| format!("failed to create {}", dest.display()))?;
+        for entry in
+            std::fs::read_dir(src).with_context(|| format!("failed to read {}", src.display()))?
+        {
+            let entry = entry?;
+            let child_src = entry.path();
+            let child_dest = dest.join(entry.file_name());
+            copy_path(&child_src, &child_dest, force)?;
+        }
+    } else {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::copy(src, dest)
+            .with_context(|| format!("failed to copy {} to {}", src.display(), dest.display()))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secure_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(path, permissions)
+        .with_context(|| format!("failed to chmod {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_dir(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn write_new(path: &Path, contents: &str, force: bool, written: &mut Vec<PathBuf>) -> Result<()> {
@@ -362,10 +497,31 @@ fn write_new(path: &Path, contents: &str, force: bool, written: &mut Vec<PathBuf
     Ok(())
 }
 
+fn ensure_outcall_gitignore(project_dir: &Path) -> Result<Option<PathBuf>> {
+    let path = project_dir.join(".outcall").join(".gitignore");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == "auth/") {
+        return Ok(None);
+    }
+
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str("auth/\n");
+    std::fs::write(&path, next).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(Some(path))
+}
+
 pub fn expanded_path(path: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    expanded_path_with_home(path, home.as_deref())
+}
+
+fn expanded_path_with_home(path: &str, home: Option<&Path>) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
+        if let Some(home) = home {
+            return home.join(rest);
         }
     }
     PathBuf::from(path)
@@ -395,11 +551,45 @@ mod tests {
         let dir = temp_project("init");
         let recipe = get_recipe("codex").unwrap();
         let written = init_recipe(&dir, recipe, false).unwrap();
-        assert_eq!(written.len(), 6);
+        assert_eq!(written.len(), 7);
         assert!(dir.join(".outcall/recipes/codex/recipe.yaml").exists());
         assert!(dir.join(".outcall/recipes/codex/Dockerfile").exists());
         assert!(dir.join(".outcall/rules/codex.yaml").exists());
         assert!(dir.join(".outcall/agent.yaml").exists());
+        assert!(dir.join(".outcall/.gitignore").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn init_recipe_appends_auth_gitignore_entry() {
+        let dir = temp_project("gitignore");
+        std::fs::create_dir_all(dir.join(".outcall")).unwrap();
+        std::fs::write(dir.join(".outcall/.gitignore"), "cache/\n").unwrap();
+
+        let recipe = get_recipe("claude").unwrap();
+        init_recipe(&dir, recipe, false).unwrap();
+
+        let gitignore = std::fs::read_to_string(dir.join(".outcall/.gitignore")).unwrap();
+        assert!(gitignore.contains("cache/\n"));
+        assert!(gitignore.contains("auth/\n"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_auth_copy_preserves_home_relative_paths() {
+        let dir = temp_project("auth-copy");
+        let home = dir.join("host-home");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex/auth.json"), "{}").unwrap();
+
+        let recipe = get_recipe("codex").unwrap();
+        let staged = stage_auth_copy_with_home(&dir, recipe, Some(&home), true).unwrap();
+
+        assert_eq!(staged.copied.len(), 1);
+        assert!(
+            dir.join(".outcall/auth/codex/home/.codex/auth.json")
+                .exists()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

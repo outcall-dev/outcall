@@ -1,6 +1,6 @@
 [package]
 name = "outcalld"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 description = "Host-level firewall daemon for Outcall"
 license = "Apache-2.0"
@@ -14,8 +14,8 @@ name = "outcalld"
 path = "src/main.rs"
 
 [dependencies]
-outcall-api = { path = "../outcall-api", version = "0.1.9" }
-outcall-ui = { path = "../outcall-ui", version = "0.1.9" }
+outcall-api = { path = "../outcall-api", version = "0.1.10" }
+outcall-ui = { path = "../outcall-ui", version = "0.1.10" }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }

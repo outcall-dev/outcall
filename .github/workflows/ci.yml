@@ -107,11 +107,10 @@ jobs:
 
       - name: cargo test --ignored (e2e tests via sudo)
         run: |
-          rustup default stable
           sudo env \
             PATH=/home/runner/.cargo/bin:/home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PWD/target/debug:$PATH \
             OUTCALL_PROXY_ADDR=172.30.0.1:8080 \
-            cargo test --workspace --tests -- --ignored
+            /home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo test --workspace --tests -- --ignored --test-threads=1
 
   test-privileged-docker:
     name: cargo test (privileged e2e - docker)
@@ -124,6 +123,7 @@ jobs:
           docker run --rm \
             --cap-add=NET_ADMIN \
             --device /dev/net/tun:/dev/net/tun \
+            -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:/workspace" \
             -w /workspace \
             -e OUTCALL_PROXY_ADDR=172.30.0.1:8080 \
@@ -135,7 +135,7 @@ jobs:
                      ip link set outcall0 up && \
                      export PATH="$PWD/target/debug:$PATH" && \
                      cargo build --workspace --locked && \
-                     cargo test --workspace --tests -- --ignored'
+                     cargo test --workspace --tests -- --ignored --test-threads=1'
 
   fmt:
     name: cargo fmt
