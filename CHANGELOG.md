@@ -7,6 +7,65 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **CLI:** bare `outcall` now prints project-aware onboarding instead of
+  exiting on a missing subcommand.
+- **CLI:** top-level `outcall start [claude|codex]` command. With an explicit
+  provider it behaves like the provider alias; without one it auto-selects
+  Claude or Codex only when the host has an unambiguous matching auth setup.
+- **CLI:** top-level `outcall run <claude|codex>` command for the shortest
+  first-run path. It performs scaffold generation, prerequisite checks, smoke
+  verification, and then launches the actual isolated agent container.
+- **Install script:** `https://outcall.dev/install.sh` installs release
+  binaries directly into `~/.local/bin` without cloning the repository or
+  building from source first.
+- **Release assets:** publish Docker-loadable daemon image archives for
+  `linux/amd64` and `linux/arm64` so first-time installs can preload the
+  matching `outcalld` image from the GitHub Release itself.
+
+### Changed
+
+- **CLI:** `outcall setup` now accepts an optional provider and follows the
+  same saved-default, project-context, and host-auth detection order as
+  `outcall start`.
+- **Onboarding docs:** README, installation, quickstart, CLI reference, and
+  website copy now lead with `curl -fsSL https://outcall.dev/install.sh | sh`
+  followed by `outcall`, then `outcall start`, with explicit `outcall claude`
+  / `outcall codex` fallbacks when detection is ambiguous.
+- **Daemon bootstrap:** the CLI now defaults to the matching versioned daemon
+  image tag instead of `latest`, and the installer preloads that image when
+  Docker is available.
+- **CI:** installer smoke now proves the one-command first-run path for both
+  Claude and Codex, not just Claude.
+- **Release automation:** tag creation now follows the workspace version in
+  `outcall/Cargo.toml`, and the release workflow reads the matching versioned
+  release-notes file dynamically.
+
+## [0.1.9] - 2026-07-06
+
+### Added
+
+- **Release image:** Add a first-party `ghcr.io/outcall-dev/outcalld` Docker
+  image build that ships `outcalld`, `outcall`, and `outcall-agent`.
+- **Release packaging:** Include `outcall-agent` in release tarballs and publish
+  prerelease notes from the versioned `RELEASE_NOTES_v0.1.9.md` file.
+
+### Changed
+
+- **Install docs:** Point clean installs at the public GHCR image and remove
+  stale local test-harness assumptions from the README and docs.
+- **Website:** Make the Vercel build path run the docs sync script directly and
+  force webpack builds while the local Turbopack build hangs.
+- **CLI:** Default generated agent configs to the actual `outcall-default`
+  network.
+
+### Fixed
+
+- **Agent shim:** `outcall-agent --version` and `--help` now work before the
+  runtime socket exists, which lets release tarballs and container images verify
+  cleanly.
+
 ### Changed — 2026-05-20 (BREAKING)
 
 - **Daemon:** `--dns-listen` default changed from `0.0.0.0` to `10.200.0.1`

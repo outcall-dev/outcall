@@ -17,28 +17,24 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get latest tag
-        id: latest_tag
+      - name: Get workspace version
+        id: workspace_version
         run: |
-          latest=$(git tag --sort=-version:refname --list 'v*' | head -n1)
-          if [ -z "$latest" ]; then latest="v0.0.0"; fi
-          echo "latest=$latest" >> $GITHUB_OUTPUT
-
-      - name: Increment patch version
-        id: new_tag
-        env:
-          LATEST_TAG: ${{ steps.latest_tag.outputs.latest }}
-        run: |
-          current="${LATEST_TAG#v}"
-          IFS='.' read -r major minor patch <<< "$current"
-          new_patch=$((patch + 1))
-          new_tag="v${major}.${minor}.${new_patch}"
-          echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' outcall/Cargo.toml | head -n1)
+          if [ -z "$version" ]; then
+            echo "Could not determine workspace version from outcall/Cargo.toml" >&2
+            exit 1
+          fi
+          echo "tag=v$version" >> $GITHUB_OUTPUT
 
       - name: Create and push tag
         env:
-          NEW_TAG: ${{ steps.new_tag.outputs.new_tag }}
+          NEW_TAG: ${{ steps.workspace_version.outputs.tag }}
         run: |
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+            echo "Tag $NEW_TAG already exists; nothing to do."
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$NEW_TAG" -m "Release $NEW_TAG"

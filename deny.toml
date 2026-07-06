@@ -35,17 +35,13 @@ ignore = [
 # Reject GPL/AGPL/SSPL — they would force a relicense if linked statically.
 allow = [
     "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "MIT",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
-    "MPL-2.0",       # weak copyleft, file-level — acceptable for transitive deps
     "CC0-1.0",
-    "0BSD",
 ]
 confidence-threshold = 0.93
 exceptions = [

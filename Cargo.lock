@@ -78,9 +78,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "ascii-canvas"
@@ -1623,7 +1623,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "outcall"
-version = "0.1.8"
+version = "0.1.22"
 dependencies = [
  "anyhow",
  "clap",
@@ -1633,12 +1633,13 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "time",
 ]
 
 [[package]]
 name = "outcall-agent"
-version = "0.1.8"
+version = "0.1.22"
 dependencies = [
  "anyhow",
  "http-body-util",
@@ -1654,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "outcall-api"
-version = "0.1.8"
+version = "0.1.22"
 dependencies = [
  "serde",
  "serde_json",
@@ -1662,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "outcall-ui"
-version = "0.1.8"
+version = "0.1.22"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1671,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "outcalld"
-version = "0.1.8"
+version = "0.1.22"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -9,6 +9,13 @@
 
 use std::process::Command;
 
+fn default_gateway() -> (std::net::Ipv4Addr, u8) {
+    let gateway = outcall_api::DEFAULT_GATEWAY
+        .parse()
+        .expect("DEFAULT_GATEWAY should be a valid IPv4 address");
+    (gateway, 24)
+}
+
 fn is_linux() -> bool {
     cfg!(target_os = "linux")
 }
@@ -37,6 +44,14 @@ fn nft_table_exists(family: &str, table: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn ip_addr_exists(name: &str, cidr: &str) -> bool {
+    Command::new("ip")
+        .args(["addr", "show", "dev", name])
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains(cidr))
+        .unwrap_or(false)
+}
+
 #[tokio::test]
 async fn bridge_lifecycle() {
     if !is_linux() {
@@ -59,9 +74,11 @@ async fn bridge_lifecycle() {
         .output();
 
     // -- Create and initialize --
-    let mut mgr = outcalld::bridge::BridgeManager::new(Some(bridge_name))
-        .await
-        .expect("BridgeManager::new");
+    let (gateway_ip, gateway_prefix_len) = default_gateway();
+    let mut mgr =
+        outcalld::bridge::BridgeManager::new(Some(bridge_name), gateway_ip, gateway_prefix_len)
+            .await
+            .expect("BridgeManager::new");
 
     mgr.init().await.expect("bridge init");
 
@@ -69,6 +86,10 @@ async fn bridge_lifecycle() {
     assert!(
         ip_link_exists(bridge_name),
         "bridge {bridge_name} should exist after init"
+    );
+    assert!(
+        ip_addr_exists(bridge_name, &format!("{gateway_ip}/{gateway_prefix_len}")),
+        "bridge {bridge_name} should own gateway {gateway_ip}/{gateway_prefix_len}"
     );
 
     // -- Verify nftables table exists --
@@ -97,9 +118,10 @@ async fn bridge_lifecycle() {
     );
 
     // -- Idempotence: init again should not fail --
-    let mut mgr2 = outcalld::bridge::BridgeManager::new(Some(bridge_name))
-        .await
-        .expect("BridgeManager::new (second)");
+    let mut mgr2 =
+        outcalld::bridge::BridgeManager::new(Some(bridge_name), gateway_ip, gateway_prefix_len)
+            .await
+            .expect("BridgeManager::new (second)");
     mgr2.init().await.expect("bridge init (idempotent)");
 
     // -- Teardown --

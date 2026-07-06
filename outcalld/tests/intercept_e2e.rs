@@ -13,6 +13,7 @@
 
 #![cfg(target_os = "linux")]
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -85,8 +86,8 @@ async fn spawn_intercept_daemon(
     ca_key: &PathBuf,
     rules_dir: &PathBuf,
 ) -> Result<(Child, String)> {
-    let child = Command::new("outcalld")
-        .env("RUST_LOG", "outcalld=trace")
+    let mut cmd = Command::new("outcalld");
+    cmd.env("RUST_LOG", "outcalld=trace")
         .arg("--socket")
         .arg(host_socket.as_os_str())
         .arg("--agent-socket-host-path")
@@ -97,12 +98,46 @@ async fn spawn_intercept_daemon(
         .arg(ca_cert.as_os_str())
         .arg("--ca-key")
         .arg(ca_key.as_os_str())
+        .arg("--no-proxy");
+    let mut child = cmd
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .context("failed to spawn outcalld with CA")?;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let timeout = Duration::from_secs(5);
+    let poll_interval = Duration::from_millis(25);
+    let started_at = std::time::Instant::now();
+    loop {
+        if host_socket.exists() && agent_socket.exists() {
+            break;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let mut stderr = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld exited before binding sockets (status: {:?}). stderr:\n{}",
+                status,
+                stderr.trim()
+            );
+        }
+        if started_at.elapsed() >= timeout {
+            let _ = child.kill();
+            let mut stderr = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld did not bind sockets within {:?}. stderr:\n{}",
+                timeout,
+                stderr.trim()
+            );
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+
     Ok((child, host_socket.to_string_lossy().to_string()))
 }
 
@@ -142,9 +177,7 @@ rules:
         .arg(agent_sock.as_os_str())
         .arg("--rules-dir")
         .arg(rules_dir.as_os_str())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
+        .arg("--no-proxy");
     let mut child = cmd.spawn().expect("daemon spawn");
 
     // Give daemon time to fail parsing/validating the rule set.
@@ -192,9 +225,7 @@ rules:
         .arg(agent_sock.as_os_str())
         .arg("--rules-dir")
         .arg(rules_dir.as_os_str())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
+        .arg("--no-proxy");
     let mut child = cmd.spawn().expect("daemon spawn");
     tokio::time::sleep(Duration::from_millis(500)).await;
 

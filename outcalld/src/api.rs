@@ -66,16 +66,18 @@ impl
 
 /// Axum middleware factory enforcing host-socket UID policy.
 ///
-/// Allowed UIDs: UID 0 (root) **or** `daemon_uid` (the effective UID of the
-/// daemon process, i.e. the operator user that started `outcalld`). Any other
-/// caller receives 403 Forbidden. If peer credentials are unavailable the
-/// connection is also rejected.
+/// Allowed UIDs: UID 0 (root), `daemon_uid` (the effective UID of the daemon
+/// process inside the container), **or** `operator_uid` (the host UID that
+/// launched the daemon and owns the mounted socket node). Any other caller
+/// receives 403 Forbidden. If peer credentials are unavailable the connection
+/// is also rejected.
 ///
 /// `daemon_uid` is captured once at startup so this module avoids any `unsafe`
 /// libc calls (the lib crate enforces `#![forbid(unsafe_code)]`); main.rs is
 /// the binary crate where the libc call lives.
 pub fn require_operator_uid(
     daemon_uid: u32,
+    operator_uid: u32,
 ) -> impl Fn(
     ConnectInfo<HostPeerCred>,
     Request,
@@ -87,17 +89,18 @@ pub fn require_operator_uid(
        + 'static {
     move |ConnectInfo(peer), req, next| {
         Box::pin(async move {
-            let allowed = peer.uid == 0 || peer.uid == daemon_uid;
+            let allowed = peer.uid == 0 || peer.uid == daemon_uid || peer.uid == operator_uid;
             if !allowed {
                 tracing::warn!(
                     peer_uid = peer.uid,
                     daemon_uid = daemon_uid,
+                    operator_uid = operator_uid,
                     "host API: connection rejected — foreign UID"
                 );
                 return (
                     StatusCode::FORBIDDEN,
                     Json(outcall_api::ApiResponse::<()>::err(
-                        "forbidden: host API requires root or daemon UID",
+                        "forbidden: host API requires root, daemon UID, or operator UID",
                     )),
                 )
                     .into_response();
@@ -147,6 +150,7 @@ pub fn router(
     network: SharedNetwork,
     ca: CaState,
     daemon_uid: u32,
+    operator_uid: u32,
     rule_requests: RuleRequestManager,
     rules_dir: String,
 ) -> Router {
@@ -212,7 +216,10 @@ pub fn router(
         .with_state(state)
         // Enforce host-socket UID policy on all API routes (defence in depth;
         // primary protection is the 0600 socket file mode set in main.rs).
-        .layer(axum::middleware::from_fn(require_operator_uid(daemon_uid)))
+        .layer(axum::middleware::from_fn(require_operator_uid(
+            daemon_uid,
+            operator_uid,
+        )))
         // Dashboard (S010) — stateless, merged after state is bound.
         // The UI routes are intentionally exempt from UID gating since the
         // dashboard serves only static assets and has no privileged operations.

@@ -21,20 +21,54 @@ use tempfile::TempDir;
 /// Start `outcalld` as a background child process.
 /// Returns the socket path and the Child handle (caller must kill).
 async fn spawn_daemon(socket: &PathBuf, rules_dir: &PathBuf) -> Result<(Child, String)> {
-    let daemon = Command::new("outcalld")
-        .env("RUST_LOG", "outcalld=warn")
+    let mut cmd = Command::new("outcalld");
+    cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(socket.as_os_str())
         .arg("--rules-dir")
         .arg(rules_dir.as_os_str())
+        .arg("--no-proxy");
+    let mut daemon = cmd
         // Disable Docker so we don't need a running Docker daemon
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .context("failed to spawn outcalld")?;
 
-    // Give the daemon a moment to bind the socket
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let timeout = Duration::from_secs(5);
+    let poll_interval = Duration::from_millis(25);
+    let started_at = std::time::Instant::now();
+    loop {
+        if socket.exists() {
+            break;
+        }
+        if let Ok(Some(status)) = daemon.try_wait() {
+            let mut stderr = String::new();
+            if let Some(mut s) = daemon.stderr.take() {
+                use std::io::Read;
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld exited before binding socket (status: {:?}). stderr:\n{}",
+                status,
+                stderr.trim()
+            );
+        }
+        if started_at.elapsed() >= timeout {
+            let _ = daemon.kill();
+            let mut stderr = String::new();
+            if let Some(mut s) = daemon.stderr.take() {
+                use std::io::Read;
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld did not bind socket within {:?}. stderr:\n{}",
+                timeout,
+                stderr.trim()
+            );
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
 
     let socket_str = socket.to_string_lossy().to_string();
     Ok((daemon, socket_str))
@@ -338,18 +372,11 @@ async fn cli_network_create_succeeds_or_already_exists() {
 #[tokio::test]
 async fn cli_unknown_subcommand_exits_nonzero() {
     let tmp = TempDir::new().expect("tempdir");
-    let rules_dir = tmp.path().to_path_buf();
-    make_allow_all_rules(&rules_dir).expect("write rules");
-
-    let socket = tmp.path().join("outcalld.sock");
-    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
-        .await
-        .expect("daemon spawned");
+    let socket = tmp.path().join("not-running.sock");
+    let sock = socket.to_string_lossy().to_string();
 
     let out = outcall_exec(&sock, &["foobar"]);
     assert_failure(&out, "unknown subcommand");
-
-    daemon.kill().expect("daemon kill");
 }
 
 // ── Test 6: Custom socket path is respected ─────────────────────────────────

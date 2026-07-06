@@ -26,13 +26,33 @@ use outcall_api::{
 
 // ── Raw HTTP helper ────────────────────────────────────────────────────────────
 
-/// Read the body from an HTTP/1.0 response over a Unix socket.
-fn read_http_body(sock: &mut UnixStream) -> String {
+/// Read the full HTTP response over a Unix socket.
+fn read_http_response(sock: &mut UnixStream) -> String {
     let mut buf = String::new();
     let _ = sock.read_to_string(&mut buf);
-    buf.split_once("\r\n\r\n")
-        .map(|(_, body)| body.to_string())
-        .unwrap_or_default()
+    buf
+}
+
+/// Return the response body portion from a raw HTTP response.
+fn http_body(response: &str) -> &str {
+    if let Some((_, body)) = response.split_once("\r\n\r\n") {
+        return body;
+    }
+    if let Some((_, body)) = response.split_once("\n\n") {
+        return body;
+    }
+    response
+}
+
+fn http_json_post(path: &str, json: &str) -> String {
+    format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
+        json.len()
+    )
+}
+
+fn http_get(path: &str) -> String {
+    format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
 }
 
 /// Parse a JSON `ApiResponse<T>` from a raw HTTP response body.
@@ -52,14 +72,16 @@ async fn spawn_daemon(
     // Capture stderr so the readiness probe can surface the daemon's
     // exit reason if it dies before binding. Silent failure here
     // surfaces as "connect: ENOENT" later, with no clue why.
-    let mut daemon = Command::new("outcalld")
-        .env("RUST_LOG", "outcalld=warn")
+    let mut cmd = Command::new("outcalld");
+    cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(host_socket.as_os_str())
         .arg("--rules-dir")
         .arg(rules_dir.as_os_str())
         .arg("--agent-socket-host-path")
         .arg(agent_socket.as_os_str())
+        .arg("--no-proxy");
+    let mut daemon = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -137,7 +159,7 @@ rules:
 
 // ── Agent client helpers ──────────────────────────────────────────────────────
 
-/// Connect to the agent socket, send an HTTP/1.0 POST, return the parsed response.
+/// Connect to the agent socket, send an HTTP POST, return the parsed response.
 fn agent_post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(
     agent_sock: &str,
     path: &str,
@@ -145,14 +167,10 @@ fn agent_post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(
 ) -> Option<ApiResponse<R>> {
     let json = serde_json::to_string(body).ok()?;
     let mut sock = UnixStream::connect(agent_sock).ok()?;
-    let request = format!(
-        "POST {path} HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
-        json.len()
-    );
+    let request = http_json_post(path, &json);
     sock.write_all(request.as_bytes()).ok()?;
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
-    parse_api_response(&body)
+    let response = read_http_response(&mut sock);
+    parse_api_response(http_body(&response))
 }
 
 fn agent_get<R: serde::de::DeserializeOwned>(
@@ -160,11 +178,10 @@ fn agent_get<R: serde::de::DeserializeOwned>(
     path: &str,
 ) -> Option<ApiResponse<R>> {
     let mut sock = UnixStream::connect(agent_sock).ok()?;
-    let request = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n");
+    let request = http_get(path);
     sock.write_all(request.as_bytes()).ok()?;
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
-    parse_api_response(&body)
+    let response = read_http_response(&mut sock);
+    parse_api_response(http_body(&response))
 }
 
 // ── Test 1: Check-in unknown PID → 403 ──────────────────────────────────────
@@ -188,11 +205,11 @@ async fn agent_checkin_unknown_pid_returns_403() {
     let pid = std::process::id();
     // POST with no body — daemon extracts PID from SO_PEERCR
     let mut sock = UnixStream::connect(&agent).expect("connect");
-    let request = "POST /v1/checkin HTTP/1.0\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+    let request =
+        "POST /v1/checkin HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
     sock.write_all(request.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
-    let resp: Option<ApiResponse<CheckinData>> = serde_json::from_str(&body).ok();
+    let response = read_http_response(&mut sock);
+    let resp: Option<ApiResponse<CheckinData>> = serde_json::from_str(http_body(&response)).ok();
 
     // Daemon may be in degraded Docker mode (no real Docker) — unknown PID
     // is always rejected, whether Docker is present or not.
@@ -234,18 +251,16 @@ async fn agent_permissions_check_no_token_returns_401() {
     // Manually craft a request without the Bearer token
     let json = serde_json::to_string(&req).expect("serialize");
     let mut sock = UnixStream::connect(&agent).expect("connect");
-    let request = format!(
-        "POST /v1/permissions/check HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
-        json.len()
-    );
+    let request = http_json_post("/v1/permissions/check", &json);
     sock.write_all(request.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
 
     // Should get a 401 UNAUTHORIZED response
     assert!(
-        body.contains("401") || body.contains("unauthorized") || body.contains("invalid"),
-        "expected 401 for missing token, got: {body}",
+        response.contains("401")
+            || response.contains("unauthorized")
+            || response.contains("invalid"),
+        "expected 401 for missing token, got: {response}",
     );
 
     daemon.kill().expect("daemon kill");
@@ -272,17 +287,15 @@ async fn agent_rule_request_submit_no_token_returns_401() {
 
     let json = serde_json::to_string(&req).expect("serialize");
     let mut sock = UnixStream::connect(&agent).expect("connect");
-    let request = format!(
-        "POST /v1/requests/rules HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
-        json.len()
-    );
+    let request = http_json_post("/v1/requests/rules", &json);
     sock.write_all(request.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
 
     assert!(
-        body.contains("401") || body.contains("unauthorized") || body.contains("invalid"),
-        "expected 401 for missing token, got: {body}",
+        response.contains("401")
+            || response.contains("unauthorized")
+            || response.contains("invalid"),
+        "expected 401 for missing token, got: {response}",
     );
 
     daemon.kill().expect("daemon kill");
@@ -318,16 +331,15 @@ async fn host_rule_evaluate_dns_blocked_returns_block() {
     };
     let json = serde_json::to_string(&req).expect("serialize");
     let mut sock = UnixStream::connect(&host).expect("connect host");
-    let http_req = format!(
-        "POST /api/v1/rule/evaluate HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
-        json.len()
-    );
+    let http_req = http_json_post("/api/v1/rule/evaluate", &json);
     sock.write_all(http_req.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
+    let body = http_body(&response);
 
-    let resp: outcall_api::ApiResponse<outcall_api::EvaluateResult> =
-        serde_json::from_str(&body).expect("parse response");
+    let resp: outcall_api::ApiResponse<outcall_api::EvaluateResult> = serde_json::from_str(body)
+        .unwrap_or_else(|e| {
+            panic!("parse response: {e}; raw response: {response}");
+        });
 
     assert!(resp.success, "evaluate request should succeed");
     let result = resp.data.expect("missing data");
@@ -366,16 +378,15 @@ async fn host_rule_evaluate_dns_allowed_returns_allow() {
     };
     let json = serde_json::to_string(&req).expect("serialize");
     let mut sock = UnixStream::connect(&host).expect("connect host");
-    let http_req = format!(
-        "POST /api/v1/rule/evaluate HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
-        json.len()
-    );
+    let http_req = http_json_post("/api/v1/rule/evaluate", &json);
     sock.write_all(http_req.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
+    let body = http_body(&response);
 
-    let resp: outcall_api::ApiResponse<outcall_api::EvaluateResult> =
-        serde_json::from_str(&body).expect("parse response");
+    let resp: outcall_api::ApiResponse<outcall_api::EvaluateResult> = serde_json::from_str(body)
+        .unwrap_or_else(|e| {
+            panic!("parse response: {e}; raw response: {response}");
+        });
 
     assert!(resp.success);
     let result = resp.data.expect("missing data");
@@ -405,16 +416,16 @@ async fn host_api_rejects_malformed_json_with_error_response() {
 
     let mut sock = UnixStream::connect(&host).expect("connect host");
     let http_req =
-        "POST /api/v1/rule/evaluate HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 999\r\n\r\n{not valid json"
+        "POST /api/v1/rule/evaluate HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 999\r\n\r\n{not valid json"
             .to_string();
     sock.write_all(http_req.as_bytes()).expect("send");
     drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
 
     // Should get some JSON error back (400 or 500), not crash
     assert!(
-        body.contains("error") || body.contains("Error") || body.contains("JSON"),
-        "expected error response for malformed JSON, got: {body}",
+        response.contains("error") || response.contains("Error") || response.contains("JSON"),
+        "expected error response for malformed JSON, got: {response}",
     );
 
     daemon.kill().expect("daemon kill");
@@ -436,14 +447,13 @@ async fn host_api_unknown_endpoint_returns_404() {
         .expect("daemon spawned");
 
     let mut sock = UnixStream::connect(&host).expect("connect host");
-    let http_req = "GET /api/v1/does-not-exist HTTP/1.0\r\nHost: localhost\r\n\r\n".to_string();
+    let http_req = http_get("/api/v1/does-not-exist");
     sock.write_all(http_req.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
 
     assert!(
-        body.contains("404") || body.contains("Not Found"),
-        "expected 404 for unknown endpoint, got: {body}",
+        response.contains("404") || response.contains("Not Found"),
+        "expected 404 for unknown endpoint, got: {response}",
     );
 
     daemon.kill().expect("daemon kill");

@@ -5,8 +5,8 @@
 ## Badges
 
 [![CI](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://github.com/outcall-dev/outcall/releases)
-[![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcall-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcall)
+[![Version](https://img.shields.io/badge/version-0.1.22-blue.svg)](https://github.com/outcall-dev/outcall/releases)
+[![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcalld-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcalld)
 
 ## Workspace
 
@@ -28,6 +28,81 @@ cargo build --workspace
 
 Linux only. macOS will build the workspace (cross-platform types compile) but `outcalld` requires Linux for nftables and bridge management.
 
+## Fast install
+
+```sh
+curl -fsSL https://outcall.dev/install.sh | sh
+```
+
+On Linux, the installer also preloads the matching `outcalld` Docker image when
+Docker is available, so `outcall start` does not need a first-run registry
+pull.
+
+## First-time agent flow
+
+The CLI ships a small built-in recipe registry for common agent runtimes:
+
+```sh
+outcall
+outcall start
+```
+
+Running bare `outcall` prints the recommended first command for the current
+project and host, plus the shortest useful next commands.
+
+If Outcall cannot infer the provider cleanly, choose one explicitly:
+
+```sh
+outcall claude
+outcall codex
+```
+
+`outcall start` is the default first-run command. When the machine clearly
+matches Claude or Codex, it writes the project-local `.outcall/` scaffold,
+checks Docker and generated files, inspects likely auth/context sources, builds
+the recipe image, ensures the daemon and default network exist, runs a smoke
+container with the recipe entrypoint, and then starts the real isolated agent
+container.
+
+`outcall claude` and `outcall codex` run the same flow, but skip provider
+detection. They also persist the project's default recipe, so after you choose
+once on a mixed-provider machine, later runs can go back to `outcall start`.
+
+If the first run stops on a prerequisite, inspect the host and recipe checks
+directly:
+
+```sh
+outcall doctor claude
+outcall doctor codex
+```
+
+Under the hood, `outcall claude` / `outcall codex` are aliases for
+`outcall run <recipe>`. The lower-level flow is:
+
+```sh
+outcall init <recipe>
+outcall doctor <recipe>
+outcall recipe test <recipe>
+outcall recipe run <recipe>
+```
+
+The intermediate shortcut is:
+
+```sh
+outcall setup
+outcall start
+```
+
+You can still pin the provider explicitly when needed:
+
+```sh
+outcall setup claude
+outcall setup codex
+```
+
+Recipes do not mount your whole home directory. By default they copy only the
+selected provider auth/config paths into `.outcall/auth/<id>/home`.
+
 ## Running `outcalld`
 
 `outcalld` requires several capabilities and a Docker socket bind-mount.
@@ -43,35 +118,31 @@ Linux only. macOS will build the workspace (cross-platform types compile) but `o
 `SYS_ADMIN` is **not** required by the daemon's current code paths
 (verified against `outcalld/src/bridge.rs`); some kernels are stricter
 about netlink and may surface `EPERM` on bridge bringup. Add
-`--cap-add SYS_ADMIN` only if that happens. The E2E test rig in
-`Makefile` adds it because the harness sets up extra network
-namespaces, not because the daemon itself needs it.
+`--cap-add SYS_ADMIN` only if that happens.
 
 ### Example
 
 ```sh
-# Production image (from registry or local build):
 docker run -d --rm \
     --name outcall-daemon \
     --network host \
     --cap-add NET_ADMIN \
     --cap-add SYS_ADMIN \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    outcall-daemon \
-    outcalld --bridge outcall0
+    -v /tmp/outcall:/tmp/outcall \
+    -v /etc/outcall:/etc/outcall \
+    ghcr.io/outcall-dev/outcalld:latest \
+    --bridge outcall0
 ```
 
-For local E2E testing, the test harness builds a separate image tagged
-`outcall-daemon` (see `Makefile` at the workspace root — it uses
-`scripts/e2e/Dockerfile`, which bundles extra debugging tools like `socat`,
-`dnsmasq`, and `tinyproxy` for the bypass + payload test suites). Use that
-tag only in test environments — do not use it for production deployments.
+`Dockerfile.test` remains available for local debug builds. Release images are
+published from `Dockerfile`.
 
 ### Optional flags
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--socket <path>` | `/run/outcall/host.sock` | Host API Unix socket |
+| `--socket <path>` | `/tmp/outcall/host.sock` | Host API Unix socket |
 | `--bridge <name>` | `outcall0` | Bridge interface name |
 | `--rules-dir <path>` | `/etc/outcall/rules.d` | Directory of rule YAML files |
 | `--dns-listen <ip>` | `10.200.0.1` | DNS filter bind address (bridge gateway IP) |
@@ -79,7 +150,7 @@ tag only in test environments — do not use it for production deployments.
 | `--dns-upstream <list>` | `/etc/resolv.conf` | Comma-separated upstream DNS servers |
 | `--proxy-addr <host:port>` | `10.200.0.1:8080` | HTTP proxy bind address (bridge gateway IP:port) |
 | `--no-proxy` | _off_ | Disable the HTTP proxy entirely |
-| `--agent-socket-host-path <path>` | `/run/outcall/agent.sock` | Agent API Unix socket |
+| `--agent-socket-host-path <path>` | `/tmp/outcall/agent.sock` | Agent API Unix socket |
 | `--shim-host-path <path>` | `/usr/local/bin/outcall-agent` | Path to the `outcall-agent` shim binary that's bind-mounted into agent containers |
 | `--agent-timeout-secs <n>` | `5` | Server-side rule-evaluation timeout (S004-FR-015) |
 | `--agent-perm-rate <count/seconds>` | `100/10` | Sliding-window rate limit for permission checks per container |
@@ -103,7 +174,7 @@ Outcall is security-critical infrastructure. Before deploying it, read:
 - [`SECURITY.md`](./SECURITY.md) — how to report a vulnerability.
 
 For a worked example of a tightly-scoped agent ruleset (Sentry → GitHub PR
-agent), see [`rules.d/examples/sentry-github-agent/`](../rules.d/examples/sentry-github-agent/).
+agent), see [`outcall-dev/root/rules.d/examples/sentry-github-agent/`](https://github.com/outcall-dev/root/tree/main/rules.d/examples/sentry-github-agent).
 
 ## License
 

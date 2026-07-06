@@ -1,16 +1,40 @@
-# Outcall v0.1.8
+# Outcall v0.1.12
 
-Initial public release. Outcall is a host-level firewall daemon that governs
-all outbound traffic from Docker agent containers. It creates isolated
-networks, applies nftables policies via a managed bridge, and gives operators
-CLI + API control over what containers can reach.
+Recipe runner release. Outcall is a host-level firewall daemon that governs all
+outbound traffic from Docker agent containers. It creates isolated networks,
+applies nftables policies via a managed bridge, and gives operators CLI + API
+control over what containers can reach.
 
-This release rolls the v0.1.0-beta.1 initial cut together with the v0.1.x
-hardening waves (audit fixes, default bind tightening, DNS rebinding
-mitigation, `--no-proxy` startup safety, CSPRNG-only session tokens,
-T-2 bridge-netfilter enforcement) into one tagged release.
+This release adds runnable built-in agent recipes and clears CI release
+blockers found after v0.1.9. It supersedes the failed v0.1.10 and v0.1.11 tag
+attempts, which did not include the final privileged CI harness fixes.
 
-## What's in v0.1.8
+## What's in v0.1.12
+
+### Recipes
+
+- Added `outcall recipe run <claude|codex>`.
+- `recipe run` initializes missing recipe files, builds the local recipe image,
+  stages selected provider auth/config, and starts the agent through the normal
+  `outcall agent` container boot path.
+- Added auth transfer modes:
+  - `--auth copy` copies selected provider files into
+    `.outcall/auth/<recipe>/home` and mounts that as `/home/node`.
+  - `--auth mount` mounts selected provider files directly from the host home.
+  - `--auth env-only` passes matching auth environment variables only.
+- Generated `.outcall/.gitignore` now ensures `.outcall/auth/` is ignored.
+- Added built-in Claude Code and Codex CLI Dockerfiles, rules, context notes,
+  and doctor checks.
+
+### CI and Dependencies
+
+- Updated `anyhow` to `1.0.103` to clear `RUSTSEC-2026-0190`.
+- Privileged sudo CI now invokes the explicit installed Cargo binary under
+  sudo instead of relying on root rustup defaults.
+- Privileged Docker CI mounts the host Docker socket and serializes ignored
+  e2e tests that share bridge/proxy state.
+
+## Still included from v0.1.9
 
 ### Daemon (`outcalld`)
 
@@ -54,16 +78,24 @@ T-2 bridge-netfilter enforcement) into one tagged release.
   agent-submitted rule requests.
 - `outcall ui [--port 8080]` — built-in TCP↔Unix-socket bridge that opens
   the dashboard in your browser. No socat needed.
-- `outcall --version` / `outcalld --version`.
+- `outcall --version` / `outcalld --version` / `outcall-agent --version`.
 
 ### Install
 
 ```bash
-brew tap outcall-dev/outcall
-brew install outcall
-outcall daemon start --build-from scripts/e2e/Dockerfile  # or use --image
-outcall ui
+docker run -d --rm \
+  --name outcall-daemon \
+  --network host \
+  --cap-add NET_ADMIN \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /run/outcall:/run/outcall \
+  -v /etc/outcall:/etc/outcall \
+  ghcr.io/outcall-dev/outcalld:latest \
+  --bridge outcall0
 ```
+
+The release image contains `outcalld`, `outcall`, and `outcall-agent` on
+`PATH`. Binary tarballs include the same three binaries for each release target.
 
 ### Tests
 
@@ -73,22 +105,16 @@ outcall ui
   `cargo audit`, `cargo geiger`, and `cargo deny` in the application repo.
 - Root CI runs the Docker E2E, bypass, and payload suites against the full
   multi-repo workspace.
-- `scripts/full-test.sh` — release-grade Linux harness that does
-  `brew uninstall → brew tap → brew install`, drives the daemon container
-  via the new `outcall daemon start`, applies a rule set covering every
-  documented condition (default-deny, DNS allow, HTTPS SNI allow, CIDR
-  allow, deny precedence, agent-name, HTTP method, dynamic add/remove),
-  and runs 12 real-traffic assertions including `apt-get update`,
-  `apt-get install ca-certificates`, GET-vs-POST split, container-to-container
-  isolation, and S013 `agent.name` allow/deny.
+- Release verification includes source builds, workspace tests, the Linux test
+  Dockerfile, the first-party release image, and website production builds.
 
 ## Known limits
 
 - **Linux only.** outcalld needs `NET_ADMIN` and Linux netfilter. macOS
   development requires running the daemon inside a Linux VM
   (lima/colima/UTM) or a privileged Docker container.
-- **No bottle yet.** The brew formula builds from source via cargo
-  (~1-2 minutes on first install). A pre-built bottle is on the v0.2 list.
+- **No system package yet.** Docker and source installs are supported. A
+  systemd unit, deb/rpm packages, and Homebrew bottle are on the post-beta list.
 - **TLS interception is not shipped yet.** The proxy sees HTTPS CONNECT host
   and SNI only; method/path/body filtering requires the future S011 work.
 - **No signed release artifacts yet.** SHA256 sums are produced; Sigstore/SBOM
@@ -96,8 +122,10 @@ outcall ui
 
 ## Upgrading
 
-This is the first public beta; no upgrade path applies. Install with
-`brew tap outcall-dev/outcall && brew install outcall`.
+Install from the published Docker image or release tarballs. If you tested an
+earlier `0.1.x` tag, review the bind-default change in `CHANGELOG.md`: the
+daemon now binds DNS and proxy services to the managed bridge IP by default
+instead of `0.0.0.0`.
 
 ## Contributors
 

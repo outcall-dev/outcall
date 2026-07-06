@@ -27,6 +27,14 @@ struct Args {
     #[arg(long, default_value = outcall_api::DEFAULT_HOST_SOCKET)]
     socket: String,
 
+    /// Host UID allowed to own and access the host API unix socket.
+    #[arg(long, default_value_t = 0)]
+    operator_uid: u32,
+
+    /// Host GID assigned to the host API unix socket.
+    #[arg(long, default_value_t = 0)]
+    operator_gid: u32,
+
     /// Bridge interface name
     #[arg(long, default_value = outcall_api::DEFAULT_BRIDGE_NAME)]
     bridge: String,
@@ -188,7 +196,14 @@ async fn linux_main(args: Args) -> Result<()> {
     }
 
     // Initialize bridge (S001) — creates outcall0 + applies base nftables ruleset.
-    let mut bridge_mgr = bridge::BridgeManager::new(Some(&args.bridge)).await?;
+    let (bridge_gateway_ip, bridge_gateway_prefix_len) =
+        bridge::first_gateway_from_subnet_block(&args.subnet_block)?;
+    let mut bridge_mgr = bridge::BridgeManager::new(
+        Some(&args.bridge),
+        bridge_gateway_ip,
+        bridge_gateway_prefix_len,
+    )
+    .await?;
     bridge_mgr.init().await?;
     let bridge = Arc::new(Mutex::new(bridge_mgr));
     info!(bridge = %args.bridge, "bridge initialized");
@@ -293,6 +308,7 @@ async fn linux_main(args: Args) -> Result<()> {
         network_mgr,
         ca_state,
         daemon_uid,
+        args.operator_uid,
         rule_mgr.clone(),
         args.rules_dir.clone(),
     );
@@ -303,9 +319,9 @@ async fn linux_main(args: Args) -> Result<()> {
     //   1. Set process umask to 0o077 before bind so the kernel creates the
     //      socket node with at most 0o600 even before we explicitly chmod it.
     //      This closes the TOCTOU window between bind() and chmod().
-    //   2. After bind, explicitly set 0o600 — owner-only read/write.
-    //      Combined with running outcalld as root (or a dedicated system user)
-    //      this means no other UID can open the socket at the filesystem level.
+    //   2. After bind, explicitly set 0o600 and chown the socket node to the
+    //      host operator UID/GID that launched the daemon. This keeps the host
+    //      CLI usable without granting access to other local users.
     //   3. The require_operator_uid middleware in api.rs provides defence in
     //      depth: even if the file permissions were somehow wrong, the kernel's
     //      SO_PEERCRED is checked per-connection and foreign UIDs receive 403.
@@ -328,7 +344,18 @@ async fn linux_main(args: Args) -> Result<()> {
         perms.set_mode(0o600);
         std::fs::set_permissions(&args.socket, perms)?;
     }
-    info!(socket = %args.socket, "host API listening (mode 0600)");
+    unsafe {
+        let socket_path = std::ffi::CString::new(args.socket.as_str())?;
+        if libc::chown(socket_path.as_ptr(), args.operator_uid, args.operator_gid) != 0 {
+            return Err(std::io::Error::last_os_error()).map_err(Into::into);
+        }
+    }
+    info!(
+        socket = %args.socket,
+        owner_uid = args.operator_uid,
+        owner_gid = args.operator_gid,
+        "host API listening (mode 0600)"
+    );
 
     // Initialize Agent API (S004) — separate listener on agent.sock.
     if let Some(parent) = std::path::Path::new(&args.agent_socket_host_path).parent() {

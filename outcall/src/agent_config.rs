@@ -99,11 +99,23 @@ impl AgentConfig {
 
     /// Save default config template to `.outcall/agent.yaml`
     pub fn save_template(dir: &Path) -> Result<PathBuf> {
+        Self::save_template_with_force(dir, true)
+    }
+
+    /// Save default config template to `.outcall/agent.yaml`, optionally
+    /// refusing to overwrite an existing file.
+    pub fn save_template_with_force(dir: &Path, force: bool) -> Result<PathBuf> {
         let outcall_dir = dir.join(".outcall");
         std::fs::create_dir_all(&outcall_dir)
             .with_context(|| format!("failed to create {}", outcall_dir.display()))?;
 
         let config_path = outcall_dir.join("agent.yaml");
+        if config_path.exists() && !force {
+            anyhow::bail!(
+                "{} already exists; pass --force to overwrite generated config",
+                config_path.display()
+            );
+        }
         let template = r#"# Outcall Agent Configuration
 # This file customizes how `outcall agent` boots containers for this project.
 

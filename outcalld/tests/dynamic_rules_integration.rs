@@ -18,58 +18,102 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
-use outcall_api::{ActiveRule, AllowRuleRequest, AllowRuleResult, FlushDynamicResult};
+use outcall_api::{ActiveRule, AllowRuleRequest, AllowRuleResult, ApiResponse, FlushDynamicResult};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn read_http_body(sock: &mut UnixStream) -> String {
+fn read_http_response(sock: &mut UnixStream) -> String {
     let mut buf = String::new();
     let _ = sock.read_to_string(&mut buf);
-    buf.split_once("\r\n\r\n")
-        .map(|(_, body)| body.to_string())
-        .unwrap_or_default()
+    buf
+}
+
+fn http_body(response: &str) -> &str {
+    if let Some((_, body)) = response.split_once("\r\n\r\n") {
+        return body;
+    }
+    if let Some((_, body)) = response.split_once("\n\n") {
+        return body;
+    }
+    response
+}
+
+fn parse_api_response<T: serde::de::DeserializeOwned>(body: &str) -> Option<ApiResponse<T>> {
+    serde_json::from_str(body).ok()
 }
 
 fn http_post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(
     sock: &mut UnixStream,
     path: &str,
     body: &T,
-) -> Option<outcall_api::ApiResponse<R>> {
+) -> Option<ApiResponse<R>> {
     let json = serde_json::to_string(body).ok()?;
     let request = format!(
-        "POST {path} HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
         json.len()
     );
     sock.write_all(request.as_bytes()).ok()?;
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(sock);
-    serde_json::from_str(&body).ok()
+    let response = read_http_response(sock);
+    parse_api_response(http_body(&response))
 }
 
 fn http_get<R: serde::de::DeserializeOwned>(
     sock: &mut UnixStream,
     path: &str,
-) -> Option<outcall_api::ApiResponse<R>> {
-    let request = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n");
+) -> Option<ApiResponse<R>> {
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     sock.write_all(request.as_bytes()).ok()?;
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(sock);
-    serde_json::from_str(&body).ok()
+    let response = read_http_response(sock);
+    parse_api_response(http_body(&response))
 }
 
 async fn spawn_daemon(socket: &PathBuf, rules_dir: &PathBuf) -> Result<(Child, String)> {
-    let daemon = Command::new("outcalld")
-        .env("RUST_LOG", "outcalld=warn")
+    let mut cmd = Command::new("outcalld");
+    cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(socket.as_os_str())
         .arg("--rules-dir")
         .arg(rules_dir.as_os_str())
+        .arg("--no-proxy");
+    let mut daemon = cmd
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .context("failed to spawn outcalld")?;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let timeout = Duration::from_secs(5);
+    let poll_interval = Duration::from_millis(25);
+    let started_at = std::time::Instant::now();
+    loop {
+        if socket.exists() {
+            break;
+        }
+        if let Ok(Some(status)) = daemon.try_wait() {
+            let mut stderr = String::new();
+            if let Some(mut s) = daemon.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld exited before binding socket (status: {:?}). stderr:\n{}",
+                status,
+                stderr.trim()
+            );
+        }
+        if started_at.elapsed() >= timeout {
+            let _ = daemon.kill();
+            let mut stderr = String::new();
+            if let Some(mut s) = daemon.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld did not bind socket within {:?}. stderr:\n{}",
+                timeout,
+                stderr.trim()
+            );
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+
     Ok((daemon, socket.to_string_lossy().to_string()))
 }
 
@@ -256,7 +300,7 @@ async fn dynamic_flush_removes_all_rules_reports_count() {
         let req = AllowRuleRequest {
             container: format!("test-container-flush-{i}"),
             src_ip: format!("10.60.0.{}", 10 + i),
-            destination: format!("10.60.0.{}:443", 10 + i),
+            destination: format!("10.60.0.{}", 10 + i),
             protocol: Some("tcp".to_string()),
             port: Some(443),
         };

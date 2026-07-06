@@ -20,14 +20,35 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
+use outcall_api::{ApiResponse, EvaluateResult};
+
 // ── Raw HTTP helper (reused from agent_api_integration.rs) ───────────────────
 
-fn read_http_body(sock: &mut UnixStream) -> String {
+fn read_http_response(sock: &mut UnixStream) -> String {
     let mut buf = String::new();
     let _ = sock.read_to_string(&mut buf);
-    buf.split_once("\r\n\r\n")
-        .map(|(_, body)| body.to_string())
-        .unwrap_or_default()
+    buf
+}
+
+fn http_body(response: &str) -> &str {
+    if let Some((_, body)) = response.split_once("\r\n\r\n") {
+        return body;
+    }
+    if let Some((_, body)) = response.split_once("\n\n") {
+        return body;
+    }
+    response
+}
+
+fn http_json_post(path: &str, json: &str) -> String {
+    format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
+        json.len()
+    )
+}
+
+fn parse_api_response<T: serde::de::DeserializeOwned>(body: &str) -> Option<ApiResponse<T>> {
+    serde_json::from_str(body).ok()
 }
 
 // ── Daemon spawn helper ───────────────────────────────────────────────────────
@@ -37,20 +58,54 @@ async fn spawn_daemon(
     agent_socket: &PathBuf,
     rules_dir: &PathBuf,
 ) -> Result<(Child, String, String)> {
-    let child = Command::new("outcalld")
-        .env("RUST_LOG", "outcalld=warn")
+    let mut cmd = Command::new("outcalld");
+    cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
         .arg(host_socket.as_os_str())
         .arg("--agent-socket-host-path")
         .arg(agent_socket.as_os_str())
         .arg("--rules-dir")
         .arg(rules_dir.as_os_str())
+        .arg("--no-proxy");
+    let mut child = cmd
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .context("failed to spawn outcalld")?;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let timeout = Duration::from_secs(5);
+    let poll_interval = Duration::from_millis(25);
+    let started_at = std::time::Instant::now();
+    loop {
+        if host_socket.exists() && agent_socket.exists() {
+            break;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let mut stderr = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld exited before binding sockets (status: {:?}). stderr:\n{}",
+                status,
+                stderr.trim()
+            );
+        }
+        if started_at.elapsed() >= timeout {
+            let _ = child.kill();
+            let mut stderr = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            anyhow::bail!(
+                "outcalld did not bind sockets within {:?}. stderr:\n{}",
+                timeout,
+                stderr.trim()
+            );
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+
     let host = host_socket.to_string_lossy().to_string();
     let agent = agent_socket.to_string_lossy().to_string();
     Ok((child, host, agent))
@@ -77,7 +132,7 @@ rules:
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (_daemon, _host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, _host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
         .await
         .expect("daemon spawned");
 
@@ -85,6 +140,7 @@ rules:
     // Current outcalld does not implement direct_ip mode — this test
     // documents the expected behavior when the mode is implemented.
     eprintln!("NOTE: direct_ip mode (FR-014) not yet implemented in outcalld");
+    let _ = daemon.kill();
 }
 
 // ── Test: proxy mode uses SNI peek (no decryption) ───────────────────────────
@@ -128,16 +184,11 @@ rules:
 
     let json = serde_json::to_string(&req).expect("serialize");
     let mut sock = UnixStream::connect(&host).expect("connect host");
-    let http_req = format!(
-        "POST /api/v1/rule/evaluate HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
-        json.len()
-    );
+    let http_req = http_json_post("/api/v1/rule/evaluate", &json);
     sock.write_all(http_req.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
 
-    let resp: outcall_api::ApiResponse<outcall_api::EvaluateResult> =
-        serde_json::from_str(&body).expect("parse response");
+    let resp = parse_api_response::<EvaluateResult>(http_body(&response)).expect("parse response");
 
     assert!(resp.success);
     let result = resp.data.expect("missing data");
@@ -192,16 +243,11 @@ rules:
 
     let json = serde_json::to_string(&req).expect("serialize");
     let mut sock = UnixStream::connect(&host).expect("connect host");
-    let http_req = format!(
-        "POST /api/v1/rule/evaluate HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
-        json.len()
-    );
+    let http_req = http_json_post("/api/v1/rule/evaluate", &json);
     sock.write_all(http_req.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
 
-    let resp: outcall_api::ApiResponse<outcall_api::EvaluateResult> =
-        serde_json::from_str(&body).expect("parse response");
+    let resp = parse_api_response::<EvaluateResult>(http_body(&response)).expect("parse response");
 
     assert!(resp.success);
     let result = resp.data.expect("missing data");
@@ -254,16 +300,11 @@ rules:
 
     let json = serde_json::to_string(&req).expect("serialize");
     let mut sock = UnixStream::connect(&host).expect("connect host");
-    let http_req = format!(
-        "POST /api/v1/rule/evaluate HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
-        json.len()
-    );
+    let http_req = http_json_post("/api/v1/rule/evaluate", &json);
     sock.write_all(http_req.as_bytes()).expect("send");
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(&mut sock);
+    let response = read_http_response(&mut sock);
 
-    let resp: outcall_api::ApiResponse<outcall_api::EvaluateResult> =
-        serde_json::from_str(&body).expect("parse response");
+    let resp = parse_api_response::<EvaluateResult>(http_body(&response)).expect("parse response");
 
     assert!(resp.success);
     let result = resp.data.expect("missing data");
