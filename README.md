@@ -5,8 +5,8 @@
 ## Badges
 
 [![CI](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://github.com/outcall-dev/outcall/releases)
-[![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcall-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcall)
+[![Version](https://img.shields.io/badge/version-0.1.9-blue.svg)](https://github.com/outcall-dev/outcall/releases)
+[![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcalld-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcalld)
 
 ## Workspace
 
@@ -43,29 +43,25 @@ Linux only. macOS will build the workspace (cross-platform types compile) but `o
 `SYS_ADMIN` is **not** required by the daemon's current code paths
 (verified against `outcalld/src/bridge.rs`); some kernels are stricter
 about netlink and may surface `EPERM` on bridge bringup. Add
-`--cap-add SYS_ADMIN` only if that happens. The E2E test rig in
-`Makefile` adds it because the harness sets up extra network
-namespaces, not because the daemon itself needs it.
+`--cap-add SYS_ADMIN` only if that happens.
 
 ### Example
 
 ```sh
-# Production image (from registry or local build):
 docker run -d --rm \
     --name outcall-daemon \
     --network host \
     --cap-add NET_ADMIN \
     --cap-add SYS_ADMIN \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    outcall-daemon \
-    outcalld --bridge outcall0
+    -v /run/outcall:/run/outcall \
+    -v /etc/outcall:/etc/outcall \
+    ghcr.io/outcall-dev/outcalld:latest \
+    --bridge outcall0
 ```
 
-For local E2E testing, the test harness builds a separate image tagged
-`outcall-daemon` (see `Makefile` at the workspace root — it uses
-`scripts/e2e/Dockerfile`, which bundles extra debugging tools like `socat`,
-`dnsmasq`, and `tinyproxy` for the bypass + payload test suites). Use that
-tag only in test environments — do not use it for production deployments.
+`Dockerfile.test` remains available for local debug builds. Release images are
+published from `Dockerfile`.
 
 ### Optional flags
 
@@ -103,7 +99,7 @@ Outcall is security-critical infrastructure. Before deploying it, read:
 - [`SECURITY.md`](./SECURITY.md) — how to report a vulnerability.
 
 For a worked example of a tightly-scoped agent ruleset (Sentry → GitHub PR
-agent), see [`rules.d/examples/sentry-github-agent/`](../rules.d/examples/sentry-github-agent/).
+agent), see [`outcall-dev/root/rules.d/examples/sentry-github-agent/`](https://github.com/outcall-dev/root/tree/main/rules.d/examples/sentry-github-agent).
 
 ## License
 

@@ -63,6 +63,27 @@ async fn run() -> Result<ExitCode> {
     let args: Vec<String> = std::env::args().collect();
     let socket_path = DEFAULT_AGENT_SOCKET;
 
+    if args
+        .iter()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("outcall-agent {}", env!("CARGO_PKG_VERSION"));
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if args
+        .iter()
+        .skip(1)
+        .any(|arg| arg == "--help" || arg == "-h")
+    {
+        println!(
+            "outcall-agent {}\n\nUsage:\n  outcall bash <cmd> [args...]\n  outcall exec <tool> [args...]\n  outcall fetch <url>\n  outcall file <path>",
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
     // FR-014: timeout configurable via OUTCALL_TIMEOUT_SECS
     let timeout_secs = std::env::var("OUTCALL_TIMEOUT_SECS")
         .ok()

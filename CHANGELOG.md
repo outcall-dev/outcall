@@ -7,6 +7,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-07-06
+
+### Added
+
+- **Release image:** Add a first-party `ghcr.io/outcall-dev/outcalld` Docker
+  image build that ships `outcalld`, `outcall`, and `outcall-agent`.
+- **Release packaging:** Include `outcall-agent` in release tarballs and publish
+  prerelease notes from the versioned `RELEASE_NOTES_v0.1.9.md` file.
+
+### Changed
+
+- **Install docs:** Point clean installs at the public GHCR image and remove
+  stale local test-harness assumptions from the README and docs.
+- **Website:** Make the Vercel build path run the docs sync script directly and
+  force webpack builds while the local Turbopack build hangs.
+- **CLI:** Default generated agent configs to the actual `outcall-default`
+  network.
+
+### Fixed
+
+- **Agent shim:** `outcall-agent --version` and `--help` now work before the
+  runtime socket exists, which lets release tarballs and container images verify
+  cleanly.
+
 ### Changed — 2026-05-20 (BREAKING)
 
 - **Daemon:** `--dns-listen` default changed from `0.0.0.0` to `10.200.0.1`
