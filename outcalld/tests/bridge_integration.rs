@@ -48,9 +48,7 @@ fn ip_addr_exists(name: &str, cidr: &str) -> bool {
     Command::new("ip")
         .args(["addr", "show", "dev", name])
         .output()
-        .map(|o| {
-            o.status.success() && String::from_utf8_lossy(&o.stdout).contains(cidr)
-        })
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains(cidr))
         .unwrap_or(false)
 }
 
@@ -77,13 +75,10 @@ async fn bridge_lifecycle() {
 
     // -- Create and initialize --
     let (gateway_ip, gateway_prefix_len) = default_gateway();
-    let mut mgr = outcalld::bridge::BridgeManager::new(
-        Some(bridge_name),
-        gateway_ip,
-        gateway_prefix_len,
-    )
-        .await
-        .expect("BridgeManager::new");
+    let mut mgr =
+        outcalld::bridge::BridgeManager::new(Some(bridge_name), gateway_ip, gateway_prefix_len)
+            .await
+            .expect("BridgeManager::new");
 
     mgr.init().await.expect("bridge init");
 
@@ -123,13 +118,10 @@ async fn bridge_lifecycle() {
     );
 
     // -- Idempotence: init again should not fail --
-    let mut mgr2 = outcalld::bridge::BridgeManager::new(
-        Some(bridge_name),
-        gateway_ip,
-        gateway_prefix_len,
-    )
-        .await
-        .expect("BridgeManager::new (second)");
+    let mut mgr2 =
+        outcalld::bridge::BridgeManager::new(Some(bridge_name), gateway_ip, gateway_prefix_len)
+            .await
+            .expect("BridgeManager::new (second)");
     mgr2.init().await.expect("bridge init (idempotent)");
 
     // -- Teardown --
