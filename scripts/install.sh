@@ -93,7 +93,10 @@ echo
 if [ "$os" = "Linux" ]; then
   echo "Next:"
   echo "  cd /path/to/your/project"
+  echo "  outcall"
   echo "  outcall start"
+  echo
+  echo "Use \`outcall\` to print the recommended first command for this project and host."
   echo
   echo "If Outcall cannot infer the provider, choose one explicitly:"
   echo "  outcall claude"
