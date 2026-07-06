@@ -372,18 +372,11 @@ async fn cli_network_create_succeeds_or_already_exists() {
 #[tokio::test]
 async fn cli_unknown_subcommand_exits_nonzero() {
     let tmp = TempDir::new().expect("tempdir");
-    let rules_dir = tmp.path().to_path_buf();
-    make_allow_all_rules(&rules_dir).expect("write rules");
-
-    let socket = tmp.path().join("outcalld.sock");
-    let (mut daemon, sock) = spawn_daemon(&socket, &rules_dir)
-        .await
-        .expect("daemon spawned");
+    let socket = tmp.path().join("not-running.sock");
+    let sock = socket.to_string_lossy().to_string();
 
     let out = outcall_exec(&sock, &["foobar"]);
     assert_failure(&out, "unknown subcommand");
-
-    daemon.kill().expect("daemon kill");
 }
 
 // ── Test 6: Custom socket path is respected ─────────────────────────────────
