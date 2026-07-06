@@ -975,6 +975,25 @@ fn cmd_setup_inner(
     cmd_init(Some(recipe.id), force)?;
     println!();
     cmd_recipe_doctor(recipe.id)?;
+
+    if let Some(message) = linux_runtime_requirement_message() {
+        println!();
+        if print_next {
+            println!("{message}");
+            println!();
+            println!("Next:");
+            println!("  move to a Linux host or VM");
+            println!("  rerun `outcall` there");
+            println!(
+                "  outcall doctor {}   # inspect auth and project context again",
+                recipe.id
+            );
+            return Ok(());
+        }
+        let _ = std::io::stdout().flush();
+        anyhow::bail!("{message}");
+    }
+
     println!();
     cmd_recipe_test(socket, recipe.id, no_build, auth_mode, force_auth_copy)?;
     if print_next {
@@ -1416,6 +1435,7 @@ fn cmd_recipe_run(
     let recipe = recipe_or_bail(id)?;
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
     ensure_recipe_initialized(&project_dir, recipe)?;
+    ensure_linux_runtime_host()?;
     ensure_docker_access()?;
 
     let image = outcall::recipes::recipe_image_name(recipe);
@@ -1451,6 +1471,7 @@ fn cmd_recipe_test(
     let recipe = recipe_or_bail(id)?;
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
     ensure_recipe_initialized(&project_dir, recipe)?;
+    ensure_linux_runtime_host()?;
     ensure_docker_access()?;
 
     let image = outcall::recipes::recipe_image_name(recipe);
@@ -1790,6 +1811,26 @@ fn ensure_docker_access() -> Result<()> {
          Start Docker and rerun `outcall`.\n\
          Run `outcall doctor` if you want the full prerequisite report first."
     );
+}
+
+fn linux_runtime_requirement_message() -> Option<String> {
+    let os = std::env::consts::OS;
+    if os == "linux" {
+        return None;
+    }
+
+    Some(format!(
+        "Outcall runtime launch requires a Linux host. Detected {os}.\n\
+         The project scaffold and auth hints are ready, but `outcalld` only runs on Linux.\n\
+         Use a Linux host or VM, then rerun `outcall`."
+    ))
+}
+
+fn ensure_linux_runtime_host() -> Result<()> {
+    if let Some(message) = linux_runtime_requirement_message() {
+        anyhow::bail!(message);
+    }
+    Ok(())
 }
 
 fn build_recipe_image(
