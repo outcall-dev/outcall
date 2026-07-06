@@ -701,9 +701,12 @@ fn cmd_doctor(recipe: Option<&str>) -> Result<()> {
     println!("Project: {}", project_dir.display());
     println!();
 
+    doctor_platform();
     doctor_command("docker", &["--version"]);
     doctor_command("git", &["--version"]);
     doctor_command("docker", &["info"]);
+    doctor_socket_dir(std::path::Path::new("/tmp/outcall"));
+    doctor_br_netfilter();
 
     println!();
     println!("Project scaffold:");
@@ -890,8 +893,12 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
     println!("Project:       {}", project_dir.display());
     println!();
 
+    doctor_platform();
     doctor_command("docker", &["--version"]);
     doctor_command("git", &["--version"]);
+    doctor_command("docker", &["info"]);
+    doctor_socket_dir(std::path::Path::new("/tmp/outcall"));
+    doctor_br_netfilter();
 
     let generated = [
         project_dir
@@ -1324,6 +1331,67 @@ fn doctor_command(command: &str, args: &[&str]) {
             println!("  WARN {command}: {msg}");
         }
         Err(e) => println!("  WARN {command}: {e}"),
+    }
+}
+
+fn doctor_platform() {
+    let os = std::env::consts::OS;
+    if os == "linux" {
+        println!("  PASS platform: Linux host");
+    } else {
+        println!("  WARN platform: {os} host detected; outcalld only runs on Linux");
+    }
+}
+
+fn doctor_socket_dir(path: &std::path::Path) {
+    if path.exists() {
+        println!("  PASS socket dir: {}", path.display());
+        return;
+    }
+
+    match std::fs::create_dir_all(path) {
+        Ok(()) => {
+            println!("  PASS socket dir: {} (created)", path.display());
+        }
+        Err(e) => {
+            println!("  WARN socket dir: {} ({e})", path.display());
+        }
+    }
+}
+
+fn doctor_br_netfilter() {
+    if std::env::consts::OS != "linux" {
+        println!("  INFO br_netfilter: Linux-only prerequisite");
+        return;
+    }
+
+    doctor_proc_value(
+        "br_netfilter ipv4",
+        std::path::Path::new("/proc/sys/net/bridge/bridge-nf-call-iptables"),
+        "1",
+        "load br_netfilter and set net.bridge.bridge-nf-call-iptables=1",
+    );
+    doctor_proc_value(
+        "br_netfilter ipv6",
+        std::path::Path::new("/proc/sys/net/bridge/bridge-nf-call-ip6tables"),
+        "1",
+        "set net.bridge.bridge-nf-call-ip6tables=1",
+    );
+}
+
+fn doctor_proc_value(label: &str, path: &std::path::Path, expected: &str, hint: &str) {
+    match std::fs::read_to_string(path) {
+        Ok(value) => {
+            let actual = value.trim();
+            if actual == expected {
+                println!("  PASS {label}: {actual}");
+            } else {
+                println!("  WARN {label}: {actual} (expected {expected}; {hint})");
+            }
+        }
+        Err(e) => {
+            println!("  WARN {label}: {} ({e}; {hint})", path.display());
+        }
     }
 }
 
