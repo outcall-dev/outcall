@@ -9,6 +9,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **CLI:** bare `outcall` now prints project-aware onboarding instead of
+  exiting on a missing subcommand.
 - **CLI:** top-level `outcall start [claude|codex]` command. With an explicit
   provider it behaves like the provider alias; without one it auto-selects
   Claude or Codex only when the host has an unambiguous matching auth setup.
@@ -24,15 +26,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- **CLI:** `outcall setup` now accepts an optional provider and follows the
+  same saved-default, project-context, and host-auth detection order as
+  `outcall start`.
 - **Onboarding docs:** README, installation, quickstart, CLI reference, and
   website copy now lead with `curl -fsSL https://outcall.dev/install.sh | sh`
-  followed by `outcall start`, with explicit `outcall claude` / `outcall codex`
-  fallbacks when detection is ambiguous.
+  followed by `outcall`, then `outcall start`, with explicit `outcall claude`
+  / `outcall codex` fallbacks when detection is ambiguous.
 - **Daemon bootstrap:** the CLI now defaults to the matching versioned daemon
   image tag instead of `latest`, and the installer preloads that image when
   Docker is available.
 - **CI:** installer smoke now proves the one-command first-run path for both
   Claude and Codex, not just Claude.
+- **Release automation:** tag creation now follows the workspace version in
+  `outcall/Cargo.toml`, and the release workflow reads the matching versioned
+  release-notes file dynamically.
 
 ## [0.1.9] - 2026-07-06
 

@@ -26,7 +26,7 @@ jobs:
       - name: Get current version
         id: current
         run: |
-          version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "//g' | sed 's/"//g' | tr -d ' ')
+          version=$(grep '^version = ' outcall/Cargo.toml | head -1 | sed 's/version = "//g' | sed 's/"//g' | tr -d ' ')
           echo "current=$version" >> $GITHUB_OUTPUT
 
       - name: Compute new version
@@ -50,10 +50,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "bump/${{ steps.bump.outputs.new_version }}"
 
-      - name: Update Cargo.toml
+      - name: Update versioned files
         run: |
-          sed -i 's/^version = ".*"/version = "${{ steps.bump.outputs.new_version }}"/' Cargo.toml
-          git add Cargo.toml
+          NEW_VERSION='${{ steps.bump.outputs.new_version }}'
+          for file in outcall/Cargo.toml outcall-agent/Cargo.toml outcall-api/Cargo.toml outcall-ui/Cargo.toml outcalld/Cargo.toml; do
+            sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" "$file"
+          done
+          sed -i "s/OUTCALL_VERSION:-[0-9][^\"]*/OUTCALL_VERSION:-$NEW_VERSION/" scripts/install.sh
+          sed -i "s/version-[0-9][0-9A-Za-z.]*-blue/version-$NEW_VERSION-blue/" README.md
+          cargo update --workspace
+          git add outcall/Cargo.toml outcall-agent/Cargo.toml outcall-api/Cargo.toml outcall-ui/Cargo.toml outcalld/Cargo.toml Cargo.lock scripts/install.sh README.md
           git commit -m "chore: bump version to ${{ steps.bump.outputs.new_version }}"
 
       - name: Push branch
