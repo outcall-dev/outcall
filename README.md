@@ -35,31 +35,33 @@ curl -fsSL https://outcall.dev/install.sh | sh
 ```
 
 On Linux, the installer also preloads the matching `outcalld` Docker image when
-Docker is available, so `outcall claude` / `outcall codex` do not need a first-run
-registry pull.
+Docker is available, so `outcall start` does not need a first-run registry
+pull.
 
 ## First-time agent flow
 
 The CLI ships a small built-in recipe registry for common agent runtimes:
 
 ```sh
-outcall claude
+outcall start
+```
 
+If Outcall cannot infer the provider cleanly, choose one explicitly:
+
+```sh
+outcall claude
 outcall codex
 ```
 
-These are the shortest first-run commands. They write the project-local
-`.outcall/` scaffold, check Docker and generated files, inspect likely
-auth/context sources, build the recipe image, ensure the daemon and default
-network exist, run a smoke container with the recipe entrypoint, and then start
-the real isolated agent container.
+`outcall start` is the default first-run command. When the machine clearly
+matches Claude or Codex, it writes the project-local `.outcall/` scaffold,
+checks Docker and generated files, inspects likely auth/context sources, builds
+the recipe image, ensures the daemon and default network exist, runs a smoke
+container with the recipe entrypoint, and then starts the real isolated agent
+container.
 
-If the machine only has one supported provider configured, `outcall start`
-will auto-select it:
-
-```sh
-outcall start
-```
+`outcall claude` and `outcall codex` run the same flow, but skip provider
+detection.
 
 If the first run stops on a prerequisite, inspect the host and recipe checks
 directly:
