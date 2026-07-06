@@ -35,26 +35,35 @@ curl -fsSL https://outcall.dev/install.sh | sh
 ```
 
 On Linux, the installer also preloads the matching `outcalld` Docker image when
-Docker is available, so `outcall run <recipe>` does not need a first-run
+Docker is available, so `outcall claude` / `outcall codex` do not need a first-run
 registry pull.
 
-## First-time recipe flow
+## First-time agent flow
 
 The CLI ships a small built-in recipe registry for common agent runtimes:
 
 ```sh
-outcall run claude
+outcall claude
 
-outcall run codex
+outcall codex
 ```
 
-`outcall run <recipe>` is the shortest path for first-time users. It writes the
-project-local `.outcall/` scaffold, checks Docker and generated files, inspects
-likely auth/context sources, builds the recipe image, ensures the daemon and
-default network exist, runs a smoke container with the recipe entrypoint, and
-then starts the real isolated agent container.
+These are the shortest first-run commands. They write the project-local
+`.outcall/` scaffold, check Docker and generated files, inspect likely
+auth/context sources, build the recipe image, ensure the daemon and default
+network exist, run a smoke container with the recipe entrypoint, and then start
+the real isolated agent container.
 
-For users who want the individual steps, `outcall run` expands to:
+If the first run stops on a prerequisite, inspect the host and recipe checks
+directly:
+
+```sh
+outcall doctor claude
+outcall doctor codex
+```
+
+Under the hood, `outcall claude` / `outcall codex` are aliases for
+`outcall run <recipe>`. The lower-level flow is:
 
 ```sh
 outcall init <recipe>
