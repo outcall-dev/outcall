@@ -1,4 +1,4 @@
-# Outcall v0.1.10
+# Outcall v0.1.11
 
 Recipe runner release. Outcall is a host-level firewall daemon that governs all
 outbound traffic from Docker agent containers. It creates isolated networks,
@@ -6,9 +6,10 @@ applies nftables policies via a managed bridge, and gives operators CLI + API
 control over what containers can reach.
 
 This release adds runnable built-in agent recipes and clears CI release
-blockers found after v0.1.9.
+blockers found after v0.1.9. It supersedes the failed v0.1.10 tag attempt,
+which did not include the final privileged CI harness fix.
 
-## What's in v0.1.10
+## What's in v0.1.11
 
 ### Recipes
 
