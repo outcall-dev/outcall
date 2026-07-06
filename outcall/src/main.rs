@@ -645,29 +645,29 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
     std::fs::create_dir_all(&rules_dir)
         .with_context(|| format!("failed to create {}", rules_dir.display()))?;
 
-    let config_path =
-        outcall::agent_config::AgentConfig::save_template_with_force(&project_dir, force)?;
     println!("Initialized Outcall in {}.", project_dir.display());
-    println!("  wrote {}", config_path.display());
-    if let Some(path) = outcall::recipes::ensure_outcall_gitignore(&project_dir)? {
-        println!("  wrote {}", path.display());
-    }
-    println!("  ensured {}", rules_dir.display());
 
     if let Some(id) = recipe {
         let recipe = recipe_or_bail(id)?;
         let written = outcall::recipes::init_recipe(&project_dir, recipe, force)?;
         for path in written {
-            if path != config_path {
-                println!("  wrote {}", path.display());
-            }
+            println!("  wrote {}", path.display());
         }
+        println!("  ensured {}", rules_dir.display());
         println!();
         println!("Next:");
         println!("  outcall run {}", recipe.id);
         println!("  outcall run {} --detach", recipe.id);
         return Ok(());
     }
+
+    let config_path =
+        outcall::agent_config::AgentConfig::save_template_with_force(&project_dir, force)?;
+    println!("  wrote {}", config_path.display());
+    if let Some(path) = outcall::recipes::ensure_outcall_gitignore(&project_dir)? {
+        println!("  wrote {}", path.display());
+    }
+    println!("  ensured {}", rules_dir.display());
 
     println!();
     println!("Suggested next steps:");

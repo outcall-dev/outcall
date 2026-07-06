@@ -4,11 +4,22 @@
 //! These tests spawn the actual `outcall` binary; no daemon required.
 
 use std::process::Command;
+use tempfile::tempdir;
 
 fn outcall(args: &[&str]) -> std::process::Output {
     Command::new("cargo")
         .args(["run", "-q", "--"])
         .args(args)
+        .output()
+        .expect("cargo run failed")
+}
+
+fn outcall_in_dir(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    let manifest = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+    Command::new("cargo")
+        .args(["run", "-q", "--manifest-path", &manifest, "--"])
+        .args(args)
+        .current_dir(dir)
         .output()
         .expect("cargo run failed")
 }
@@ -358,4 +369,23 @@ fn cli_top_level_run_help_parses() {
             stderr
         );
     }
+}
+
+#[test]
+fn cli_top_level_init_recipe_works_in_clean_project() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir(temp.path(), &["init", "claude"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "init claude should succeed: {stderr}");
+
+    assert!(
+        temp.path().join(".outcall/agent.yaml").exists(),
+        "recipe init should create agent.yaml"
+    );
+    assert!(
+        temp.path()
+            .join(".outcall/recipes/claude/recipe.yaml")
+            .exists(),
+        "recipe init should create recipe manifest"
+    );
 }
