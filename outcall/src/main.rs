@@ -2421,6 +2421,7 @@ fn cmd_daemon_start(
     let socket = socket.unwrap_or_else(|| outcall_api::DEFAULT_HOST_SOCKET.to_string());
     let agent_socket_host_path =
         agent_socket_host_path.unwrap_or_else(|| outcall_api::DEFAULT_AGENT_SOCKET.to_string());
+    let (operator_uid, operator_gid) = host_operator_identity()?;
 
     if let Some(dockerfile) = build_from {
         println!("Building image {image} from {dockerfile}…");
@@ -2472,6 +2473,10 @@ fn cmd_daemon_start(
         image.clone(),
         "--socket".into(),
         socket.clone(),
+        "--operator-uid".into(),
+        operator_uid.to_string(),
+        "--operator-gid".into(),
+        operator_gid.to_string(),
         "--agent-socket-host-path".into(),
         agent_socket_host_path.clone(),
         "--bridge".into(),
@@ -2506,6 +2511,41 @@ fn cmd_daemon_start(
         cid.chars().take(12).collect::<String>()
     );
     Ok(())
+}
+
+fn host_operator_identity() -> Result<(u32, u32)> {
+    if let (Ok(uid), Ok(gid)) = (std::env::var("SUDO_UID"), std::env::var("SUDO_GID")) {
+        let uid = uid
+            .parse::<u32>()
+            .context("failed to parse SUDO_UID as a numeric uid")?;
+        let gid = gid
+            .parse::<u32>()
+            .context("failed to parse SUDO_GID as a numeric gid")?;
+        return Ok((uid, gid));
+    }
+
+    fn read_id_flag(flag: &str) -> Result<u32> {
+        let output = std::process::Command::new("id")
+            .arg(flag)
+            .output()
+            .with_context(|| {
+                format!("failed to invoke `id {flag}` while determining host operator identity")
+            })?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "`id {flag}` failed with exit {:?}: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        String::from_utf8(output.stdout)
+            .context("`id` returned non-utf8 output")?
+            .trim()
+            .parse::<u32>()
+            .with_context(|| format!("failed to parse `id {flag}` output as uid/gid"))
+    }
+
+    Ok((read_id_flag("-u")?, read_id_flag("-g")?))
 }
 
 fn cmd_daemon_stop(name: Option<String>) -> Result<()> {
