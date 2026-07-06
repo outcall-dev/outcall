@@ -61,7 +61,8 @@ container with the recipe entrypoint, and then starts the real isolated agent
 container.
 
 `outcall claude` and `outcall codex` run the same flow, but skip provider
-detection.
+detection. They also persist the project's default recipe, so after you choose
+once on a mixed-provider machine, later runs can go back to `outcall start`.
 
 If the first run stops on a prerequisite, inspect the host and recipe checks
 directly:

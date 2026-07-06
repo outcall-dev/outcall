@@ -476,6 +476,50 @@ fn cli_top_level_start_forwards_agent_args_without_treating_them_as_recipe() {
 }
 
 #[test]
+fn cli_top_level_init_recipe_persists_project_default_for_start() {
+    let temp = tempdir().expect("tempdir");
+    let init = outcall_in_dir(temp.path(), &["init", "claude"]);
+    let init_stderr = String::from_utf8_lossy(&init.stderr);
+    assert!(init.status.success(), "init claude should succeed: {init_stderr}");
+
+    let out = outcall_in_dir_with_env(
+        temp.path(),
+        &["start", "--", "--version"],
+        &[
+            ("ANTHROPIC_API_KEY", "test-anthropic"),
+            ("CODEX_API_KEY", "test-codex"),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Starting with recipe: claude"),
+        "start should prefer the saved project default recipe, got stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn cli_top_level_doctor_reports_project_default_recipe() {
+    let temp = tempdir().expect("tempdir");
+    let init = outcall_in_dir(temp.path(), &["init", "codex"]);
+    let init_stderr = String::from_utf8_lossy(&init.stderr);
+    assert!(init.status.success(), "init codex should succeed: {init_stderr}");
+
+    let out = outcall_in_dir_clean_env(temp.path(), &["doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "doctor should succeed: {stderr}");
+    assert!(
+        stdout.contains("selected recipe: codex"),
+        "doctor should report the saved default recipe, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("project default recipe: codex"),
+        "doctor should recommend start from the saved recipe, got: {stdout}"
+    );
+}
+
+#[test]
 fn cli_top_level_init_recipe_works_in_clean_project() {
     let temp = tempdir().expect("tempdir");
     let out = outcall_in_dir(temp.path(), &["init", "claude"]);

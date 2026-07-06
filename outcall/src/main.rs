@@ -748,11 +748,13 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
         for path in written {
             println!("  wrote {}", path.display());
         }
+        let selected = save_default_recipe(&project_dir, recipe.id)?;
+        println!("  wrote {}", selected.display());
         println!("  ensured {}", rules_dir.display());
         println!();
         println!("Next:");
-        println!("  outcall {}", recipe.id);
-        println!("  outcall {} --detach", recipe.id);
+        println!("  outcall start");
+        println!("  outcall start --detach");
         return Ok(());
     }
 
@@ -799,6 +801,12 @@ fn cmd_doctor(recipe: Option<&str>) -> Result<()> {
         "gitignore",
         &project_dir.join(".outcall").join(".gitignore"),
     );
+    if let Some(default_recipe) = load_default_recipe(&project_dir)? {
+        doctor_path("default recipe", &default_recipe_path(&project_dir));
+        println!("  selected recipe: {}", default_recipe.id);
+    } else {
+        println!("  default recipe: not set");
+    }
 
     println!();
     println!("Recipes:");
@@ -968,7 +976,39 @@ fn detect_recipe_candidates() -> Vec<&'static outcall::recipes::Recipe> {
         .collect::<Vec<_>>()
 }
 
+fn default_recipe_path(project_dir: &std::path::Path) -> std::path::PathBuf {
+    project_dir.join(".outcall").join("default-recipe")
+}
+
+fn save_default_recipe(project_dir: &std::path::Path, recipe: &str) -> Result<std::path::PathBuf> {
+    let path = default_recipe_path(project_dir);
+    std::fs::write(&path, format!("{recipe}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn load_default_recipe(project_dir: &std::path::Path) -> Result<Option<&'static outcall::recipes::Recipe>> {
+    let path = default_recipe_path(project_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let recipe_id = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let recipe_id = recipe_id.trim();
+    if recipe_id.is_empty() {
+        return Ok(None);
+    }
+    let recipe = outcall::recipes::get_recipe(recipe_id)
+        .with_context(|| format!("invalid recipe id {:?} in {}", recipe_id, path.display()))?;
+    Ok(Some(recipe))
+}
+
 fn detect_default_recipe() -> Result<&'static outcall::recipes::Recipe> {
+    let project_dir = std::env::current_dir().context("failed to get current directory")?;
+    if let Some(recipe) = load_default_recipe(&project_dir)? {
+        return Ok(recipe);
+    }
+
     let candidates = detect_recipe_candidates();
 
     match candidates.as_slice() {
@@ -991,6 +1031,22 @@ fn detect_default_recipe() -> Result<&'static outcall::recipes::Recipe> {
 }
 
 fn print_first_run_recommendation() {
+    let project_dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(_) => {
+            println!("Recommended first command:");
+            println!("  outcall start");
+            return;
+        }
+    };
+
+    if let Ok(Some(recipe)) = load_default_recipe(&project_dir) {
+        println!("Recommended first command:");
+        println!("  outcall start");
+        println!("  # project default recipe: {}", recipe.id);
+        return;
+    }
+
     match detect_recipe_candidates().as_slice() {
         [recipe] => {
             println!("Recommended first command:");
