@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
@@ -154,7 +154,11 @@ impl BridgeManager {
         let idx = self.index.expect("bridge index set during ensure_bridge");
         self.handle
             .address()
-            .add(idx, self.gateway_ip, self.gateway_prefix_len)
+            .add(
+                idx,
+                IpAddr::V4(self.gateway_ip),
+                self.gateway_prefix_len,
+            )
             .replace()
             .execute()
             .await
