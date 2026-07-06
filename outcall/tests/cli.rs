@@ -64,17 +64,39 @@ fn outcall_in_dir_with_env(
 #[test]
 fn cli_without_subcommand_prints_onboarding() {
     let temp = tempdir().expect("tempdir");
-    let out = outcall_in_dir_with_env(temp.path(), &[], &[("ANTHROPIC_API_KEY", "test-key")]);
+    let out = outcall_in_dir_clean_env(temp.path(), &[]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "expected onboarding output: {stderr}");
     assert!(
-        stdout.contains("Recommended first command:\n  outcall start"),
+        stdout.contains(
+            "Recommended first command:\n  outcall start          # after you export provider auth"
+        ),
         "expected start recommendation, got: {stdout}"
     );
     assert!(
         stdout.contains("outcall setup"),
         "expected setup shortcut in onboarding output, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_without_subcommand_with_ambiguous_auth_prints_explicit_choices() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_with_env(
+        temp.path(),
+        &[],
+        &[
+            ("ANTHROPIC_API_KEY", "test-anthropic"),
+            ("CODEX_API_KEY", "test-codex"),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "expected onboarding output: {stderr}");
+    assert!(
+        stdout.contains("Recommended first command:\n  outcall claude\n  outcall codex"),
+        "expected explicit recipe choices, got: {stdout}"
     );
 }
 

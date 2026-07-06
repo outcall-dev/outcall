@@ -521,7 +521,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        None => cmd_onboarding(),
+        None => cmd_onboarding(&cli.socket),
         Some(Commands::Bridge { action }) => match action {
             BridgeAction::Status => cmd_bridge_status(&cli.socket),
             BridgeAction::Up => cmd_bridge_up(&cli.socket),
@@ -719,7 +719,13 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_onboarding() -> Result<()> {
+fn cmd_onboarding(socket: &str) -> Result<()> {
+    if let Ok(selection) = detect_default_recipe() {
+        println!("Outcall");
+        println!();
+        return cmd_start_with_selection(socket, selection, default_launch_args());
+    }
+
     println!("Outcall");
     println!();
     print_first_run_recommendation();
@@ -745,6 +751,17 @@ fn cmd_recipe_alias(socket: &str, recipe: &str, args: RecipeLaunchArgs) -> Resul
     )
 }
 
+fn default_launch_args() -> RecipeLaunchArgs {
+    RecipeLaunchArgs {
+        force: false,
+        no_build: false,
+        auth: RecipeAuthMode::Auto,
+        force_auth_copy: false,
+        detach: false,
+        args: Vec::new(),
+    }
+}
+
 fn cmd_start(socket: &str, recipe: Option<&str>, mut args: RecipeLaunchArgs) -> Result<()> {
     let selection = match recipe {
         Some(id) if outcall::recipes::get_recipe(id).is_some() => RecipeSelection {
@@ -761,6 +778,14 @@ fn cmd_start(socket: &str, recipe: Option<&str>, mut args: RecipeLaunchArgs) -> 
         },
         None => detect_default_recipe()?,
     };
+    cmd_start_with_selection(socket, selection, args)
+}
+
+fn cmd_start_with_selection(
+    socket: &str,
+    selection: RecipeSelection,
+    args: RecipeLaunchArgs,
+) -> Result<()> {
     println!(
         "Starting with recipe: {} ({})",
         selection.recipe.id,
@@ -1391,6 +1416,7 @@ fn cmd_recipe_run(
     let recipe = recipe_or_bail(id)?;
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
     ensure_recipe_initialized(&project_dir, recipe)?;
+    ensure_docker_access()?;
 
     let image = outcall::recipes::recipe_image_name(recipe);
     if !no_build {
@@ -1425,6 +1451,7 @@ fn cmd_recipe_test(
     let recipe = recipe_or_bail(id)?;
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
     ensure_recipe_initialized(&project_dir, recipe)?;
+    ensure_docker_access()?;
 
     let image = outcall::recipes::recipe_image_name(recipe);
     if !no_build {
@@ -1725,6 +1752,44 @@ fn ensure_recipe_initialized(
         println!("  wrote {}", path.display());
     }
     Ok(())
+}
+
+fn ensure_docker_access() -> Result<()> {
+    let output = std::process::Command::new("docker")
+        .args(["info"])
+        .output()
+        .context(
+            "failed to invoke `docker info`; install Docker and ensure the CLI is available",
+        )?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "docker info failed".to_string()
+    };
+
+    if detail.contains("permission denied") {
+        anyhow::bail!(
+            "Docker is installed but the current user cannot access the Docker socket.\n\
+             Detail: {detail}\n\
+             Start Docker Desktop or fix Docker socket permissions, then rerun `outcall`.\n\
+             Run `outcall doctor` if you want the full prerequisite report first."
+        );
+    }
+
+    anyhow::bail!(
+        "Docker is not ready for Outcall.\n\
+         Detail: {detail}\n\
+         Start Docker and rerun `outcall`.\n\
+         Run `outcall doctor` if you want the full prerequisite report first."
+    );
 }
 
 fn build_recipe_image(
