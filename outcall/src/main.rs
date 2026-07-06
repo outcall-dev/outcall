@@ -122,6 +122,29 @@ enum Commands {
         #[arg(long)]
         force_auth_copy: bool,
     },
+    /// Initialize and launch a first-time Claude/Codex container in one command
+    Run {
+        /// Recipe ID, e.g. claude or codex
+        recipe: String,
+        /// Overwrite existing generated files
+        #[arg(long)]
+        force: bool,
+        /// Skip docker build and use the local recipe image as-is
+        #[arg(long)]
+        no_build: bool,
+        /// How to transfer provider auth/config into the container
+        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Copy)]
+        auth: RecipeAuthMode,
+        /// Re-copy staged auth files even if they already exist
+        #[arg(long)]
+        force_auth_copy: bool,
+        /// Run in detached mode
+        #[arg(short, long)]
+        detach: bool,
+        /// Arguments passed to the recipe agent entrypoint
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
     /// Manage the TLS interception CA (S011)
     Ca {
         #[command(subcommand)]
@@ -537,6 +560,24 @@ fn main() -> Result<()> {
             auth,
             force_auth_copy,
         } => cmd_setup(&cli.socket, &recipe, force, no_build, auth, force_auth_copy),
+        Commands::Run {
+            recipe,
+            force,
+            no_build,
+            auth,
+            force_auth_copy,
+            detach,
+            args,
+        } => cmd_run(
+            &cli.socket,
+            &recipe,
+            force,
+            no_build,
+            auth,
+            force_auth_copy,
+            detach,
+            args,
+        ),
         Commands::Ca { action } => match action {
             CaAction::Init { out } => cmd_ca_init(out),
             CaAction::Bundle => cmd_ca_bundle(&cli.socket),
@@ -623,8 +664,8 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
         }
         println!();
         println!("Next:");
-        println!("  outcall setup {}", recipe.id);
-        println!("  outcall recipe run {}", recipe.id);
+        println!("  outcall run {}", recipe.id);
+        println!("  outcall run {} --detach", recipe.id);
         return Ok(());
     }
 
@@ -632,7 +673,7 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
     println!("Suggested next steps:");
     println!("  outcall doctor");
     println!("  outcall recipe list");
-    println!("  outcall setup claude   # or: outcall setup codex");
+    println!("  outcall run claude     # or: outcall run codex");
     Ok(())
 }
 
@@ -697,6 +738,26 @@ fn cmd_setup(
     auth_mode: RecipeAuthMode,
     force_auth_copy: bool,
 ) -> Result<()> {
+    cmd_setup_inner(
+        socket,
+        id,
+        force,
+        no_build,
+        auth_mode,
+        force_auth_copy,
+        true,
+    )
+}
+
+fn cmd_setup_inner(
+    socket: &str,
+    id: &str,
+    force: bool,
+    no_build: bool,
+    auth_mode: RecipeAuthMode,
+    force_auth_copy: bool,
+    print_next: bool,
+) -> Result<()> {
     let recipe = recipe_or_bail(id)?;
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
 
@@ -709,12 +770,37 @@ fn cmd_setup(
     cmd_recipe_doctor(recipe.id)?;
     println!();
     cmd_recipe_test(socket, recipe.id, no_build, auth_mode, force_auth_copy)?;
-    println!();
-    println!("Setup complete.");
-    println!("Next:");
-    println!("  outcall recipe run {}", recipe.id);
-    println!("  outcall recipe run {} --detach", recipe.id);
+    if print_next {
+        println!();
+        println!("Setup complete.");
+        println!("Next:");
+        println!("  outcall run {}", recipe.id);
+        println!("  outcall run {} --detach", recipe.id);
+    }
     Ok(())
+}
+
+fn cmd_run(
+    socket: &str,
+    id: &str,
+    force: bool,
+    no_build: bool,
+    auth_mode: RecipeAuthMode,
+    force_auth_copy: bool,
+    detach: bool,
+    args: Vec<String>,
+) -> Result<()> {
+    cmd_setup_inner(
+        socket,
+        id,
+        force,
+        no_build,
+        auth_mode,
+        force_auth_copy,
+        false,
+    )?;
+    println!();
+    cmd_recipe_run(socket, id, true, auth_mode, force_auth_copy, detach, args)
 }
 
 fn recipe_or_bail(id: &str) -> Result<&'static outcall::recipes::Recipe> {
@@ -771,8 +857,11 @@ fn cmd_recipe_init(id: &str, force: bool) -> Result<()> {
     }
     println!();
     println!("Next:");
-    println!("  outcall setup {}", recipe.id);
-    println!("  outcall recipe run {}", recipe.id);
+    println!("  outcall run {}", recipe.id);
+    println!(
+        "  outcall recipe run {}   # lower-level equivalent",
+        recipe.id
+    );
     Ok(())
 }
 
@@ -844,7 +933,7 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
     println!();
     println!("Network reminder:");
     println!(
-        "  `outcall setup {}` handles init, daemon, network, and smoke test.",
+        "  `outcall run {}` handles init, daemon, network, smoke test, and launch.",
         recipe.id
     );
     println!(

@@ -5,7 +5,7 @@
 ## Badges
 
 [![CI](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.17-blue.svg)](https://github.com/outcall-dev/outcall/releases)
+[![Version](https://img.shields.io/badge/version-0.1.18-blue.svg)](https://github.com/outcall-dev/outcall/releases)
 [![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcalld-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcalld)
 
 ## Workspace
@@ -28,30 +28,42 @@ cargo build --workspace
 
 Linux only. macOS will build the workspace (cross-platform types compile) but `outcalld` requires Linux for nftables and bridge management.
 
+## Fast install
+
+```sh
+curl -fsSL https://outcall.dev/install.sh | sh
+```
+
 ## First-time recipe flow
 
 The CLI ships a small built-in recipe registry for common agent runtimes:
 
 ```sh
-outcall setup claude
-outcall recipe run claude
+outcall run claude
 
-outcall setup codex
-outcall recipe run codex
+outcall run codex
 ```
 
-`outcall setup <recipe>` writes the project-local `.outcall/` scaffold, checks
-Docker and generated files, inspects likely auth/context sources, builds the
-recipe image, ensures the daemon and default network exist, stages auth/config,
-and runs a smoke container with the recipe entrypoint. `outcall recipe run`
-then starts the real agent container.
+`outcall run <recipe>` is the shortest path for first-time users. It writes the
+project-local `.outcall/` scaffold, checks Docker and generated files, inspects
+likely auth/context sources, builds the recipe image, ensures the daemon and
+default network exist, runs a smoke container with the recipe entrypoint, and
+then starts the real isolated agent container.
 
-For users who want the individual steps, `outcall setup` expands to:
+For users who want the individual steps, `outcall run` expands to:
 
 ```sh
 outcall init <recipe>
 outcall doctor <recipe>
 outcall recipe test <recipe>
+outcall recipe run <recipe>
+```
+
+The intermediate shortcut is:
+
+```sh
+outcall setup <recipe>
+outcall recipe run <recipe>
 ```
 
 Recipes do not mount your whole home directory. By default they copy only the

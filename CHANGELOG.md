@@ -7,6 +7,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **CLI:** top-level `outcall run <claude|codex>` command for the shortest
+  first-run path. It performs scaffold generation, prerequisite checks, smoke
+  verification, and then launches the actual isolated agent container.
+- **Install script:** `https://outcall.dev/install.sh` installs release
+  binaries directly into `~/.local/bin` without cloning the repository or
+  building from source first.
+
+### Changed
+
+- **Onboarding docs:** README, installation, quickstart, CLI reference, and
+  website copy now lead with `curl -fsSL https://outcall.dev/install.sh | sh`
+  followed by `outcall run claude` or `outcall run codex`.
+
 ## [0.1.9] - 2026-07-06
 
 ### Added
