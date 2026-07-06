@@ -4,11 +4,18 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build, e.g. v0.1.24'
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: outcall-dev/outcalld
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -32,6 +39,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: refs/tags/${{ env.RELEASE_TAG }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
@@ -68,7 +76,8 @@ jobs:
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          body_path: RELEASE_NOTES_${{ github.ref_name }}.md
+          tag_name: ${{ env.RELEASE_TAG }}
+          body_path: RELEASE_NOTES_${{ env.RELEASE_TAG }}.md
           prerelease: true
           files: |
             release/${{ matrix.target }}.tar.gz
@@ -85,6 +94,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -123,7 +134,7 @@ jobs:
           mkdir -p release
           docker buildx build \
             --platform linux/amd64 \
-            --tag ghcr.io/outcall-dev/outcalld:${GITHUB_REF_NAME} \
+            --tag ghcr.io/outcall-dev/outcalld:${RELEASE_TAG} \
             --tag ghcr.io/outcall-dev/outcalld:latest \
             --output type=docker,dest=release/outcalld-image-linux-amd64.tar \
             .
@@ -133,7 +144,7 @@ jobs:
         run: |
           docker buildx build \
             --platform linux/arm64 \
-            --tag ghcr.io/outcall-dev/outcalld:${GITHUB_REF_NAME} \
+            --tag ghcr.io/outcall-dev/outcalld:${RELEASE_TAG} \
             --tag ghcr.io/outcall-dev/outcalld:latest \
             --output type=docker,dest=release/outcalld-image-linux-arm64.tar \
             .
@@ -142,6 +153,7 @@ jobs:
       - name: Upload daemon image archives to Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             release/outcalld-image-linux-amd64.tar.gz
             release/outcalld-image-linux-arm64.tar.gz
