@@ -5,7 +5,7 @@
 ## Badges
 
 [![CI](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.16-blue.svg)](https://github.com/outcall-dev/outcall/releases)
+[![Version](https://img.shields.io/badge/version-0.1.17-blue.svg)](https://github.com/outcall-dev/outcall/releases)
 [![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcalld-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcalld)
 
 ## Workspace
@@ -33,23 +33,26 @@ Linux only. macOS will build the workspace (cross-platform types compile) but `o
 The CLI ships a small built-in recipe registry for common agent runtimes:
 
 ```sh
-outcall init claude
-outcall doctor claude
-outcall recipe test claude
+outcall setup claude
 outcall recipe run claude
 
-outcall init codex
-outcall doctor codex
-outcall recipe test codex
+outcall setup codex
 outcall recipe run codex
 ```
 
-`outcall init <recipe>` writes the project-local `.outcall/` scaffold.
-`outcall doctor <recipe>` checks Docker, generated files, likely auth sources,
-and likely project context files. `outcall recipe test <recipe>` builds the
+`outcall setup <recipe>` writes the project-local `.outcall/` scaffold, checks
+Docker and generated files, inspects likely auth/context sources, builds the
 recipe image, ensures the daemon and default network exist, stages auth/config,
 and runs a smoke container with the recipe entrypoint. `outcall recipe run`
 then starts the real agent container.
+
+For users who want the individual steps, `outcall setup` expands to:
+
+```sh
+outcall init <recipe>
+outcall doctor <recipe>
+outcall recipe test <recipe>
+```
 
 Recipes do not mount your whole home directory. By default they copy only the
 selected provider auth/config paths into `.outcall/auth/<id>/home`.

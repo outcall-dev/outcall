@@ -1,12 +1,12 @@
 [package]
 name = "outcall-agent"
-version = "0.1.16"
+version = "0.1.17"
 edition = "2024"
 description = "Agent shim for Outcall (runs inside containers)"
 license = "Apache-2.0"
 
 [dependencies]
-outcall-api = { path = "../outcall-api", version = "0.1.16" }
+outcall-api = { path = "../outcall-api", version = "0.1.17" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

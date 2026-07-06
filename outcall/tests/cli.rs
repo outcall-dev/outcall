@@ -323,3 +323,21 @@ fn cli_top_level_init_help_parses() {
         );
     }
 }
+
+#[test]
+fn cli_top_level_setup_help_parses() {
+    for args in [
+        vec!["setup", "--help"],
+        vec!["setup", "claude", "--help"],
+        vec!["setup", "codex", "--auth", "mount", "--help"],
+    ] {
+        let out = outcall(&args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "setup help {:?} should parse: {}",
+            args,
+            stderr
+        );
+    }
+}
