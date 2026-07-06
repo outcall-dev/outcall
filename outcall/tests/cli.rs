@@ -502,6 +502,50 @@ fn cli_top_level_init_recipe_persists_project_default_for_start() {
 }
 
 #[test]
+fn cli_top_level_start_prefers_single_project_context_over_mixed_host_auth() {
+    let temp = tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("AGENTS.md"), "Use Codex in this repo.\n")
+        .expect("write AGENTS.md");
+    let out = outcall_in_dir_with_env(
+        temp.path(),
+        &["start", "--", "--version"],
+        &[
+            ("ANTHROPIC_API_KEY", "test-anthropic"),
+            ("CODEX_API_KEY", "test-codex"),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Starting with recipe: codex"),
+        "start should prefer codex project context over mixed host auth, got stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn cli_top_level_start_ambiguous_project_context_error_explains_saved_default() {
+    let temp = tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("AGENTS.md"), "Use Codex in this repo.\n")
+        .expect("write AGENTS.md");
+    std::fs::write(temp.path().join("CLAUDE.md"), "Use Claude in this repo.\n")
+        .expect("write CLAUDE.md");
+    let out = outcall_in_dir_clean_env(temp.path(), &["start"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "ambiguous project context should fail"
+    );
+    assert!(
+        stderr.contains("found project context for multiple agents"),
+        "expected project-context ambiguity error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Future `outcall start` runs will reuse the saved project default."),
+        "project-context ambiguity error should explain the one-time explicit choice, got: {stderr}"
+    );
+}
+
+#[test]
 fn cli_top_level_doctor_reports_project_default_recipe() {
     let temp = tempdir().expect("tempdir");
     let init = outcall_in_dir(temp.path(), &["init", "codex"]);

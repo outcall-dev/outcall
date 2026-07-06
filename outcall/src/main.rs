@@ -970,6 +970,17 @@ fn recipe_has_auth_candidate(recipe: &outcall::recipes::Recipe) -> bool {
     recipe_has_env_auth(recipe) || recipe_has_user_auth_paths(recipe)
 }
 
+fn recipe_has_project_context(
+    project_dir: &std::path::Path,
+    recipe: &outcall::recipes::Recipe,
+) -> bool {
+    recipe
+        .project_paths
+        .iter()
+        .map(|path| project_dir.join(path))
+        .any(|path| path.exists())
+}
+
 fn recipe_has_env_auth(recipe: &outcall::recipes::Recipe) -> bool {
     recipe
         .auth_env
@@ -1019,6 +1030,26 @@ fn detect_default_recipe() -> Result<&'static outcall::recipes::Recipe> {
         return Ok(recipe);
     }
 
+    let context_candidates = outcall::recipes::RECIPES
+        .iter()
+        .filter(|recipe| recipe_has_project_context(&project_dir, recipe))
+        .collect::<Vec<_>>();
+    match context_candidates.as_slice() {
+        [recipe] => return Ok(recipe),
+        [] => {}
+        many => {
+            let ids = many
+                .iter()
+                .map(|recipe| recipe.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "found project context for multiple agents ({ids}); choose one explicitly once for this project:\n  outcall claude\n  outcall codex\n\
+                 Future `outcall start` runs will reuse the saved project default."
+            )
+        }
+    }
+
     let candidates = detect_recipe_candidates();
 
     match candidates.as_slice() {
@@ -1056,6 +1087,32 @@ fn print_first_run_recommendation() {
         println!("  outcall start");
         println!("  # project default recipe: {}", recipe.id);
         return;
+    }
+
+    let context_candidates = outcall::recipes::RECIPES
+        .iter()
+        .filter(|recipe| recipe_has_project_context(&project_dir, recipe))
+        .collect::<Vec<_>>();
+    match context_candidates.as_slice() {
+        [recipe] => {
+            println!("Recommended first command:");
+            println!("  outcall start");
+            println!("  # detected {} project context in this repo", recipe.name);
+            return;
+        }
+        [] => {}
+        many => {
+            let ids = many
+                .iter()
+                .map(|recipe| recipe.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("Recommended first command:");
+            println!("  outcall claude");
+            println!("  outcall codex");
+            println!("  # multiple project context candidates detected: {ids}");
+            return;
+        }
     }
 
     match detect_recipe_candidates().as_slice() {
