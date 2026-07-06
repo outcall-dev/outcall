@@ -112,6 +112,11 @@ enum Commands {
         #[command(subcommand)]
         action: RequestsAction,
     },
+    /// Inspect and initialize agent runtime recipes
+    Recipe {
+        #[command(subcommand)]
+        action: RecipeAction,
+    },
     /// Open the operator dashboard in a browser via a local TCP→unix-socket bridge
     Ui {
         /// TCP port to bind on 127.0.0.1 (default: 8080)
@@ -127,6 +132,30 @@ enum Commands {
 enum RulesAction {
     /// Atomically reload all rule files from the rules.d directory
     Reload,
+}
+
+#[derive(clap::Subcommand)]
+enum RecipeAction {
+    /// List built-in recipes
+    List,
+    /// Show recipe metadata and generated files
+    Show {
+        /// Recipe ID, e.g. claude or codex
+        id: String,
+    },
+    /// Initialize .outcall recipe files in the current project
+    Init {
+        /// Recipe ID, e.g. claude or codex
+        id: String,
+        /// Overwrite existing generated recipe files
+        #[arg(long)]
+        force: bool,
+    },
+    /// Check local prerequisites and context/auth candidates
+    Doctor {
+        /// Recipe ID, e.g. claude or codex
+        id: String,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -451,7 +480,185 @@ fn main() -> Result<()> {
             RequestsAction::Approve { id } => cmd_requests_approve(&cli.socket, &id),
             RequestsAction::Reject { id, reason } => cmd_requests_reject(&cli.socket, &id, reason),
         },
+        Commands::Recipe { action } => match action {
+            RecipeAction::List => cmd_recipe_list(),
+            RecipeAction::Show { id } => cmd_recipe_show(&id),
+            RecipeAction::Init { id, force } => cmd_recipe_init(&id, force),
+            RecipeAction::Doctor { id } => cmd_recipe_doctor(&id),
+        },
         Commands::Ui { port, no_open } => cmd_ui(&cli.socket, port, !no_open),
+    }
+}
+
+// ── Recipe commands ───────────────────────────────────────────────────────
+
+fn recipe_or_bail(id: &str) -> Result<&'static outcall::recipes::Recipe> {
+    outcall::recipes::get_recipe(id).with_context(|| {
+        let ids = outcall::recipes::recipe_ids()
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("unknown recipe \"{id}\"; available recipes: {ids}")
+    })
+}
+
+fn cmd_recipe_list() -> Result<()> {
+    println!("{:<12} {:<18} SUMMARY", "ID", "NAME");
+    for recipe in outcall::recipes::RECIPES {
+        println!("{:<12} {:<18} {}", recipe.id, recipe.name, recipe.summary);
+    }
+    Ok(())
+}
+
+fn cmd_recipe_show(id: &str) -> Result<()> {
+    let recipe = recipe_or_bail(id)?;
+    println!("Recipe:       {}", recipe.id);
+    println!("Name:         {}", recipe.name);
+    println!("Summary:      {}", recipe.summary);
+    println!("Auth env:     {}", recipe.auth_env.join(", "));
+    println!("User paths:   {}", recipe.user_paths.join(", "));
+    println!("Project paths: {}", recipe.project_paths.join(", "));
+    println!();
+    println!("Generated files:");
+    println!("  .outcall/recipes/{}/recipe.yaml", recipe.id);
+    println!("  .outcall/recipes/{}/Dockerfile", recipe.id);
+    println!("  .outcall/recipes/{}/README.md", recipe.id);
+    println!("  .outcall/recipes/{}/context.md", recipe.id);
+    println!("  .outcall/rules/{}.yaml", recipe.id);
+    println!("  .outcall/agent.yaml");
+    println!();
+    println!("Manifest:");
+    print!("{}", recipe.manifest);
+    Ok(())
+}
+
+fn cmd_recipe_init(id: &str, force: bool) -> Result<()> {
+    let recipe = recipe_or_bail(id)?;
+    let project_dir = std::env::current_dir().context("failed to get current directory")?;
+    let written = outcall::recipes::init_recipe(&project_dir, recipe, force)?;
+
+    println!(
+        "Initialized recipe \"{}\" in {}.",
+        recipe.id,
+        project_dir.display()
+    );
+    for path in written {
+        println!("  wrote {}", path.display());
+    }
+    println!();
+    println!("Next:");
+    println!("  outcall recipe doctor {}", recipe.id);
+    println!(
+        "  docker build -t outcall-recipe-{}:local -f .outcall/recipes/{}/Dockerfile .",
+        recipe.id, recipe.id
+    );
+    println!("  outcall network create");
+    println!("  outcall agent");
+    Ok(())
+}
+
+fn cmd_recipe_doctor(id: &str) -> Result<()> {
+    let recipe = recipe_or_bail(id)?;
+    let project_dir = std::env::current_dir().context("failed to get current directory")?;
+
+    println!("Recipe doctor: {} ({})", recipe.id, recipe.name);
+    println!("Project:       {}", project_dir.display());
+    println!();
+
+    doctor_command("docker", &["--version"]);
+    doctor_command("git", &["--version"]);
+
+    let generated = [
+        project_dir
+            .join(".outcall")
+            .join("recipes")
+            .join(recipe.id)
+            .join("recipe.yaml"),
+        project_dir
+            .join(".outcall")
+            .join("recipes")
+            .join(recipe.id)
+            .join("Dockerfile"),
+        project_dir
+            .join(".outcall")
+            .join("rules")
+            .join(format!("{}.yaml", recipe.id)),
+        project_dir.join(".outcall").join("agent.yaml"),
+    ];
+    for path in generated {
+        doctor_path("generated file", &path);
+    }
+
+    println!();
+    println!("Auth candidates:");
+    let mut any_auth = false;
+    for key in recipe.auth_env {
+        let present = std::env::var_os(key).is_some();
+        any_auth |= present;
+        doctor_bool("env", key, present);
+    }
+    for path in recipe.user_paths {
+        let expanded = outcall::recipes::expanded_path(path);
+        let present = expanded.exists();
+        any_auth |= present;
+        doctor_bool("user path", path, present);
+    }
+    if !any_auth {
+        println!("  WARN no auth candidates found; choose env, copy, or mount before running");
+    }
+
+    println!();
+    println!("Project context:");
+    let mut any_context = false;
+    for path in recipe.project_paths {
+        let full = project_dir.join(path);
+        let present = full.exists();
+        any_context |= present;
+        doctor_bool("project path", path, present);
+    }
+    if !any_context {
+        println!(
+            "  WARN no project context files found; the agent will only see raw workspace files"
+        );
+    }
+
+    println!();
+    println!("Network reminder:");
+    println!("  Run `outcall network create` before `outcall agent`.");
+    println!(
+        "  Copy or mount only selected auth/config paths; do not mount the whole home directory."
+    );
+    Ok(())
+}
+
+fn doctor_command(command: &str, args: &[&str]) {
+    match std::process::Command::new(command).args(args).output() {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            let first = version.lines().next().unwrap_or("available");
+            println!("  PASS {command}: {first}");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = stderr.lines().next().unwrap_or("command failed");
+            println!("  WARN {command}: {msg}");
+        }
+        Err(e) => println!("  WARN {command}: {e}"),
+    }
+}
+
+fn doctor_path(label: &str, path: &std::path::Path) {
+    if path.exists() {
+        println!("  PASS {label}: {}", path.display());
+    } else {
+        println!("  WARN {label}: {} missing", path.display());
+    }
+}
+
+fn doctor_bool(label: &str, name: &str, present: bool) {
+    if present {
+        println!("  PASS {label}: {name}");
+    } else {
+        println!("  INFO {label}: {name} not found");
     }
 }
 

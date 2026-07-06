@@ -28,6 +28,23 @@ cargo build --workspace
 
 Linux only. macOS will build the workspace (cross-platform types compile) but `outcalld` requires Linux for nftables and bridge management.
 
+## Agent recipes
+
+The CLI ships a small built-in recipe registry for common agent runtimes:
+
+```sh
+outcall recipe list
+outcall recipe init claude
+outcall recipe doctor claude
+outcall recipe init codex
+outcall recipe doctor codex
+```
+
+Recipes generate `.outcall/` scaffolding for Dockerfiles, egress rules, agent
+config, and context/auth transfer notes. They do not mount your whole home
+directory; inspect the generated `context.md` and use `doctor` to choose explicit
+auth/config paths before running an agent.
+
 ## Running `outcalld`
 
 `outcalld` requires several capabilities and a Docker socket bind-mount.

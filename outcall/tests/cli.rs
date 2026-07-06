@@ -267,3 +267,30 @@ fn cli_container_create_with_all_options() {
         "container create with all options should parse"
     );
 }
+
+#[test]
+fn cli_recipe_subcommands_parse_without_daemon() {
+    for args in [
+        vec!["recipe", "list"],
+        vec!["recipe", "show", "claude"],
+        vec!["recipe", "doctor", "codex"],
+    ] {
+        let out = outcall(&args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "recipe command {:?} should not require daemon: {}",
+            args,
+            stderr
+        );
+    }
+}
+
+#[test]
+fn cli_recipe_unknown_recipe_exits_nonzero() {
+    let out = outcall(&["recipe", "show", "missing"]);
+    assert!(
+        !out.status.success(),
+        "unknown recipe should fail with a useful error"
+    );
+}
