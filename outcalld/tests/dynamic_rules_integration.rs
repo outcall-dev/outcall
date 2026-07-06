@@ -18,43 +18,53 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
-use outcall_api::{ActiveRule, AllowRuleRequest, AllowRuleResult, FlushDynamicResult};
+use outcall_api::{ActiveRule, AllowRuleRequest, AllowRuleResult, ApiResponse, FlushDynamicResult};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn read_http_body(sock: &mut UnixStream) -> String {
+fn read_http_response(sock: &mut UnixStream) -> String {
     let mut buf = String::new();
     let _ = sock.read_to_string(&mut buf);
-    buf.split_once("\r\n\r\n")
-        .map(|(_, body)| body.to_string())
-        .unwrap_or_default()
+    buf
+}
+
+fn http_body(response: &str) -> &str {
+    if let Some((_, body)) = response.split_once("\r\n\r\n") {
+        return body;
+    }
+    if let Some((_, body)) = response.split_once("\n\n") {
+        return body;
+    }
+    response
+}
+
+fn parse_api_response<T: serde::de::DeserializeOwned>(body: &str) -> Option<ApiResponse<T>> {
+    serde_json::from_str(body).ok()
 }
 
 fn http_post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(
     sock: &mut UnixStream,
     path: &str,
     body: &T,
-) -> Option<outcall_api::ApiResponse<R>> {
+) -> Option<ApiResponse<R>> {
     let json = serde_json::to_string(body).ok()?;
     let request = format!(
-        "POST {path} HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
         json.len()
     );
     sock.write_all(request.as_bytes()).ok()?;
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(sock);
-    serde_json::from_str(&body).ok()
+    let response = read_http_response(sock);
+    parse_api_response(http_body(&response))
 }
 
 fn http_get<R: serde::de::DeserializeOwned>(
     sock: &mut UnixStream,
     path: &str,
-) -> Option<outcall_api::ApiResponse<R>> {
-    let request = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n");
+) -> Option<ApiResponse<R>> {
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     sock.write_all(request.as_bytes()).ok()?;
-    drop(sock.shutdown(std::net::Shutdown::Write));
-    let body = read_http_body(sock);
-    serde_json::from_str(&body).ok()
+    let response = read_http_response(sock);
+    parse_api_response(http_body(&response))
 }
 
 async fn spawn_daemon(socket: &PathBuf, rules_dir: &PathBuf) -> Result<(Child, String)> {
