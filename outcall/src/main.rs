@@ -766,6 +766,14 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
     }
     println!("  ensured {}", rules_dir.display());
 
+    if load_default_recipe(&project_dir)?.is_none() {
+        if let [recipe] = detect_recipe_candidates().as_slice() {
+            let selected = save_default_recipe(&project_dir, recipe.id)?;
+            println!("  wrote {}", selected.display());
+            println!("  selected default recipe: {}", recipe.id);
+        }
+    }
+
     println!();
     println!("Suggested next steps:");
     println!("  outcall doctor");
@@ -987,7 +995,9 @@ fn save_default_recipe(project_dir: &std::path::Path, recipe: &str) -> Result<st
     Ok(path)
 }
 
-fn load_default_recipe(project_dir: &std::path::Path) -> Result<Option<&'static outcall::recipes::Recipe>> {
+fn load_default_recipe(
+    project_dir: &std::path::Path,
+) -> Result<Option<&'static outcall::recipes::Recipe>> {
     let path = default_recipe_path(project_dir);
     if !path.exists() {
         return Ok(None);
@@ -1024,7 +1034,8 @@ fn detect_default_recipe() -> Result<&'static outcall::recipes::Recipe> {
                 .collect::<Vec<_>>()
                 .join(", ");
             anyhow::bail!(
-                "found auth candidates for multiple agents ({ids}); choose one explicitly:\n  outcall claude\n  outcall codex"
+                "found auth candidates for multiple agents ({ids}); choose one explicitly once for this project:\n  outcall claude\n  outcall codex\n\
+                 Future `outcall start` runs will reuse the saved project default."
             )
         }
     }

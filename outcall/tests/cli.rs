@@ -480,7 +480,10 @@ fn cli_top_level_init_recipe_persists_project_default_for_start() {
     let temp = tempdir().expect("tempdir");
     let init = outcall_in_dir(temp.path(), &["init", "claude"]);
     let init_stderr = String::from_utf8_lossy(&init.stderr);
-    assert!(init.status.success(), "init claude should succeed: {init_stderr}");
+    assert!(
+        init.status.success(),
+        "init claude should succeed: {init_stderr}"
+    );
 
     let out = outcall_in_dir_with_env(
         temp.path(),
@@ -503,7 +506,10 @@ fn cli_top_level_doctor_reports_project_default_recipe() {
     let temp = tempdir().expect("tempdir");
     let init = outcall_in_dir(temp.path(), &["init", "codex"]);
     let init_stderr = String::from_utf8_lossy(&init.stderr);
-    assert!(init.status.success(), "init codex should succeed: {init_stderr}");
+    assert!(
+        init.status.success(),
+        "init codex should succeed: {init_stderr}"
+    );
 
     let out = outcall_in_dir_clean_env(temp.path(), &["doctor"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -552,6 +558,19 @@ fn cli_top_level_init_without_recipe_points_to_start() {
 }
 
 #[test]
+fn cli_top_level_init_without_recipe_saves_single_detected_provider() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_with_env(temp.path(), &["init"], &[("ANTHROPIC_API_KEY", "test-key")]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "init should succeed: {stderr}");
+    assert!(
+        stdout.contains("selected default recipe: claude"),
+        "init should save the detected provider for later start runs, got: {stdout}"
+    );
+}
+
+#[test]
 fn cli_top_level_doctor_recommends_start_for_single_detected_provider() {
     let temp = tempdir().expect("tempdir");
     let out = outcall_in_dir_with_env(
@@ -569,5 +588,24 @@ fn cli_top_level_doctor_recommends_start_for_single_detected_provider() {
     assert!(
         stdout.contains("Recommended first command:\n  outcall start"),
         "doctor should recommend outcall start for a single provider, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_top_level_start_ambiguous_auth_error_explains_saved_default() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_with_env(
+        temp.path(),
+        &["start"],
+        &[
+            ("ANTHROPIC_API_KEY", "test-anthropic"),
+            ("CODEX_API_KEY", "test-codex"),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "ambiguous start should fail");
+    assert!(
+        stderr.contains("Future `outcall start` runs will reuse the saved project default."),
+        "ambiguous start error should explain the one-time explicit choice, got: {stderr}"
     );
 }
