@@ -154,11 +154,7 @@ impl BridgeManager {
         let idx = self.index.expect("bridge index set during ensure_bridge");
         self.handle
             .address()
-            .add(
-                idx,
-                IpAddr::V4(self.gateway_ip),
-                self.gateway_prefix_len,
-            )
+            .add(idx, IpAddr::V4(self.gateway_ip), self.gateway_prefix_len)
             .replace()
             .execute()
             .await
