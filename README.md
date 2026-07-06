@@ -44,11 +44,12 @@ The CLI ships a small built-in recipe registry for common agent runtimes:
 
 ```sh
 outcall
-outcall start
 ```
 
-Running bare `outcall` prints the recommended first command for the current
-project and host, plus the shortest useful next commands.
+Running bare `outcall` is the default first-run entrypoint. When the current
+project or host clearly matches Claude or Codex, it runs the same flow as
+`outcall start`. When detection is ambiguous or no provider auth/config is
+available yet, it prints the recommended next commands instead.
 
 If Outcall cannot infer the provider cleanly, choose one explicitly:
 
@@ -57,7 +58,7 @@ outcall claude
 outcall codex
 ```
 
-`outcall start` is the default first-run command. When the machine clearly
+`outcall start` remains the explicit equivalent. When the machine clearly
 matches Claude or Codex, it writes the project-local `.outcall/` scaffold,
 checks Docker and generated files, inspects likely auth/context sources, builds
 the recipe image, ensures the daemon and default network exist, runs a smoke

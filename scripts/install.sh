@@ -94,9 +94,11 @@ if [ "$os" = "Linux" ]; then
   echo "Next:"
   echo "  cd /path/to/your/project"
   echo "  outcall"
-  echo "  outcall start"
+  echo "  outcall start         # explicit equivalent if you want to skip auto-detect messaging"
   echo
-  echo "Use \`outcall\` to print the recommended first command for this project and host."
+  echo "Use \`outcall\` as the first-run entrypoint. If Outcall can infer the provider"
+  echo "for this project and host, it starts the isolated agent directly. Otherwise it"
+  echo "prints the shortest useful next commands."
   echo
   echo "If Outcall cannot infer the provider, choose one explicitly:"
   echo "  outcall claude"
