@@ -304,8 +304,18 @@ jobs:
             DOCKERFILE="$ROOT_DIR/../Dockerfile"
             ROOT_DIR="$(cd "$ROOT_DIR/.." && pwd)"
           else
-            echo "No supported daemon Dockerfile found in repository."
-            exit 1
+            CANDIDATE=$(find "$ROOT_DIR" "$ROOT_DIR/.." -maxdepth 4 -type f \( -name Dockerfile -o -path '*/scripts/e2e/Dockerfile' \) | head -n 1)
+            if [ -n "$CANDIDATE" ]; then
+              DOCKERFILE="$CANDIDATE"
+              if [[ "$DOCKERFILE" == */scripts/e2e/Dockerfile ]]; then
+                ROOT_DIR="$(dirname "$(dirname "$DOCKERFILE")")"
+              else
+                ROOT_DIR="$(dirname "$DOCKERFILE")"
+              fi
+            else
+              echo "No supported daemon Dockerfile found in repository."
+              exit 1
+            fi
           fi
           docker build -f "$DOCKERFILE" \
             -t "ghcr.io/outcall-dev/outcalld:v$VERSION" \
@@ -415,25 +425,44 @@ jobs:
       - name: Security integration (bridge state + leak checks)
         run: |
           ROOT_DIR="$(git rev-parse --show-toplevel)"
+          CARGO_BIN="$(rustup which --toolchain "${RUSTUP_TOOLCHAIN:-stable}" cargo 2>/dev/null || true)"
+          if [ -z "$CARGO_BIN" ] && command -v cargo >/dev/null 2>&1; then
+            CARGO_BIN="$(command -v cargo)"
+          fi
+          CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
           if [ -f "$ROOT_DIR/scripts/test-bridge.sh" ] && [ -d "$ROOT_DIR/application" ]; then
             sudo bash "$ROOT_DIR/scripts/test-bridge.sh"
           else
-            sudo cargo test -p outcalld --test bridge_integration -- --nocapture
+            sudo env \
+              PATH="$CARGO_BIN_DIR:$PATH" \
+              RUSTC="$CARGO_BIN_DIR/rustc" \
+              "$CARGO_BIN" test -p outcalld --test bridge_integration -- --nocapture
           fi
 
       - name: Security integration (container isolation)
         run: |
           ROOT_DIR="$(git rev-parse --show-toplevel)"
+          CARGO_BIN="$(rustup which --toolchain "${RUSTUP_TOOLCHAIN:-stable}" cargo 2>/dev/null || true)"
+          if [ -z "$CARGO_BIN" ] && command -v cargo >/dev/null 2>&1; then
+            CARGO_BIN="$(command -v cargo)"
+          fi
+          CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
           if [ -f "$ROOT_DIR/Makefile" ]; then
             make build
             make stop >/dev/null 2>&1 || true
             if [ -f "$ROOT_DIR/scripts/test-isolation.sh" ] && [ -d "$ROOT_DIR/application" ]; then
               bash "$ROOT_DIR/scripts/test-isolation.sh" --skip-build
             else
-              sudo cargo test -p outcalld --test bridge_integration -- --test-threads=1 --nocapture
+              sudo env \
+                PATH="$CARGO_BIN_DIR:$PATH" \
+                RUSTC="$CARGO_BIN_DIR/rustc" \
+                "$CARGO_BIN" test -p outcalld --test bridge_integration -- --test-threads=1 --nocapture
             fi
           else
-            sudo cargo test -p outcalld --test bridge_integration -- --test-threads=1 --nocapture
+            sudo env \
+              PATH="$CARGO_BIN_DIR:$PATH" \
+              RUSTC="$CARGO_BIN_DIR/rustc" \
+              "$CARGO_BIN" test -p outcalld --test bridge_integration -- --test-threads=1 --nocapture
           fi
 
       - name: Verify preflight hard-fails when netfilter is disabled
