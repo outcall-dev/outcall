@@ -1153,10 +1153,18 @@ fn wait_for_daemon_socket(socket: &str) -> Result<()> {
     use std::time::Duration;
 
     let mut last_error = None;
-    for _ in 0..50 {
+    for _ in 0..300 {
         match UnixStream::connect(socket) {
             Ok(_) => return Ok(()),
             Err(err) => {
+                if let Some(state) = daemon_container_state(DEFAULT_DAEMON_NAME)? {
+                    if state != "running" {
+                        let logs = daemon_container_logs(DEFAULT_DAEMON_NAME)?;
+                        anyhow::bail!(
+                            "outcalld container is not running (state: {state}) while waiting for {socket}\n{logs}"
+                        );
+                    }
+                }
                 last_error = Some(err);
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -1166,7 +1174,47 @@ fn wait_for_daemon_socket(socket: &str) -> Result<()> {
     let last_error = last_error
         .map(|err| err.to_string())
         .unwrap_or_else(|| "unknown error".to_string());
-    anyhow::bail!("cannot connect to outcalld at {socket} after startup wait: {last_error}");
+    let logs = daemon_container_logs(DEFAULT_DAEMON_NAME).unwrap_or_default();
+    anyhow::bail!(
+        "cannot connect to outcalld at {socket} after startup wait: {last_error}\n{logs}"
+    );
+}
+
+fn daemon_container_state(name: &str) -> Result<Option<String>> {
+    use std::process::Command;
+
+    let output = Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Status}}", name])
+        .output()
+        .context("failed to inspect daemon container state")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ))
+}
+
+fn daemon_container_logs(name: &str) -> Result<String> {
+    use std::process::Command;
+
+    let output = Command::new("docker")
+        .args(["logs", "--tail", "200", name])
+        .output()
+        .context("failed to fetch daemon container logs")?;
+    if !output.status.success() {
+        return Ok(String::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let combined = match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => stdout,
+        (true, false) => stderr,
+        (false, false) => format!("{stdout}\n{stderr}"),
+    };
+    Ok(combined)
 }
 
 fn ensure_default_network(socket: &str) -> Result<()> {
