@@ -30,9 +30,13 @@ use outcall_api::{
 fn read_http_body(sock: &mut UnixStream) -> String {
     let mut buf = String::new();
     let _ = sock.read_to_string(&mut buf);
-    buf.split_once("\r\n\r\n")
-        .map(|(_, body)| body.to_string())
-        .unwrap_or_default()
+    if let Some((_, body)) = buf.split_once("\r\n\r\n") {
+        return body.to_string();
+    }
+    if let Some((_, body)) = buf.split_once("\n\n") {
+        return body.to_string();
+    }
+    buf
 }
 
 /// Parse a JSON `ApiResponse<T>` from a raw HTTP response body.
