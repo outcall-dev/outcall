@@ -717,8 +717,13 @@ fn cmd_recipe_alias(socket: &str, recipe: &str, args: RecipeLaunchArgs) -> Resul
     )
 }
 
-fn cmd_start(socket: &str, recipe: Option<&str>, args: RecipeLaunchArgs) -> Result<()> {
+fn cmd_start(socket: &str, recipe: Option<&str>, mut args: RecipeLaunchArgs) -> Result<()> {
     let recipe = match recipe {
+        Some(id) if outcall::recipes::get_recipe(id).is_some() => id,
+        Some(id) if id.starts_with('-') => {
+            args.args.insert(0, id.to_string());
+            detect_default_recipe()?.id
+        }
         Some(id) => id,
         None => detect_default_recipe()?.id,
     };
@@ -762,8 +767,9 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
     println!();
     println!("Suggested next steps:");
     println!("  outcall doctor");
-    println!("  outcall recipe list");
-    println!("  outcall claude         # or: outcall codex");
+    println!("  outcall start");
+    println!("  outcall claude         # fallback if auto-detect is ambiguous");
+    println!("  outcall codex");
     Ok(())
 }
 
@@ -807,7 +813,12 @@ fn cmd_doctor(recipe: Option<&str>) -> Result<()> {
         } else {
             "not initialized"
         };
-        println!("  {:<12} {}", recipe.id, status);
+        let auth_status = if recipe_has_auth_candidate(recipe) {
+            "auth candidate found"
+        } else {
+            "no auth candidate"
+        };
+        println!("  {:<12} {:<16} {}", recipe.id, status, auth_status);
     }
 
     println!();
@@ -819,6 +830,9 @@ fn cmd_doctor(recipe: Option<&str>) -> Result<()> {
         println!();
         return cmd_recipe_doctor(id);
     }
+
+    println!();
+    print_first_run_recommendation();
 
     Ok(())
 }
@@ -936,6 +950,10 @@ fn recipe_has_user_auth_paths(recipe: &outcall::recipes::Recipe) -> bool {
         .any(|path| path.exists())
 }
 
+fn recipe_has_auth_candidate(recipe: &outcall::recipes::Recipe) -> bool {
+    recipe_has_env_auth(recipe) || recipe_has_user_auth_paths(recipe)
+}
+
 fn recipe_has_env_auth(recipe: &outcall::recipes::Recipe) -> bool {
     recipe
         .auth_env
@@ -943,11 +961,15 @@ fn recipe_has_env_auth(recipe: &outcall::recipes::Recipe) -> bool {
         .any(|key| std::env::var_os(key).is_some())
 }
 
-fn detect_default_recipe() -> Result<&'static outcall::recipes::Recipe> {
-    let candidates = outcall::recipes::RECIPES
+fn detect_recipe_candidates() -> Vec<&'static outcall::recipes::Recipe> {
+    outcall::recipes::RECIPES
         .iter()
-        .filter(|recipe| recipe_has_env_auth(recipe) || recipe_has_user_auth_paths(recipe))
-        .collect::<Vec<_>>();
+        .filter(|recipe| recipe_has_auth_candidate(recipe))
+        .collect::<Vec<_>>()
+}
+
+fn detect_default_recipe() -> Result<&'static outcall::recipes::Recipe> {
+    let candidates = detect_recipe_candidates();
 
     match candidates.as_slice() {
         [recipe] => Ok(recipe),
@@ -964,6 +986,33 @@ fn detect_default_recipe() -> Result<&'static outcall::recipes::Recipe> {
             anyhow::bail!(
                 "found auth candidates for multiple agents ({ids}); choose one explicitly:\n  outcall claude\n  outcall codex"
             )
+        }
+    }
+}
+
+fn print_first_run_recommendation() {
+    match detect_recipe_candidates().as_slice() {
+        [recipe] => {
+            println!("Recommended first command:");
+            println!("  outcall start");
+            println!("  # detected {} auth/config on this host", recipe.name);
+        }
+        [] => {
+            println!("Recommended first command:");
+            println!("  outcall start          # after you export provider auth");
+            println!("  outcall claude         # choose Claude explicitly");
+            println!("  outcall codex          # choose Codex explicitly");
+        }
+        many => {
+            let ids = many
+                .iter()
+                .map(|recipe| recipe.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("Recommended first command:");
+            println!("  outcall claude");
+            println!("  outcall codex");
+            println!("  # multiple auth candidates detected: {ids}");
         }
     }
 }

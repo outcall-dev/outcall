@@ -38,6 +38,27 @@ fn outcall_in_dir_clean_env(dir: &std::path::Path, args: &[&str]) -> std::proces
         .expect("cargo run failed")
 }
 
+fn outcall_in_dir_with_env(
+    dir: &std::path::Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> std::process::Output {
+    let manifest = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+    let mut command = Command::new("cargo");
+    command
+        .args(["run", "-q", "--manifest-path", &manifest, "--"])
+        .args(args)
+        .current_dir(dir)
+        .env("HOME", dir)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("CODEX_ACCESS_TOKEN")
+        .env_remove("CODEX_API_KEY");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().expect("cargo run failed")
+}
+
 // ── Clap argument parsing ───────────────────────────────────────────────────
 
 #[test]
@@ -435,6 +456,26 @@ fn cli_top_level_start_without_detectable_auth_exits_usefully() {
 }
 
 #[test]
+fn cli_top_level_start_forwards_agent_args_without_treating_them_as_recipe() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_with_env(
+        temp.path(),
+        &["start", "--", "--version"],
+        &[("ANTHROPIC_API_KEY", "test-key")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unknown recipe \"--version\""),
+        "start should not treat forwarded args as a recipe: {stderr}"
+    );
+    assert!(
+        stdout.contains("Starting with recipe: claude"),
+        "start should auto-detect claude before forwarding args, got stdout: {stdout}"
+    );
+}
+
+#[test]
 fn cli_top_level_init_recipe_works_in_clean_project() {
     let temp = tempdir().expect("tempdir");
     let out = outcall_in_dir(temp.path(), &["init", "claude"]);
@@ -450,5 +491,39 @@ fn cli_top_level_init_recipe_works_in_clean_project() {
             .join(".outcall/recipes/claude/recipe.yaml")
             .exists(),
         "recipe init should create recipe manifest"
+    );
+}
+
+#[test]
+fn cli_top_level_init_without_recipe_points_to_start() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_clean_env(temp.path(), &["init"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "init should succeed: {stderr}");
+    assert!(
+        stdout.contains("outcall start"),
+        "init should recommend outcall start, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_top_level_doctor_recommends_start_for_single_detected_provider() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_with_env(
+        temp.path(),
+        &["doctor"],
+        &[("ANTHROPIC_API_KEY", "test-key")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "doctor should succeed: {stderr}");
+    assert!(
+        stdout.contains("auth candidate found"),
+        "doctor should report detected auth candidates, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Recommended first command:\n  outcall start"),
+        "doctor should recommend outcall start for a single provider, got: {stdout}"
     );
 }
