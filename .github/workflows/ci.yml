@@ -287,13 +287,15 @@ jobs:
 
       - name: Build daemon image for local preload
         run: |
+          set -eu
+          ROOT_DIR="$(git rev-parse --show-toplevel)"
           mkdir -p "$RUNNER_TEMP/outcall-ci-release"
-          docker build -f scripts/e2e/Dockerfile -t outcall-ci-daemon:local .
+          docker build -f "$ROOT_DIR/scripts/e2e/Dockerfile" -t outcall-ci-daemon:local "$ROOT_DIR"
           docker save outcall-ci-daemon:local | gzip > "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz"
 
       - name: Package local installer artifacts
         run: |
-          VERSION=$(cat VERSION)
+          VERSION="$(cat "$(git rev-parse --show-toplevel)/VERSION)"
           mkdir -p "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu"
           cp target/release/outcall target/release/outcalld target/release/outcall-agent \
             "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu/"
@@ -315,7 +317,7 @@ jobs:
 
       - name: Install from local release artifacts
         run: |
-          VERSION="$(cat VERSION)"
+          VERSION="$(cat "$(git rev-parse --show-toplevel)/VERSION)"
           export OUTCALL_VERSION="$VERSION"
           export OUTCALL_RELEASE_BASE_URL="file://$RUNNER_TEMP/outcall-ci-release"
           export OUTCALL_BIN_DIR="$RUNNER_TEMP/outcall-bin"
@@ -393,13 +395,15 @@ jobs:
 
       - name: Security integration (bridge state + leak checks)
         run: |
-          sudo bash scripts/test-bridge.sh
+          ROOT_DIR="$(git rev-parse --show-toplevel)"
+          sudo bash "$ROOT_DIR/scripts/test-bridge.sh"
 
       - name: Security integration (container isolation)
         run: |
+          ROOT_DIR="$(git rev-parse --show-toplevel)"
           make build
           make stop >/dev/null 2>&1 || true
-          bash scripts/test-isolation.sh --skip-build
+          bash "$ROOT_DIR/scripts/test-isolation.sh" --skip-build
 
       - name: Verify preflight hard-fails when netfilter is disabled
         run: |
