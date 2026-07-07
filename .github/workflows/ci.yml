@@ -200,6 +200,7 @@ jobs:
           export ANTHROPIC_API_KEY=dummy-smoke-key
           unset CODEX_ACCESS_TOKEN CODEX_API_KEY
           project_dir="$RUNNER_TEMP/outcall-smoke-project"
+          agent_name="$(basename "$project_dir")-1"
           rm -rf "$project_dir"
           mkdir -p "$project_dir"
           cd "$project_dir"
@@ -215,7 +216,7 @@ jobs:
             docker logs outcall-daemon || true
             echo "::endgroup::"
             echo "::group::agent logs"
-            docker logs claude-agent || true
+            docker logs "$agent_name" || true
             echo "::endgroup::"
             echo "::group::socket state"
             ls -la /tmp/outcall || true
@@ -227,7 +228,7 @@ jobs:
           fi
           test -f .outcall/recipes/claude/recipe.yaml
           test -f .outcall/agent.yaml
-          docker inspect claude-agent >/dev/null
+          docker inspect "$agent_name" >/dev/null
 
       - name: Smoke test one-command Codex start
         run: |
@@ -239,6 +240,7 @@ jobs:
           export CODEX_API_KEY=dummy-smoke-key
           unset ANTHROPIC_API_KEY CODEX_ACCESS_TOKEN
           project_dir="$RUNNER_TEMP/outcall-smoke-project-codex"
+          agent_name="$(basename "$project_dir")-1"
           rm -rf "$project_dir"
           mkdir -p "$project_dir"
           cd "$project_dir"
@@ -254,7 +256,7 @@ jobs:
             docker logs outcall-daemon || true
             echo "::endgroup::"
             echo "::group::agent logs"
-            docker logs codex-agent || true
+            docker logs "$agent_name" || true
             echo "::endgroup::"
             echo "::group::socket state"
             ls -la /tmp/outcall || true
@@ -266,7 +268,7 @@ jobs:
           fi
           test -f .outcall/recipes/codex/recipe.yaml
           test -f .outcall/agent.yaml
-          docker inspect codex-agent >/dev/null
+          docker inspect "$agent_name" >/dev/null
 
   secure-install-runtime:
     name: secure install + runtime + security validation
@@ -362,6 +364,7 @@ jobs:
           export PATH="$RUNNER_TEMP/outcall-bin:$PATH"
           PROJECT_DIR="$RUNNER_TEMP/outcall-smoke-claude"
           HOME_DIR="$RUNNER_TEMP/outcall-smoke-home-claude"
+          AGENT_NAME="$(basename "$PROJECT_DIR")-1"
           rm -rf "$PROJECT_DIR" "$HOME_DIR"
           mkdir -p "$PROJECT_DIR" "$HOME_DIR"
           export HOME="$HOME_DIR"
@@ -381,13 +384,13 @@ jobs:
             docker logs outcall-daemon --tail 120 || true
             echo "::endgroup::"
             echo "::group::agent logs"
-            docker logs claude-agent --tail 120 || true
+            docker logs "$AGENT_NAME" --tail 120 || true
             echo "::endgroup::"
             exit "$status"
           fi
           test -f .outcall/recipes/claude/recipe.yaml
           test -f .outcall/agent.yaml
-          docker inspect claude-agent >/dev/null
+          docker inspect "$AGENT_NAME" >/dev/null
 
       - name: Usage smoke (Codex)
         run: |
@@ -395,6 +398,7 @@ jobs:
           export PATH="$RUNNER_TEMP/outcall-bin:$PATH"
           PROJECT_DIR="$RUNNER_TEMP/outcall-smoke-codex"
           HOME_DIR="$RUNNER_TEMP/outcall-smoke-home-codex"
+          AGENT_NAME="$(basename "$PROJECT_DIR")-1"
           rm -rf "$PROJECT_DIR" "$HOME_DIR"
           mkdir -p "$PROJECT_DIR" "$HOME_DIR"
           export HOME="$HOME_DIR"
@@ -414,13 +418,13 @@ jobs:
             docker logs outcall-daemon --tail 120 || true
             echo "::endgroup::"
             echo "::group::agent logs"
-            docker logs codex-agent --tail 120 || true
+            docker logs "$AGENT_NAME" --tail 120 || true
             echo "::endgroup::"
             exit "$status"
           fi
           test -f .outcall/recipes/codex/recipe.yaml
           test -f .outcall/agent.yaml
-          docker inspect codex-agent >/dev/null
+          docker inspect "$AGENT_NAME" >/dev/null
 
       - name: Security integration (bridge state + leak checks)
         run: |
