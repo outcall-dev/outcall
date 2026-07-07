@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Agent configuration from `.outcall/agent.yaml`
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -12,7 +13,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub image: Option<String>,
 
-    /// Agent name override (default: <folder>-agent)
+    /// Agent name override (default: <folder>-1, <folder>-2, ...)
     #[serde(default)]
     pub name: Option<String>,
 
@@ -122,8 +123,8 @@ impl AgentConfig {
 # Docker image to use (default: outcall/agent:latest)
 # image: my-custom-agent:latest
 
-# Agent name (default: <folder-name>-agent)
-# name: my-project-agent
+# Agent name (default: <folder-name>-1, <folder-name>-2, ...)
+# name: my-project-1
 
 # Additional volume mounts
 # volumes:
@@ -198,13 +199,79 @@ impl AgentConfig {
 
     /// Get the effective name for a given project directory
     pub fn effective_name(&self, project_dir: &Path) -> String {
-        self.name.clone().unwrap_or_else(|| {
-            let folder_name = project_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown");
-            format!("{}-agent", folder_name)
-        })
+        self.name
+            .clone()
+            .unwrap_or_else(|| next_project_container_name(project_dir))
+    }
+}
+
+fn next_project_container_name(project_dir: &Path) -> String {
+    let base = sanitized_project_name(project_dir);
+
+    let output = Command::new("docker")
+        .args(["ps", "-a", "--format", "{{.Names}}"])
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return next_project_container_name_from_existing(&base, stdout.lines());
+        }
+    }
+
+    format!("{base}-1")
+}
+
+fn next_project_container_name_from_existing<'a>(
+    base: &str,
+    existing: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let prefix = format!("{base}-");
+    let mut used = std::collections::BTreeSet::new();
+    for line in existing {
+        if let Some(rest) = line.strip_prefix(&prefix) {
+            if let Ok(index) = rest.parse::<u32>() {
+                used.insert(index);
+            }
+        }
+    }
+
+    let mut index = 1u32;
+    while used.contains(&index) {
+        index += 1;
+    }
+    format!("{base}-{index}")
+}
+
+fn sanitized_project_name(project_dir: &Path) -> String {
+    let raw = project_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+
+    let mut name = String::with_capacity(raw.len());
+    let mut last_was_sep = false;
+    for ch in raw.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            last_was_sep = false;
+            ch.to_ascii_lowercase()
+        } else if matches!(ch, '-' | '_' | '.') {
+            last_was_sep = false;
+            ch
+        } else if !last_was_sep {
+            last_was_sep = true;
+            '-'
+        } else {
+            continue;
+        };
+        name.push(mapped);
+    }
+
+    let trimmed = name.trim_matches(|c| matches!(c, '-' | '_' | '.'));
+    if trimmed.is_empty() {
+        "project".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -216,4 +283,39 @@ pub struct AgentCliFlags {
     pub network: Option<String>,
     pub workspace: Option<String>,
     pub detach: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_name_prefers_explicit_override() {
+        let config = AgentConfig {
+            name: Some("custom-name".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.effective_name(Path::new("/tmp/Example Project")),
+            "custom-name"
+        );
+    }
+
+    #[test]
+    fn next_project_container_name_fills_first_gap() {
+        let next = next_project_container_name_from_existing(
+            "foobar",
+            ["foobar-1", "foobar-3", "other-1"].into_iter(),
+        );
+        assert_eq!(next, "foobar-2");
+    }
+
+    #[test]
+    fn sanitized_project_name_normalizes_folder_name() {
+        assert_eq!(
+            sanitized_project_name(Path::new("/tmp/Foo bar.app")),
+            "foo-bar.app"
+        );
+        assert_eq!(sanitized_project_name(Path::new("/tmp/---")), "project");
+    }
 }

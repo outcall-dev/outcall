@@ -26,7 +26,9 @@ Five Cargo crates:
 cargo build --workspace
 ```
 
-Linux only. macOS will build the workspace (cross-platform types compile) but `outcalld` requires Linux for nftables and bridge management.
+Linux is still required for the actual daemon runtime, but macOS works for the
+first-run Claude/Codex recipe flow by running `outcalld` inside Docker Desktop's
+Linux VM.
 
 ## Fast install
 
@@ -102,7 +104,15 @@ outcall setup codex
 ```
 
 Recipes do not mount your whole home directory. By default they copy only the
-selected provider auth/config paths into `.outcall/auth/<id>/home`.
+selected provider auth/config paths into `.outcall/auth/<id>/home`. On macOS,
+Claude auto-auth prefers mounting the selected `~/.claude` paths instead of
+copying them because session-backed login state is often not portable into a
+separate Linux home directory. For unattended Claude runs, prefer
+`ANTHROPIC_API_KEY`; mounted login state may still require interactive `/login`.
+
+Each project scaffold also includes `.outcall/host-resources.yaml` as the
+explicit registry for host tools, host file roots, and auth/session handoff
+notes that sit outside `/workspace`.
 
 ## Running `outcalld`
 

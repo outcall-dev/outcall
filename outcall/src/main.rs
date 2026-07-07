@@ -14,6 +14,7 @@ use outcall_api::{
     RejectRuleRequest, RejectRuleResult,
 };
 use serde::Deserialize;
+use std::io::IsTerminal;
 
 #[derive(Parser)]
 #[command(
@@ -77,7 +78,7 @@ enum Commands {
     },
     /// Boot an AI agent for the current project
     Agent {
-        /// Custom agent name (default: <folder>-agent)
+        /// Custom agent name (default: <folder>-1, <folder>-2, ...)
         #[arg(short, long)]
         name: Option<String>,
         /// Custom Docker image
@@ -976,22 +977,9 @@ fn cmd_setup_inner(
     println!();
     cmd_recipe_doctor(recipe.id)?;
 
-    if let Some(message) = linux_runtime_requirement_message() {
+    if let Some(message) = containerized_runtime_note() {
         println!();
-        if print_next {
-            println!("{message}");
-            println!();
-            println!("Next:");
-            println!("  move to a Linux host or VM");
-            println!("  rerun `outcall` there");
-            println!(
-                "  outcall doctor {}   # inspect auth and project context again",
-                recipe.id
-            );
-            return Ok(());
-        }
-        let _ = std::io::stdout().flush();
-        anyhow::bail!("{message}");
+        println!("{message}");
     }
 
     println!();
@@ -1048,7 +1036,7 @@ fn auth_hint(env_auth: bool, file_auth: bool) -> RecipeAuthHint {
 }
 
 fn recommended_recipe_command(recipe: &outcall::recipes::Recipe) -> String {
-    recommended_recipe_command_with_hint(recipe, RecipeAuthHint::Copy)
+    recommended_recipe_command_with_hint(recipe, default_auth_hint_for_recipe(recipe))
 }
 
 fn recommended_recipe_command_with_hint(
@@ -1058,6 +1046,14 @@ fn recommended_recipe_command_with_hint(
     match hint {
         RecipeAuthHint::EnvOnly => format!("outcall {} --auth env-only", recipe.id),
         RecipeAuthHint::Copy | RecipeAuthHint::None => format!("outcall {}", recipe.id),
+    }
+}
+
+fn default_auth_hint_for_recipe(recipe: &outcall::recipes::Recipe) -> RecipeAuthHint {
+    if should_prefer_env_only_auth(recipe) {
+        RecipeAuthHint::EnvOnly
+    } else {
+        RecipeAuthHint::Copy
     }
 }
 
@@ -1362,6 +1358,7 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
             .join("rules")
             .join(format!("{}.yaml", recipe.id)),
         project_dir.join(".outcall").join("agent.yaml"),
+        project_dir.join(".outcall").join("host-resources.yaml"),
     ];
     for path in generated {
         doctor_path("generated file", &path);
@@ -1384,6 +1381,10 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
     }
     if !env_auth && !file_auth {
         println!("  WARN no auth candidates found; choose env, copy, or mount before running");
+    } else if should_prefer_env_only_auth(recipe) && !env_auth {
+        println!(
+            "  WARN macOS Claude unattended mode is most reliable with ANTHROPIC_API_KEY; mounted login state may still require interactive /login"
+        );
     }
 
     println!();
@@ -1414,6 +1415,10 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
     println!(
         "  Copy or mount only selected auth/config paths; do not mount the whole home directory."
     );
+    let host_resources = project_dir.join(".outcall").join("host-resources.yaml");
+    if host_resources.exists() {
+        println!("  Host resource registry: {}", host_resources.display());
+    }
     println!();
     println!("Recommended first command:");
     println!(
@@ -1435,8 +1440,6 @@ fn cmd_recipe_run(
     let recipe = recipe_or_bail(id)?;
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
     ensure_recipe_initialized(&project_dir, recipe)?;
-    ensure_linux_runtime_host()?;
-    ensure_bridge_netfilter_enforceable()?;
     ensure_docker_access()?;
 
     let image = outcall::recipes::recipe_image_name(recipe);
@@ -1453,13 +1456,14 @@ fn cmd_recipe_run(
         &mut config,
     )?;
 
-    ensure_recipe_runtime_ready(socket)?;
+    ensure_recipe_runtime_ready(socket, &project_dir)?;
+    ensure_runtime_bridge_netfilter_enforceable()?;
 
     println!(
         "Starting recipe \"{}\" with auth mode {:?}.",
         recipe.id, auth_result.effective_mode
     );
-    outcall::agent_boot::boot_agent_with_config(&project_dir, config, args)
+    launch_managed_recipe_container(socket, &project_dir, config, args)
 }
 
 fn cmd_recipe_test(
@@ -1472,8 +1476,6 @@ fn cmd_recipe_test(
     let recipe = recipe_or_bail(id)?;
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
     ensure_recipe_initialized(&project_dir, recipe)?;
-    ensure_linux_runtime_host()?;
-    ensure_bridge_netfilter_enforceable()?;
     ensure_docker_access()?;
 
     let image = outcall::recipes::recipe_image_name(recipe);
@@ -1489,7 +1491,8 @@ fn cmd_recipe_test(
         force_auth_copy,
         &mut config,
     )?;
-    ensure_recipe_runtime_ready(socket)?;
+    ensure_recipe_runtime_ready(socket, &project_dir)?;
+    ensure_runtime_bridge_netfilter_enforceable()?;
 
     if !auth_result.found_auth {
         anyhow::bail!(
@@ -1509,14 +1512,21 @@ fn recipe_agent_config(
     image: &str,
     detach: bool,
 ) -> outcall::agent_config::AgentConfig {
+    let mut env = std::collections::HashMap::new();
+    let proxy = format!("http://{}:8080", outcall_api::DEFAULT_GATEWAY);
+    env.insert("HOME".to_string(), "/home/node".to_string());
+    env.insert("HTTP_PROXY".to_string(), proxy.clone());
+    env.insert("HTTPS_PROXY".to_string(), proxy);
+    env.insert("NO_PROXY".to_string(), "localhost,127.0.0.1".to_string());
+
     outcall::agent_config::AgentConfig {
         image: Some(image.to_string()),
-        name: Some(format!("{}-agent", recipe.id)),
         workspace: "/workspace".to_string(),
         network: outcall_api::DEFAULT_NETWORK_NAME.to_string(),
         detach,
         auto_pull: false,
         entrypoint: Some(vec![recipe.id.to_string()]),
+        env,
         ..Default::default()
     }
 }
@@ -1537,6 +1547,7 @@ fn stage_recipe_auth(
     }
 
     let effective_mode = match auth_mode {
+        RecipeAuthMode::Auto if should_prefer_auth_mount(recipe) => RecipeAuthMode::Mount,
         RecipeAuthMode::Auto if recipe_has_user_auth_paths(recipe) => RecipeAuthMode::Copy,
         RecipeAuthMode::Auto => RecipeAuthMode::EnvOnly,
         mode => mode,
@@ -1572,16 +1583,27 @@ fn stage_recipe_auth(
             }
         }
         RecipeAuthMode::Mount => {
-            let mounts = outcall::recipes::auth_mounts_from_user_paths(recipe);
-            if mounts.is_empty() {
+            let preserve_home_layout = should_preserve_host_home_layout(recipe);
+            let mount_plan = outcall::recipes::auth_mount_plan(recipe, preserve_home_layout);
+            if mount_plan.mounts.is_empty() {
                 println!(
                     "No existing user auth paths found to mount for recipe \"{}\".",
                     recipe.id
                 );
             } else {
                 found_auth = true;
+                if let Some(home) = mount_plan.home_override {
+                    config.env.insert("HOME".to_string(), home.clone());
+                    if let Some(user) = std::path::Path::new(&home)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                    {
+                        config.env.insert("USER".to_string(), user.to_string());
+                        config.env.insert("LOGNAME".to_string(), user.to_string());
+                    }
+                }
             }
-            config.volumes.extend(mounts);
+            config.volumes.extend(mount_plan.mounts);
         }
         RecipeAuthMode::EnvOnly => {}
     }
@@ -1592,13 +1614,178 @@ fn stage_recipe_auth(
     })
 }
 
-fn ensure_recipe_runtime_ready(socket: &str) -> Result<()> {
-    ensure_daemon_ready(socket)?;
+fn ensure_recipe_runtime_ready(socket: &str, project_dir: &std::path::Path) -> Result<()> {
+    let rules_dir = project_dir.join(".outcall").join("rules");
+    ensure_daemon_ready(socket, Some(&rules_dir))?;
+    cmd_rules_reload(socket)?;
     ensure_default_network(socket)?;
     Ok(())
 }
 
-fn ensure_daemon_ready(socket: &str) -> Result<()> {
+fn launch_managed_recipe_container(
+    socket: &str,
+    project_dir: &std::path::Path,
+    config: outcall::agent_config::AgentConfig,
+    entrypoint_args: Vec<String>,
+) -> Result<()> {
+    let image = config.effective_image();
+    let name = config.effective_name(project_dir);
+    let workspace = config.workspace.clone();
+    let abs_project_dir = std::fs::canonicalize(project_dir)
+        .with_context(|| format!("failed to canonicalize {}", project_dir.display()))?;
+    let memory_limit = config
+        .resources
+        .as_ref()
+        .and_then(|resources| resources.memory.as_deref())
+        .map(parse_memory_arg)
+        .transpose()?;
+    let cpu_shares = config
+        .resources
+        .as_ref()
+        .and_then(|resources| resources.cpus.as_deref())
+        .map(parse_cpu_shares)
+        .transpose()?;
+
+    let mut volumes = vec![format!("{}:{}", abs_project_dir.display(), workspace)];
+    volumes.extend(config.volumes.clone());
+
+    let env = if config.env.is_empty() {
+        None
+    } else {
+        Some(
+            config
+                .env
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect(),
+        )
+    };
+
+    let interactive = !config.detach && entrypoint_args.is_empty() && config.command.is_none();
+    let tty = interactive && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let cmd = if !entrypoint_args.is_empty() {
+        Some(entrypoint_args)
+    } else {
+        config.command.clone()
+    };
+
+    let req = outcall_api::ContainerCreateRequest {
+        image,
+        network: Some(config.network.clone()),
+        name: Some(name.clone()),
+        memory_limit,
+        cpu_shares,
+        env,
+        cmd,
+        entrypoint: config.entrypoint.clone(),
+        working_dir: Some(config.workspace.clone()),
+        volumes: Some(volumes),
+        include_outcall_helper_mounts: Some(false),
+        interactive: Some(interactive),
+        tty: Some(tty),
+    };
+
+    println!(
+        "Booting managed agent '{}' for project '{}'...",
+        name,
+        project_dir.display()
+    );
+    println!("  Image: {}", req.image);
+    println!(
+        "  Workspace: {} -> {}",
+        abs_project_dir.display(),
+        workspace
+    );
+    println!("  Network: {}", config.network);
+    println!("  Starting container via outcalld...");
+
+    let body = match http_post_json(socket, "/api/v1/container/create", &req) {
+        Ok(body) => body,
+        Err(err) if should_retry_legacy_container_create(&err) => {
+            println!(
+                "  Daemon is using the legacy container API; retrying with compatible fields..."
+            );
+            let legacy_req = outcall_api::ContainerCreateRequest {
+                entrypoint: None,
+                working_dir: None,
+                include_outcall_helper_mounts: None,
+                interactive: None,
+                tty: None,
+                ..req.clone()
+            };
+            http_post_json(socket, "/api/v1/container/create", &legacy_req)?
+        }
+        Err(err) => return Err(err),
+    };
+    let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
+    if !resp.success {
+        anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
+    }
+
+    let result: ContainerCreateResult = serde_json::from_value(resp.data.context("no data")?)?;
+
+    if config.detach {
+        println!(
+            "Agent '{}' started ({}) in detached mode.",
+            result.name,
+            &result.container_id[..12.min(result.container_id.len())]
+        );
+        println!("  Attach: docker attach {}", result.name);
+        println!("  Logs:   docker logs -f {}", result.name);
+        println!("  Stop:   outcall agent --stop {}", result.name);
+        return Ok(());
+    }
+
+    println!("  Container running. Press Ctrl+C to detach.");
+    println!();
+
+    let status = std::process::Command::new("docker")
+        .args(["attach", &result.name])
+        .status()
+        .context("failed to invoke docker attach")?;
+    if !status.success() {
+        anyhow::bail!("agent exited with code {:?}", status.code());
+    }
+
+    println!("\nAgent '{}' stopped.", result.name);
+    Ok(())
+}
+
+fn parse_cpu_shares(value: &str) -> Result<i64> {
+    value
+        .parse::<i64>()
+        .with_context(|| format!("invalid cpu shares value: {value}"))
+}
+
+fn should_prefer_auth_mount(recipe: &outcall::recipes::Recipe) -> bool {
+    cfg!(target_os = "macos") && recipe.id == "claude" && recipe_has_user_auth_paths(recipe)
+}
+
+fn should_preserve_host_home_layout(recipe: &outcall::recipes::Recipe) -> bool {
+    cfg!(target_os = "macos") && recipe.id == "claude"
+}
+
+fn should_prefer_env_only_auth(recipe: &outcall::recipes::Recipe) -> bool {
+    cfg!(target_os = "macos") && recipe.id == "claude"
+}
+
+fn should_retry_legacy_container_create(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("unknown field `entrypoint`")
+        || msg.contains("unknown field `working_dir`")
+        || msg.contains("unknown field `interactive`")
+        || msg.contains("unknown field `tty`")
+}
+
+fn ensure_daemon_ready(socket: &str, rules_dir: Option<&std::path::Path>) -> Result<()> {
+    let desired_rules_dir = rules_dir
+        .map(std::fs::canonicalize)
+        .transpose()
+        .with_context(|| {
+            rules_dir
+                .map(|path| format!("failed to canonicalize rules dir {}", path.display()))
+                .unwrap_or_else(|| "failed to canonicalize rules dir".to_string())
+        })?;
     let output = std::process::Command::new("docker")
         .args([
             "inspect",
@@ -1613,33 +1800,104 @@ fn ensure_daemon_ready(socket: &str) -> Result<()> {
             if output.status.success()
                 && String::from_utf8_lossy(&output.stdout).trim() == "true" =>
         {
+            if let Some(ref desired) = desired_rules_dir {
+                if daemon_rules_mount_mismatch(DEFAULT_DAEMON_NAME, desired)? {
+                    println!(
+                        "Restarting outcall-daemon to mount project rules from {}...",
+                        desired.display()
+                    );
+                    cmd_daemon_stop(None)?;
+                    start_daemon_with_rules(socket, desired)?;
+                }
+            }
             wait_for_daemon_socket(socket)
         }
         _ => {
             println!("Starting outcall-daemon...");
-            let agent_socket = std::path::Path::new(socket)
-                .parent()
-                .map(|parent| parent.join("agent.sock"))
-                .and_then(|path| path.into_os_string().into_string().ok());
-            cmd_daemon_start(
-                None,
-                None,
-                None,
-                None,
-                Some(socket.to_string()),
-                agent_socket,
-                false,
-                None,
-            )?;
+            if let Some(ref desired) = desired_rules_dir {
+                start_daemon_with_rules(socket, desired)?;
+            } else {
+                start_daemon_with_rules(socket, std::path::Path::new("/etc/outcall/rules.d"))?;
+            }
             wait_for_daemon_socket(socket)
         }
     }
 }
 
+fn start_daemon_with_rules(socket: &str, rules_dir: &std::path::Path) -> Result<()> {
+    let agent_socket = std::path::Path::new(socket)
+        .parent()
+        .map(|parent| parent.join("agent.sock"))
+        .and_then(|path| path.into_os_string().into_string().ok());
+    cmd_daemon_start(
+        None,
+        None,
+        Some(rules_dir.display().to_string()),
+        None,
+        Some(socket.to_string()),
+        agent_socket,
+        false,
+        None,
+    )
+}
+
+fn daemon_rules_mount_mismatch(name: &str, desired_rules_dir: &std::path::Path) -> Result<bool> {
+    let output = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{range .Mounts}}{{if eq .Destination \"/etc/outcall/rules.d\"}}{{.Source}}{{end}}{{end}}",
+            name,
+        ])
+        .output()
+        .context("failed to inspect daemon rules mount")?;
+    if !output.status.success() {
+        return Ok(true);
+    }
+
+    let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if actual.is_empty() {
+        return Ok(true);
+    }
+
+    let actual = std::path::PathBuf::from(actual);
+    let actual = std::fs::canonicalize(&actual).unwrap_or(actual);
+    Ok(actual != desired_rules_dir)
+}
+
 fn wait_for_daemon_socket(socket: &str) -> Result<()> {
-    use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
+    if daemon_requests_via_exec() {
+        let mut last_error = None;
+        for _ in 0..300 {
+            match daemon_exec_socket_ready(socket) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    if let Some(state) = daemon_container_state(DEFAULT_DAEMON_NAME)? {
+                        if state != "running" {
+                            let logs = daemon_container_logs(DEFAULT_DAEMON_NAME)?;
+                            anyhow::bail!(
+                                "outcalld container is not running (state: {state}) while waiting for {socket}\n{logs}"
+                            );
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(err) => {
+                    last_error = Some(err.to_string());
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+        let last_error = last_error.unwrap_or_else(|| "unknown error".to_string());
+        let logs = daemon_container_logs(DEFAULT_DAEMON_NAME).unwrap_or_default();
+        anyhow::bail!(
+            "cannot reach outcalld inside daemon container after startup wait: {last_error}\n{logs}"
+        );
+    }
+
+    use std::os::unix::net::UnixStream;
     let mut last_error = None;
     for _ in 0..300 {
         match UnixStream::connect(socket) {
@@ -1815,24 +2073,15 @@ fn ensure_docker_access() -> Result<()> {
     );
 }
 
-fn linux_runtime_requirement_message() -> Option<String> {
-    let os = std::env::consts::OS;
-    if os == "linux" {
+fn containerized_runtime_note() -> Option<String> {
+    if std::env::consts::OS == "linux" {
         return None;
     }
 
     Some(format!(
-        "Outcall runtime launch requires a Linux host. Detected {os}.\n\
-         The project scaffold and auth hints are ready, but `outcalld` only runs on Linux.\n\
-         Use a Linux host or VM, then rerun `outcall`."
+        "Detected {}. Outcall will use Docker's Linux runtime for the daemon and agent containers.",
+        std::env::consts::OS
     ))
-}
-
-fn ensure_linux_runtime_host() -> Result<()> {
-    if let Some(message) = linux_runtime_requirement_message() {
-        anyhow::bail!(message);
-    }
-    Ok(())
 }
 
 fn ensure_bridge_netfilter_enforceable() -> Result<()> {
@@ -1852,6 +2101,27 @@ fn ensure_bridge_netfilter_enforceable() -> Result<()> {
         )
     }
 
+    Ok(())
+}
+
+fn ensure_runtime_bridge_netfilter_enforceable() -> Result<()> {
+    if std::env::consts::OS == "linux" {
+        return ensure_bridge_netfilter_enforceable();
+    }
+
+    let iptables = daemon_exec_output(["cat", "/proc/sys/net/bridge/bridge-nf-call-iptables"])?;
+    let ip6tables = daemon_exec_output(["cat", "/proc/sys/net/bridge/bridge-nf-call-ip6tables"])?;
+    let iptables = iptables.trim();
+    let ip6tables = ip6tables.trim();
+    if iptables != "1" || ip6tables != "1" {
+        anyhow::bail!(
+            "Secure unattended mode requires bridge netfilter enforcement inside the Linux runtime.\n\
+             Current values are:\n\
+             - /proc/sys/net/bridge/bridge-nf-call-iptables = {iptables}\n\
+             - /proc/sys/net/bridge/bridge-nf-call-ip6tables = {ip6tables}\n\
+             Enable `br_netfilter` and set both sysctls to `1` in the Docker Linux runtime."
+        );
+    }
     Ok(())
 }
 
@@ -2584,7 +2854,12 @@ fn cmd_container_create(
         cpu_shares,
         env: None,
         cmd: None,
+        entrypoint: None,
+        working_dir: None,
         volumes: None,
+        include_outcall_helper_mounts: None,
+        interactive: None,
+        tty: None,
     };
 
     let body = http_post_json(socket, "/api/v1/container/create", &req)?;
@@ -2721,12 +2996,18 @@ struct Response {
 }
 
 fn http_get(socket: &str, path: &str) -> Result<String> {
+    if daemon_requests_via_exec() {
+        return daemon_http_request_via_exec("GET", socket, path, None);
+    }
     let mut stream = connect(socket)?;
     write!(stream, "GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n")?;
     read_body(&mut stream)
 }
 
 fn http_post(socket: &str, path: &str) -> Result<String> {
+    if daemon_requests_via_exec() {
+        return daemon_http_request_via_exec("POST", socket, path, Some(String::new()));
+    }
     let mut stream = connect(socket)?;
     write!(
         stream,
@@ -2737,6 +3018,9 @@ fn http_post(socket: &str, path: &str) -> Result<String> {
 
 fn http_post_json<T: serde::Serialize>(socket: &str, path: &str, body: &T) -> Result<String> {
     let json = serde_json::to_string(body)?;
+    if daemon_requests_via_exec() {
+        return daemon_http_request_via_exec("POST", socket, path, Some(json));
+    }
     let mut stream = connect(socket)?;
     write!(
         stream,
@@ -2749,6 +3033,100 @@ fn http_post_json<T: serde::Serialize>(socket: &str, path: &str, body: &T) -> Re
 fn connect(socket: &str) -> Result<UnixStream> {
     UnixStream::connect(socket)
         .with_context(|| format!("cannot connect to outcalld at {socket} — is it running?"))
+}
+
+fn daemon_requests_via_exec() -> bool {
+    std::env::consts::OS == "macos"
+}
+
+fn daemon_exec_output<const N: usize>(args: [&str; N]) -> Result<String> {
+    let output = std::process::Command::new("docker")
+        .arg("exec")
+        .arg(DEFAULT_DAEMON_NAME)
+        .args(args)
+        .output()
+        .context("failed to invoke docker exec against outcall-daemon")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        anyhow::bail!(
+            "docker exec {} failed: {}",
+            DEFAULT_DAEMON_NAME,
+            if detail.is_empty() {
+                "unknown error"
+            } else {
+                detail.as_str()
+            }
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn daemon_exec_socket_ready(socket: &str) -> Result<bool> {
+    let output = std::process::Command::new("docker")
+        .args(["exec", DEFAULT_DAEMON_NAME, "test", "-S", socket])
+        .output()
+        .context("failed to probe daemon socket via docker exec")?;
+    Ok(output.status.success())
+}
+
+fn daemon_http_request_via_exec(
+    method: &str,
+    socket: &str,
+    path: &str,
+    body: Option<String>,
+) -> Result<String> {
+    let mut args = vec![
+        "exec".to_string(),
+        DEFAULT_DAEMON_NAME.to_string(),
+        "curl".to_string(),
+        "--silent".to_string(),
+        "--show-error".to_string(),
+        "--fail-with-body".to_string(),
+        "--unix-socket".to_string(),
+        socket.to_string(),
+        "-H".to_string(),
+        "Host: localhost".to_string(),
+        "-X".to_string(),
+        method.to_string(),
+    ];
+    if let Some(body) = body {
+        if !body.is_empty() {
+            args.push("-H".to_string());
+            args.push("Content-Type: application/json".to_string());
+            args.push("--data".to_string());
+            args.push(body);
+        } else {
+            args.push("-H".to_string());
+            args.push("Content-Length: 0".to_string());
+        }
+    }
+    args.push(format!("http://localhost{path}"));
+
+    let output = std::process::Command::new("docker")
+        .args(&args)
+        .output()
+        .context("failed to invoke docker exec curl against outcall-daemon")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => stdout,
+            (true, false) => stderr,
+            (false, false) => format!("{stdout}\n{stderr}"),
+        };
+        anyhow::bail!(
+            "daemon API request via docker exec failed: {}",
+            if detail.is_empty() {
+                "unknown error"
+            } else {
+                detail.as_str()
+            }
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn read_body(stream: &mut UnixStream) -> Result<String> {
@@ -3028,18 +3406,19 @@ fn cmd_daemon_start(
     // Idempotent: remove any prior container of the same name.
     let _ = Command::new("docker").args(["rm", "-f", &name]).output();
 
-    // Bind-mount the host socket directory so the daemon's unix sockets are
-    // reachable from the installed CLI and agent containers.
+    let use_container_local_sockets = daemon_requests_via_exec();
     let socket_dir = std::path::Path::new(&socket)
         .parent()
         .context("daemon socket path must have a parent directory")?;
-    if let Err(e) = std::fs::create_dir_all(socket_dir) {
-        // Non-fatal warning: on macOS the dir is created inside the Docker
-        // VM, not on macOS itself, and the host CLI talks via docker exec.
-        eprintln!(
-            "note: could not create {} on host ({e}); host CLI may need `docker exec {name}` to reach the socket",
-            socket_dir.display()
-        );
+    if !use_container_local_sockets {
+        // Bind-mount the host socket directory so the daemon's unix sockets are
+        // reachable from the installed CLI and agent containers.
+        std::fs::create_dir_all(socket_dir).with_context(|| {
+            format!(
+                "failed to create daemon socket directory {}",
+                socket_dir.display()
+            )
+        })?;
     }
 
     let mut args: Vec<String> = vec![
@@ -3056,8 +3435,6 @@ fn cmd_daemon_start(
         "-v".into(),
         "/var/run/docker.sock:/var/run/docker.sock".into(),
         "-v".into(),
-        format!("{}:{}", socket_dir.display(), socket_dir.display()),
-        "-v".into(),
         format!("{rules_dir}:/etc/outcall/rules.d:ro"),
         "--entrypoint".into(),
         "outcalld".into(),
@@ -3073,6 +3450,10 @@ fn cmd_daemon_start(
         "--bridge".into(),
         bridge.clone(),
     ];
+    if !use_container_local_sockets {
+        args.push("-v".into());
+        args.push(format!("{}:{}", socket_dir.display(), socket_dir.display()));
+    }
     if no_proxy {
         args.push("--no-proxy".into());
     }

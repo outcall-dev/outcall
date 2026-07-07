@@ -157,15 +157,20 @@ impl DockerManager {
             .clone()
             .unwrap_or_else(|| format!("outcall-{}", random_hex_suffix()));
 
-        // Outcall helper mounts — always added (agent socket + shim binary).
-        let agent_bind = format!(
-            "{}:{}:ro",
-            self.agent_socket_host_path, AGENT_SOCKET_CONTAINER_PATH
-        );
-        let shim_bind = format!("{}:{}:ro", self.shim_host_path, SHIM_CONTAINER_PATH);
+        // Outcall helper mounts are optional. Recipe runtimes like Codex and
+        // Claude do not need the agent socket or shim, and on macOS those
+        // helper bind sources are not host-visible unless explicitly staged.
+        let mut binds = Vec::new();
+        if req.include_outcall_helper_mounts.unwrap_or(true) {
+            let agent_bind = format!(
+                "{}:{}:ro",
+                self.agent_socket_host_path, AGENT_SOCKET_CONTAINER_PATH
+            );
+            let shim_bind = format!("{}:{}:ro", self.shim_host_path, SHIM_CONTAINER_PATH);
+            binds.extend([agent_bind, shim_bind]);
+        }
 
         // User-supplied mounts are appended after the helper mounts.
-        let mut binds = vec![agent_bind, shim_bind];
         if let Some(user_vols) = req.volumes {
             binds.extend(user_vols);
         }
@@ -195,11 +200,21 @@ impl DockerManager {
 
         let config = bollard::container::Config {
             image: Some(req.image.as_str()),
+            entrypoint: req
+                .entrypoint
+                .as_ref()
+                .map(|v| v.iter().map(String::as_str).collect()),
             cmd: req
                 .cmd
                 .as_ref()
                 .map(|v| v.iter().map(String::as_str).collect()),
             env: Some(env.iter().map(String::as_str).collect()),
+            working_dir: req.working_dir.as_deref(),
+            attach_stdin: Some(req.interactive.unwrap_or(false)),
+            open_stdin: Some(req.interactive.unwrap_or(false)),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            tty: Some(req.tty.unwrap_or(false)),
             labels: Some(
                 labels
                     .iter()

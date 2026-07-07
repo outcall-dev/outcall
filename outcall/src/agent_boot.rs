@@ -289,7 +289,7 @@ pub fn auto_detect_name() -> String {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
-    format!("{}-agent", folder_name)
+    format!("{}-1", folder_name.to_ascii_lowercase())
 }
 
 /// Ensure the daemon is running

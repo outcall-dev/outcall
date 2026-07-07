@@ -109,6 +109,15 @@ if [ "$os" = "Linux" ]; then
   echo "  outcall doctor claude"
   echo "  outcall doctor codex"
 else
-  echo "Note: the CLI is installed, but the daemon is Linux-only."
-  echo "Use a Linux host or VM to run isolated agent containers."
+  echo "Next:"
+  echo "  cd /path/to/your/project"
+  echo "  outcall"
+  echo "  outcall claude        # explicit Claude setup"
+  echo "  outcall codex         # explicit Codex setup"
+  echo
+  echo "On macOS, Outcall uses Docker Desktop's Linux runtime for the daemon and"
+  echo "agent containers."
+  echo
+  echo "For unattended Claude runs, prefer:"
+  echo "  export ANTHROPIC_API_KEY=..."
 fi
