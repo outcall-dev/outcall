@@ -209,6 +209,11 @@ enum Commands {
         #[command(subcommand)]
         action: RecipeAction,
     },
+    /// Run the host-native broker for explicit host tools/files
+    HostBroker {
+        #[command(subcommand)]
+        action: HostBrokerAction,
+    },
     /// Open the operator dashboard in a browser via a local TCP→unix-socket bridge
     Ui {
         /// TCP port to bind on 127.0.0.1 (default: 8080)
@@ -325,6 +330,22 @@ enum RequestsAction {
         /// Optional human-readable rejection reason (stored for audit)
         #[arg(long)]
         reason: Option<String>,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum HostBrokerAction {
+    /// Serve declared host tools/files over a Unix socket, gated by daemon rules
+    Serve {
+        /// Unix socket exposed by the host broker
+        #[arg(long, default_value = "/tmp/outcall-broker/host-broker.sock")]
+        socket: String,
+        /// Optional path to host-resources.yaml
+        #[arg(long)]
+        config: Option<String>,
+        /// Shared bearer token required by broker clients
+        #[arg(long)]
+        auth_token: Option<String>,
     },
 }
 
@@ -716,6 +737,13 @@ fn main() -> Result<()> {
                 force_auth_copy,
             } => cmd_recipe_test(&cli.socket, &id, no_build, auth, force_auth_copy),
         },
+        Some(Commands::HostBroker { action }) => match action {
+            HostBrokerAction::Serve {
+                socket,
+                config,
+                auth_token,
+            } => cmd_host_broker_serve(&cli.socket, &socket, config.as_deref(), auth_token),
+        },
         Some(Commands::Ui { port, no_open }) => cmd_ui(&cli.socket, port, !no_open),
     }
 }
@@ -761,6 +789,324 @@ fn default_launch_args() -> RecipeLaunchArgs {
         detach: false,
         args: Vec::new(),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct BrokerToolExecRequest {
+    id: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct BrokerToolExecResult {
+    status: i32,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(serde::Deserialize)]
+struct BrokerFileReadRequest {
+    id: String,
+    #[serde(default)]
+    relative_path: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct BrokerFileReadResult {
+    path: String,
+    contents: String,
+}
+
+fn cmd_host_broker_serve(
+    daemon_socket: &str,
+    socket: &str,
+    config: Option<&str>,
+    auth_token: Option<String>,
+) -> Result<()> {
+    let project_dir = std::env::current_dir().context("failed to get current directory")?;
+    let config_path = config
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| outcall::host_resources::default_config_path(&project_dir));
+    let token = auth_token.unwrap_or_else(random_broker_token);
+    let token_hint = token.clone();
+    let listener = bind_broker_socket(socket)?;
+
+    println!("Host broker listening on {}", socket);
+    println!("Config: {}", config_path.display());
+    println!("Auth token: {}", token_hint);
+    println!(
+        "Use this from a trusted client as `Authorization: Bearer {}`.",
+        token_hint
+    );
+
+    loop {
+        let (mut stream, _) = listener.accept().context("host broker accept failed")?;
+        if let Err(err) = handle_broker_connection(&mut stream, daemon_socket, &config_path, &token)
+        {
+            let _ = write_http_json(
+                &mut stream,
+                500,
+                &Response {
+                    success: false,
+                    data: None,
+                    error: Some(err.to_string()),
+                },
+            );
+        }
+    }
+}
+
+fn bind_broker_socket(socket: &str) -> Result<std::os::unix::net::UnixListener> {
+    let path = std::path::Path::new(socket);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let _ = std::fs::remove_file(path);
+    let listener = std::os::unix::net::UnixListener::bind(path)
+        .with_context(|| format!("failed to bind {}", path.display()))?;
+    Ok(listener)
+}
+
+fn handle_broker_connection(
+    stream: &mut std::os::unix::net::UnixStream,
+    daemon_socket: &str,
+    config_path: &std::path::Path,
+    auth_token: &str,
+) -> Result<()> {
+    let request = read_http_request(stream)?;
+    if request.path == "/v1/health" {
+        return write_http_json(
+            stream,
+            200,
+            &Response {
+                success: true,
+                data: Some(serde_json::json!({"ok": true})),
+                error: None,
+            },
+        );
+    }
+
+    let auth = request
+        .headers
+        .get("authorization")
+        .map(String::as_str)
+        .unwrap_or_default();
+    let expected = format!("Bearer {auth_token}");
+    if auth != expected {
+        return write_http_json(
+            stream,
+            403,
+            &Response {
+                success: false,
+                data: None,
+                error: Some("forbidden: invalid broker token".to_string()),
+            },
+        );
+    }
+
+    let config = outcall::host_resources::load_from_path(config_path)?;
+    match request.path.as_str() {
+        "/v1/tool/exec" => {
+            let req: BrokerToolExecRequest =
+                serde_json::from_slice(&request.body).context("invalid tool exec request")?;
+            let result = broker_exec_tool(daemon_socket, &config, req)?;
+            write_http_json(stream, 200, &Response::ok(result))
+        }
+        "/v1/file/read" => {
+            let req: BrokerFileReadRequest =
+                serde_json::from_slice(&request.body).context("invalid file read request")?;
+            let result = broker_read_file(daemon_socket, &config, req)?;
+            write_http_json(stream, 200, &Response::ok(result))
+        }
+        _ => write_http_json(
+            stream,
+            404,
+            &Response {
+                success: false,
+                data: None,
+                error: Some(format!("unknown broker path {}", request.path)),
+            },
+        ),
+    }
+}
+
+fn broker_exec_tool(
+    daemon_socket: &str,
+    config: &outcall::host_resources::HostResourcesConfig,
+    req: BrokerToolExecRequest,
+) -> Result<BrokerToolExecResult> {
+    let tool = outcall::host_resources::find_tool(config, &req.id)
+        .with_context(|| format!("host tool not declared: {}", req.id))?;
+    evaluate_broker_rule(
+        daemon_socket,
+        EvalContext {
+            run: Some(outcall_api::RunContext {
+                tool: format!("host.tool.{}", req.id),
+                args: req.args.clone(),
+                cwd: req.cwd.clone().unwrap_or_default(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )?;
+
+    let path = outcall::host_resources::expand_home(&tool.path);
+    let mut command = std::process::Command::new(&path);
+    command.args(&tool.default_args).args(&req.args);
+    if let Some(cwd) = req.cwd {
+        command.current_dir(cwd);
+    }
+    for (key, value) in &tool.env {
+        command.env(key, value);
+    }
+    let output = command
+        .output()
+        .with_context(|| format!("failed to execute host tool {}", path.display()))?;
+    Ok(BrokerToolExecResult {
+        status: output.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
+}
+
+fn broker_read_file(
+    daemon_socket: &str,
+    config: &outcall::host_resources::HostResourcesConfig,
+    req: BrokerFileReadRequest,
+) -> Result<BrokerFileReadResult> {
+    let file = outcall::host_resources::find_file(config, &req.id)
+        .with_context(|| format!("host file root not declared: {}", req.id))?;
+    let root = outcall::host_resources::expand_home(&file.path);
+    let resolved = resolve_host_file_path(&root, req.relative_path.as_deref())?;
+    evaluate_broker_rule(
+        daemon_socket,
+        EvalContext {
+            run: Some(outcall_api::RunContext {
+                tool: format!("host.file.{}", req.id),
+                args: vec![resolved.display().to_string()],
+                cwd: resolved.display().to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )?;
+
+    let bytes = std::fs::read(&resolved)
+        .with_context(|| format!("failed to read host file {}", resolved.display()))?;
+    Ok(BrokerFileReadResult {
+        path: resolved.display().to_string(),
+        contents: String::from_utf8_lossy(&bytes).to_string(),
+    })
+}
+
+fn resolve_host_file_path(
+    root: &std::path::Path,
+    relative: Option<&str>,
+) -> Result<std::path::PathBuf> {
+    let root = std::fs::canonicalize(root)
+        .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+    let candidate = if root.is_dir() {
+        let relative = relative.context("relative_path is required for directory resources")?;
+        root.join(relative)
+    } else if relative.is_some() {
+        anyhow::bail!("relative_path is not allowed for file resources");
+    } else {
+        root.clone()
+    };
+    let resolved = std::fs::canonicalize(&candidate)
+        .with_context(|| format!("failed to canonicalize {}", candidate.display()))?;
+    if root.is_dir() && !resolved.starts_with(&root) {
+        anyhow::bail!("resolved path escapes declared host file root");
+    }
+    Ok(resolved)
+}
+
+fn evaluate_broker_rule(daemon_socket: &str, context: EvalContext) -> Result<()> {
+    let req = EvaluateRequest { context };
+    let body = http_post_json(daemon_socket, "/api/v1/rule/evaluate", &req)?;
+    let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
+    if !resp.success {
+        anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
+    }
+    let result: outcall_api::EvaluateResult =
+        serde_json::from_value(resp.data.context("no data")?)?;
+    if result.decision == outcall_api::Decision::Block {
+        anyhow::bail!(
+            "blocked by rules{}",
+            result
+                .matched_rule
+                .as_deref()
+                .map(|id| format!(" ({id})"))
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn random_broker_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+struct RawHttpRequest {
+    path: String,
+    headers: std::collections::HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+fn read_http_request(stream: &mut std::os::unix::net::UnixStream) -> Result<RawHttpRequest> {
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+    let header_end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .context("malformed HTTP request")?;
+    let head = String::from_utf8(raw[..header_end].to_vec()).context("invalid HTTP header")?;
+    let body = raw[header_end + 4..].to_vec();
+    let mut lines = head.lines();
+    let request_line = lines.next().context("missing request line")?;
+    let mut parts = request_line.split_whitespace();
+    let _method = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or("/").to_string();
+    let mut headers = std::collections::HashMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+    Ok(RawHttpRequest {
+        path,
+        headers,
+        body,
+    })
+}
+
+fn write_http_json<T: serde::Serialize>(
+    stream: &mut std::os::unix::net::UnixStream,
+    status: u16,
+    body: &T,
+) -> Result<()> {
+    let json = serde_json::to_vec(body).context("failed to serialize broker response")?;
+    let status_text = match status {
+        200 => "OK",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        json.len()
+    )?;
+    stream.write_all(&json)?;
+    Ok(())
 }
 
 fn cmd_start(socket: &str, recipe: Option<&str>, mut args: RecipeLaunchArgs) -> Result<()> {
@@ -2988,11 +3334,21 @@ fn cmd_container_pull(socket: &str, image: &str) -> Result<()> {
 // ── Raw HTTP over unix socket (HTTP/1.0, no extra deps) ────────────────────
 
 /// Minimal response struct — avoids generic deserialization issues.
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct Response {
     success: bool,
     data: Option<serde_json::Value>,
     error: Option<String>,
+}
+
+impl Response {
+    fn ok<T: serde::Serialize>(data: T) -> Self {
+        Self {
+            success: true,
+            data: Some(serde_json::to_value(data).unwrap_or(serde_json::Value::Null)),
+            error: None,
+        }
+    }
 }
 
 fn http_get(socket: &str, path: &str) -> Result<String> {
@@ -3436,6 +3792,12 @@ fn cmd_daemon_start(
         "/var/run/docker.sock:/var/run/docker.sock".into(),
         "-v".into(),
         format!("{rules_dir}:/etc/outcall/rules.d:ro"),
+    ];
+    if !use_container_local_sockets {
+        args.push("-v".into());
+        args.push(format!("{}:{}", socket_dir.display(), socket_dir.display()));
+    }
+    let mut daemon_args = vec![
         "--entrypoint".into(),
         "outcalld".into(),
         image.clone(),
@@ -3450,13 +3812,10 @@ fn cmd_daemon_start(
         "--bridge".into(),
         bridge.clone(),
     ];
-    if !use_container_local_sockets {
-        args.push("-v".into());
-        args.push(format!("{}:{}", socket_dir.display(), socket_dir.display()));
-    }
     if no_proxy {
-        args.push("--no-proxy".into());
+        daemon_args.push("--no-proxy".into());
     }
+    args.extend(daemon_args);
 
     let output = Command::new("docker")
         .args(&args)

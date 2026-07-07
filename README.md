@@ -114,6 +114,19 @@ Each project scaffold also includes `.outcall/host-resources.yaml` as the
 explicit registry for host tools, host file roots, and auth/session handoff
 notes that sit outside `/workspace`.
 
+For host-native tools or host files outside `/workspace`, run the manual broker
+on the host:
+
+```sh
+outcall host-broker serve
+```
+
+The broker is deny-by-default:
+
+- only resources declared in `.outcall/host-resources.yaml` exist
+- every request is still evaluated against the active daemon rules before the
+  host action runs
+
 ## Running `outcalld`
 
 `outcalld` requires several capabilities and a Docker socket bind-mount.
