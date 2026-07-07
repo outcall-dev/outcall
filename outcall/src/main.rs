@@ -820,6 +820,13 @@ struct BrokerFileReadResult {
     contents: String,
 }
 
+#[derive(Debug, Clone)]
+struct HostBrokerRuntime {
+    host_socket: std::path::PathBuf,
+    container_socket: String,
+    auth_token: String,
+}
+
 fn cmd_host_broker_serve(
     daemon_socket: &str,
     socket: &str,
@@ -1804,6 +1811,7 @@ fn cmd_recipe_run(
 
     ensure_recipe_runtime_ready(socket, &project_dir)?;
     ensure_runtime_bridge_netfilter_enforceable()?;
+    maybe_prepare_host_broker(socket, &project_dir, &mut config)?;
 
     println!(
         "Starting recipe \"{}\" with auth mode {:?}.",
@@ -1958,6 +1966,170 @@ fn stage_recipe_auth(
         found_auth,
         effective_mode,
     })
+}
+
+fn maybe_prepare_host_broker(
+    daemon_socket: &str,
+    project_dir: &std::path::Path,
+    config: &mut outcall::agent_config::AgentConfig,
+) -> Result<()> {
+    let registry_path = outcall::host_resources::default_config_path(project_dir);
+    if !registry_path.exists() {
+        return Ok(());
+    }
+
+    let registry = outcall::host_resources::load_from_path(&registry_path)?;
+    if registry.tools.is_empty() && registry.files.is_empty() {
+        return Ok(());
+    }
+
+    let runtime = ensure_host_broker_running(daemon_socket, project_dir, &registry_path)?;
+    println!(
+        "Host broker ready: {} -> {}",
+        runtime.host_socket.display(),
+        runtime.container_socket
+    );
+    config.env.insert(
+        "OUTCALL_HOST_BROKER_SOCKET".to_string(),
+        runtime.container_socket,
+    );
+    config.env.insert(
+        "OUTCALL_HOST_BROKER_TOKEN".to_string(),
+        runtime.auth_token.clone(),
+    );
+    config
+        .env
+        .insert("OUTCALL_HOST_BROKER_ENABLED".to_string(), "1".to_string());
+    Ok(())
+}
+
+fn ensure_host_broker_running(
+    daemon_socket: &str,
+    project_dir: &std::path::Path,
+    registry_path: &std::path::Path,
+) -> Result<HostBrokerRuntime> {
+    let run_dir = project_dir.join(".outcall").join("run");
+    std::fs::create_dir_all(&run_dir)
+        .with_context(|| format!("failed to create {}", run_dir.display()))?;
+    secure_runtime_dir(&run_dir)?;
+
+    let host_socket = run_dir.join("host-broker.sock");
+    let token_path = run_dir.join("host-broker.token");
+    let auth_token = if token_path.exists() {
+        std::fs::read_to_string(&token_path)
+            .with_context(|| format!("failed to read {}", token_path.display()))?
+            .trim()
+            .to_string()
+    } else {
+        let token = random_broker_token();
+        std::fs::write(&token_path, &token)
+            .with_context(|| format!("failed to write {}", token_path.display()))?;
+        secure_runtime_file(&token_path)?;
+        token
+    };
+
+    let runtime = HostBrokerRuntime {
+        host_socket: host_socket.clone(),
+        container_socket: "/workspace/.outcall/run/host-broker.sock".to_string(),
+        auth_token,
+    };
+
+    if host_broker_healthy(&host_socket) {
+        return Ok(runtime);
+    }
+
+    let current_exe =
+        std::env::current_exe().context("failed to resolve current outcall binary")?;
+    let mut command = std::process::Command::new(current_exe);
+    command
+        .arg("--socket")
+        .arg(daemon_socket)
+        .arg("host-broker")
+        .arg("serve")
+        .arg("--socket")
+        .arg(&host_socket)
+        .arg("--config")
+        .arg(registry_path)
+        .arg("--auth-token")
+        .arg(&runtime.auth_token)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let _child = command.spawn().with_context(|| {
+        format!(
+            "failed to start host broker for {}",
+            registry_path.display()
+        )
+    })?;
+
+    wait_for_host_broker(&host_socket)?;
+    Ok(runtime)
+}
+
+fn host_broker_healthy(socket: &std::path::Path) -> bool {
+    if !socket.exists() {
+        return false;
+    }
+    let Ok(mut stream) = UnixStream::connect(socket) else {
+        return false;
+    };
+    if write!(stream, "GET /v1/health HTTP/1.0\r\nHost: localhost\r\n\r\n").is_err() {
+        return false;
+    }
+    let Ok(body) = read_body(&mut stream) else {
+        return false;
+    };
+    let Ok(resp) = serde_json::from_str::<Response>(&body) else {
+        return false;
+    };
+    resp.success
+}
+
+fn wait_for_host_broker(socket: &std::path::Path) -> Result<()> {
+    for _ in 0..50 {
+        if host_broker_healthy(socket) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    anyhow::bail!("host broker did not become ready at {}", socket.display());
+}
+
+#[cfg(unix)]
+fn secure_runtime_dir(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(path, permissions)
+        .with_context(|| format!("failed to chmod {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_runtime_dir(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secure_runtime_file(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .permissions();
+    permissions.set_mode(0o600);
+    std::fs::set_permissions(path, permissions)
+        .with_context(|| format!("failed to chmod {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_runtime_file(_path: &std::path::Path) -> Result<()> {
+    Ok(())
 }
 
 fn ensure_recipe_runtime_ready(socket: &str, project_dir: &std::path::Path) -> Result<()> {

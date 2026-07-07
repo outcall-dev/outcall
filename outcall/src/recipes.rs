@@ -591,7 +591,9 @@ fn write_new(path: &Path, contents: &str, force: bool, written: &mut Vec<PathBuf
 pub fn ensure_outcall_gitignore(project_dir: &Path) -> Result<Option<PathBuf>> {
     let path = project_dir.join(".outcall").join(".gitignore");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.lines().any(|line| line.trim() == "auth/") {
+    let has_auth = existing.lines().any(|line| line.trim() == "auth/");
+    let has_run = existing.lines().any(|line| line.trim() == "run/");
+    if has_auth && has_run {
         return Ok(None);
     }
 
@@ -599,7 +601,12 @@ pub fn ensure_outcall_gitignore(project_dir: &Path) -> Result<Option<PathBuf>> {
     if !next.is_empty() && !next.ends_with('\n') {
         next.push('\n');
     }
-    next.push_str("auth/\n");
+    if !has_auth {
+        next.push_str("auth/\n");
+    }
+    if !has_run {
+        next.push_str("run/\n");
+    }
     std::fs::write(&path, next).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(Some(path))
 }
@@ -669,6 +676,7 @@ mod tests {
         let gitignore = std::fs::read_to_string(dir.join(".outcall/.gitignore")).unwrap();
         assert!(gitignore.contains("cache/\n"));
         assert!(gitignore.contains("auth/\n"));
+        assert!(gitignore.contains("run/\n"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
