@@ -477,9 +477,24 @@ pub struct ContainerCreateRequest {
     pub env: Option<Vec<String>>,
     /// Override default container command.
     pub cmd: Option<Vec<String>>,
+    /// Override image entrypoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    /// Working directory inside the container.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
     /// Additional bind mounts in Docker format `host-path:container-path[:options]`.
     /// The outcall agent socket and shim are always added automatically.
     pub volumes: Option<Vec<String>>,
+    /// Whether to inject the outcall agent socket and shim helper mounts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_outcall_helper_mounts: Option<bool>,
+    /// Keep stdin open for attached interactive sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<bool>,
+    /// Allocate a TTY for attached interactive sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tty: Option<bool>,
 }
 
 /// Response for POST /api/v1/container/create.

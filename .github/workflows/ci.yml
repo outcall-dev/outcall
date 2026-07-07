@@ -14,7 +14,7 @@ jobs:
     name: cargo check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -37,7 +37,7 @@ jobs:
     name: cargo test (unit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -57,7 +57,7 @@ jobs:
     name: cargo test (integration)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -82,7 +82,7 @@ jobs:
     name: cargo test (privileged e2e - sudo)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -117,7 +117,7 @@ jobs:
     name: cargo test (privileged e2e - docker)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Run privileged e2e tests in container
         run: |
@@ -142,7 +142,7 @@ jobs:
     name: installer smoke (linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -200,6 +200,7 @@ jobs:
           export ANTHROPIC_API_KEY=dummy-smoke-key
           unset CODEX_ACCESS_TOKEN CODEX_API_KEY
           project_dir="$RUNNER_TEMP/outcall-smoke-project"
+          agent_name="$(basename "$project_dir")-1"
           rm -rf "$project_dir"
           mkdir -p "$project_dir"
           cd "$project_dir"
@@ -215,7 +216,7 @@ jobs:
             docker logs outcall-daemon || true
             echo "::endgroup::"
             echo "::group::agent logs"
-            docker logs claude-agent || true
+            docker logs "$agent_name" || true
             echo "::endgroup::"
             echo "::group::socket state"
             ls -la /tmp/outcall || true
@@ -227,7 +228,7 @@ jobs:
           fi
           test -f .outcall/recipes/claude/recipe.yaml
           test -f .outcall/agent.yaml
-          docker inspect claude-agent >/dev/null
+          docker inspect "$agent_name" >/dev/null
 
       - name: Smoke test one-command Codex start
         run: |
@@ -239,6 +240,7 @@ jobs:
           export CODEX_API_KEY=dummy-smoke-key
           unset ANTHROPIC_API_KEY CODEX_ACCESS_TOKEN
           project_dir="$RUNNER_TEMP/outcall-smoke-project-codex"
+          agent_name="$(basename "$project_dir")-1"
           rm -rf "$project_dir"
           mkdir -p "$project_dir"
           cd "$project_dir"
@@ -254,7 +256,7 @@ jobs:
             docker logs outcall-daemon || true
             echo "::endgroup::"
             echo "::group::agent logs"
-            docker logs codex-agent || true
+            docker logs "$agent_name" || true
             echo "::endgroup::"
             echo "::group::socket state"
             ls -la /tmp/outcall || true
@@ -266,13 +268,234 @@ jobs:
           fi
           test -f .outcall/recipes/codex/recipe.yaml
           test -f .outcall/agent.yaml
-          docker inspect codex-agent >/dev/null
+          docker inspect "$agent_name" >/dev/null
+
+  secure-install-runtime:
+    name: secure install + runtime + security validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl tar gzip iproute2 nftables iptables make
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --locked
+
+      - name: Build daemon image for local preload
+        run: |
+          set -eu
+          ROOT_DIR="$(git rev-parse --show-toplevel)"
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' outcall/Cargo.toml | head -n1)"
+          mkdir -p "$RUNNER_TEMP/outcall-ci-release"
+          if [ -f "$ROOT_DIR/scripts/e2e/Dockerfile" ]; then
+            DOCKERFILE="$ROOT_DIR/scripts/e2e/Dockerfile"
+          elif [ -f "$ROOT_DIR/application/scripts/e2e/Dockerfile" ]; then
+            DOCKERFILE="$ROOT_DIR/application/scripts/e2e/Dockerfile"
+          elif [ -f "$ROOT_DIR/Dockerfile" ]; then
+            DOCKERFILE="$ROOT_DIR/Dockerfile"
+          elif [ -f "$ROOT_DIR/../application/scripts/e2e/Dockerfile" ]; then
+            DOCKERFILE="$ROOT_DIR/../application/scripts/e2e/Dockerfile"
+            ROOT_DIR="$(cd "$ROOT_DIR/.." && pwd)"
+          elif [ -f "$ROOT_DIR/../Dockerfile" ]; then
+            DOCKERFILE="$ROOT_DIR/../Dockerfile"
+            ROOT_DIR="$(cd "$ROOT_DIR/.." && pwd)"
+          else
+            CANDIDATE=$(find "$ROOT_DIR" "$ROOT_DIR/.." -maxdepth 4 -type f \( -name Dockerfile -o -path '*/scripts/e2e/Dockerfile' \) | head -n 1)
+            if [ -n "$CANDIDATE" ]; then
+              DOCKERFILE="$CANDIDATE"
+              if [[ "$DOCKERFILE" == */scripts/e2e/Dockerfile ]]; then
+                ROOT_DIR="$(dirname "$(dirname "$DOCKERFILE")")"
+              else
+                ROOT_DIR="$(dirname "$DOCKERFILE")"
+              fi
+            else
+              echo "No supported daemon Dockerfile found in repository."
+              exit 1
+            fi
+          fi
+          docker build -f "$DOCKERFILE" \
+            -t "ghcr.io/outcall-dev/outcalld:v$VERSION" \
+            -t "ghcr.io/outcall-dev/outcalld:latest" "$ROOT_DIR"
+          docker save "ghcr.io/outcall-dev/outcalld:v$VERSION" | gzip > "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz"
+
+      - name: Package local installer artifacts
+        run: |
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' outcall/Cargo.toml | head -n1)"
+          mkdir -p "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu"
+          cp target/release/outcall target/release/outcalld target/release/outcall-agent \
+            "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu/"
+          tar -czf "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu.tar.gz" \
+            -C "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu" .
+
+      - name: Enforce bridge netfilter (hard preflight requirement)
+        run: |
+          set -eu
+          sudo modprobe br_netfilter
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+          IPV4="$(cat /proc/sys/net/bridge/bridge-nf-call-iptables | tr -d '[:space:]')"
+          IPV6="$(cat /proc/sys/net/bridge/bridge-nf-call-ip6tables | tr -d '[:space:]')"
+          [ "$IPV4" = "1" ] && [ "$IPV6" = "1" ] || {
+            echo "bridge netfilter enforceable check failed: ipv4=$IPV4 ipv6=$IPV6"
+            exit 1
+          }
+
+      - name: Install from local release artifacts
+        run: |
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' outcall/Cargo.toml | head -n1)"
+          export OUTCALL_VERSION="$VERSION"
+          export OUTCALL_RELEASE_BASE_URL="file://$RUNNER_TEMP/outcall-ci-release"
+          export OUTCALL_BIN_DIR="$RUNNER_TEMP/outcall-bin"
+          mkdir -p "$OUTCALL_BIN_DIR"
+          sh scripts/install.sh
+          "$OUTCALL_BIN_DIR/outcall" --version
+          "$OUTCALL_BIN_DIR/outcalld" --version
+          "$OUTCALL_BIN_DIR/outcall-agent" --version
+
+      - name: Usage smoke (Claude)
+        run: |
+          set -eu
+          export PATH="$RUNNER_TEMP/outcall-bin:$PATH"
+          PROJECT_DIR="$RUNNER_TEMP/outcall-smoke-claude"
+          HOME_DIR="$RUNNER_TEMP/outcall-smoke-home-claude"
+          AGENT_NAME="$(basename "$PROJECT_DIR")-1"
+          rm -rf "$PROJECT_DIR" "$HOME_DIR"
+          mkdir -p "$PROJECT_DIR" "$HOME_DIR"
+          export HOME="$HOME_DIR"
+          export ANTHROPIC_API_KEY=dummy-smoke-key
+          unset CODEX_API_KEY CODEX_ACCESS_TOKEN
+          cd "$PROJECT_DIR"
+
+          set +e
+          timeout 180 outcall start -- --version
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::group::docker ps"
+            docker ps -a || true
+            echo "::endgroup::"
+            echo "::group::daemon logs"
+            docker logs outcall-daemon --tail 120 || true
+            echo "::endgroup::"
+            echo "::group::agent logs"
+            docker logs "$AGENT_NAME" --tail 120 || true
+            echo "::endgroup::"
+            exit "$status"
+          fi
+          test -f .outcall/recipes/claude/recipe.yaml
+          test -f .outcall/agent.yaml
+          docker inspect "$AGENT_NAME" >/dev/null
+
+      - name: Usage smoke (Codex)
+        run: |
+          set -eu
+          export PATH="$RUNNER_TEMP/outcall-bin:$PATH"
+          PROJECT_DIR="$RUNNER_TEMP/outcall-smoke-codex"
+          HOME_DIR="$RUNNER_TEMP/outcall-smoke-home-codex"
+          AGENT_NAME="$(basename "$PROJECT_DIR")-1"
+          rm -rf "$PROJECT_DIR" "$HOME_DIR"
+          mkdir -p "$PROJECT_DIR" "$HOME_DIR"
+          export HOME="$HOME_DIR"
+          export CODEX_API_KEY=dummy-smoke-key
+          unset ANTHROPIC_API_KEY CODEX_ACCESS_TOKEN
+          cd "$PROJECT_DIR"
+
+          set +e
+          timeout 180 outcall start -- --version
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::group::docker ps"
+            docker ps -a || true
+            echo "::endgroup::"
+            echo "::group::daemon logs"
+            docker logs outcall-daemon --tail 120 || true
+            echo "::endgroup::"
+            echo "::group::agent logs"
+            docker logs "$AGENT_NAME" --tail 120 || true
+            echo "::endgroup::"
+            exit "$status"
+          fi
+          test -f .outcall/recipes/codex/recipe.yaml
+          test -f .outcall/agent.yaml
+          docker inspect "$AGENT_NAME" >/dev/null
+
+      - name: Security integration (bridge state + leak checks)
+        run: |
+          ROOT_DIR="$(git rev-parse --show-toplevel)"
+          CARGO_BIN="$(rustup which --toolchain "${RUSTUP_TOOLCHAIN:-stable}" cargo 2>/dev/null || true)"
+          if [ -z "$CARGO_BIN" ] && command -v cargo >/dev/null 2>&1; then
+            CARGO_BIN="$(command -v cargo)"
+          fi
+          CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
+          if [ -f "$ROOT_DIR/scripts/test-bridge.sh" ] && [ -d "$ROOT_DIR/application" ]; then
+            sudo bash "$ROOT_DIR/scripts/test-bridge.sh"
+          else
+            sudo env \
+              PATH="$CARGO_BIN_DIR:$PATH" \
+              RUSTC="$CARGO_BIN_DIR/rustc" \
+              "$CARGO_BIN" test -p outcalld --test bridge_integration -- --nocapture
+          fi
+
+      - name: Security integration (container isolation)
+        run: |
+          ROOT_DIR="$(git rev-parse --show-toplevel)"
+          CARGO_BIN="$(rustup which --toolchain "${RUSTUP_TOOLCHAIN:-stable}" cargo 2>/dev/null || true)"
+          if [ -z "$CARGO_BIN" ] && command -v cargo >/dev/null 2>&1; then
+            CARGO_BIN="$(command -v cargo)"
+          fi
+          CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
+          if [ -f "$ROOT_DIR/Makefile" ]; then
+            make build
+            make stop >/dev/null 2>&1 || true
+            if [ -f "$ROOT_DIR/scripts/test-isolation.sh" ] && [ -d "$ROOT_DIR/application" ]; then
+              bash "$ROOT_DIR/scripts/test-isolation.sh" --skip-build
+            else
+              sudo env \
+                PATH="$CARGO_BIN_DIR:$PATH" \
+                RUSTC="$CARGO_BIN_DIR/rustc" \
+                "$CARGO_BIN" test -p outcalld --test bridge_integration -- --test-threads=1 --nocapture
+            fi
+          else
+            sudo env \
+              PATH="$CARGO_BIN_DIR:$PATH" \
+              RUSTC="$CARGO_BIN_DIR/rustc" \
+              "$CARGO_BIN" test -p outcalld --test bridge_integration -- --test-threads=1 --nocapture
+          fi
+
+      - name: Verify preflight hard-fails when netfilter is disabled
+        run: |
+          set -eu
+          export PATH="$RUNNER_TEMP/outcall-bin:$PATH"
+          PROJECT_DIR="$RUNNER_TEMP/outcall-smoke-claude"
+          cd "$PROJECT_DIR"
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=0
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=0
+          set +e
+          outcall recipe test claude --no-build > /tmp/outcall-preflight.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "preflight unexpectedly passed when bridge netfilter was disabled"
+            echo "--- preflight output ---"
+            cat /tmp/outcall-preflight.log
+            exit 1
+          fi
+          grep -q "Secure unattended mode requires bridge netfilter enforcement" /tmp/outcall-preflight.log
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
 
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -286,7 +509,7 @@ jobs:
     name: cargo clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -306,7 +529,7 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -327,7 +550,7 @@ jobs:
     name: cargo geiger (unsafe check)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -376,7 +599,7 @@ jobs:
     name: cargo deny (licenses + bans)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -289,13 +289,23 @@ mod serde_roundtrips {
             memory_limit: Some(256 * 1024 * 1024),
             cpu_shares: None,
             env: Some(vec!["FOO=bar".into()]),
-            cmd: None,
-            volumes: None,
+            cmd: Some(vec!["--version".into()]),
+            entrypoint: Some(vec!["codex".into()]),
+            working_dir: Some("/workspace".into()),
+            volumes: Some(vec!["/tmp/project:/workspace".into()]),
+            include_outcall_helper_mounts: Some(false),
+            interactive: Some(true),
+            tty: Some(true),
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ContainerCreateRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.image, "outcall-dev/agent:latest");
         assert_eq!(back.memory_limit, Some(256 * 1024 * 1024));
+        assert_eq!(back.entrypoint, Some(vec!["codex".into()]));
+        assert_eq!(back.working_dir.as_deref(), Some("/workspace"));
+        assert_eq!(back.include_outcall_helper_mounts, Some(false));
+        assert_eq!(back.interactive, Some(true));
+        assert_eq!(back.tty, Some(true));
     }
 
     #[test]

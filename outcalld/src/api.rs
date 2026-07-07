@@ -398,7 +398,7 @@ async fn container_create(
     let proxy_addr = state.proxy.listen_addr.to_string();
     let dns_addr = {
         let status = state.dns.status().await;
-        format!("{}:{}", status.listen_address, status.listen_port)
+        status.listen_address
     };
     match state
         .docker
