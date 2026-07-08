@@ -5,7 +5,7 @@
 ## Badges
 
 [![CI](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.27-blue.svg)](https://github.com/outcall-dev/outcall/releases)
+[![Version](https://img.shields.io/badge/version-0.1.28-blue.svg)](https://github.com/outcall-dev/outcall/releases)
 [![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcalld-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcalld)
 
 ## Workspace
@@ -53,7 +53,7 @@ For quicker iteration during installer work:
 make install-smoke
 make install-smoke-doctor-codex
 make install-smoke-doctor-claude
-make install-smoke POST_INSTALL='outcall codex -- --version'
+make install-smoke POST_INSTALL='outcall run codex -- --version'
 ```
 
 Any extra command passed to `scripts/local-install-smoke.sh` runs after install
@@ -79,8 +79,8 @@ available yet, it prints the recommended next commands instead.
 If Outcall cannot infer the provider cleanly, choose one explicitly:
 
 ```sh
-outcall claude
-outcall codex
+outcall run claude
+outcall run codex
 ```
 
 `outcall start` remains the explicit equivalent. When the machine clearly
@@ -90,9 +90,10 @@ the recipe image, ensures the daemon and default network exist, runs a smoke
 container with the recipe entrypoint, and then starts the real isolated agent
 container.
 
-`outcall claude` and `outcall codex` run the same flow, but skip provider
-detection. They also persist the project's default recipe, so after you choose
-once on a mixed-provider machine, later runs can go back to `outcall start`.
+`outcall run claude` and `outcall run codex` are the preferred explicit forms.
+They skip provider detection and persist the project's default recipe, so after
+you choose once on a mixed-provider machine, later runs can go back to
+`outcall start`.
 
 If the first run stops on a prerequisite, inspect the host and recipe checks
 directly:
@@ -102,7 +103,7 @@ outcall doctor claude
 outcall doctor codex
 ```
 
-Under the hood, `outcall claude` / `outcall codex` are aliases for
+The older `outcall claude` / `outcall codex` commands remain as aliases for
 `outcall run <recipe>`. The lower-level flow is:
 
 ```sh

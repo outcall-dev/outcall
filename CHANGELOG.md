@@ -29,6 +29,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- **First-run UX:** `outcall run <claude|codex>` is now the preferred explicit
+  launch path, reruns cleanly on an existing project scaffold, and rewrites
+  container output-file paths when the target file lives inside the mounted
+  workspace.
 - **Non-Linux first run:** recipe setup and launch now stop before Docker
   build, daemon startup, or GHCR pulls on non-Linux hosts, with a direct
   message that scaffolding/auth checks are ready but runtime launch requires a

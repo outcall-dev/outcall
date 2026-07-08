@@ -1203,8 +1203,8 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
     println!("  outcall doctor");
     println!("  outcall start");
     println!("  outcall setup");
-    println!("  outcall claude         # fallback if auto-detect is ambiguous");
-    println!("  outcall codex");
+    println!("  outcall run claude     # fallback if auto-detect is ambiguous");
+    println!("  outcall run codex");
     Ok(())
 }
 
@@ -1326,7 +1326,7 @@ fn cmd_setup_inner(
     println!("Project:       {}", project_dir.display());
     println!();
 
-    cmd_init(Some(recipe.id), force)?;
+    ensure_recipe_setup_state(&project_dir, recipe, force)?;
     println!();
     cmd_recipe_doctor(recipe.id)?;
 
@@ -1397,8 +1397,8 @@ fn recommended_recipe_command_with_hint(
     hint: RecipeAuthHint,
 ) -> String {
     match hint {
-        RecipeAuthHint::EnvOnly => format!("outcall {} --auth env-only", recipe.id),
-        RecipeAuthHint::Copy | RecipeAuthHint::None => format!("outcall {}", recipe.id),
+        RecipeAuthHint::EnvOnly => format!("outcall run {} --auth env-only", recipe.id),
+        RecipeAuthHint::Copy | RecipeAuthHint::None => format!("outcall run {}", recipe.id),
     }
 }
 
@@ -1527,7 +1527,7 @@ fn detect_default_recipe() -> Result<RecipeSelection> {
                 .collect::<Vec<_>>()
                 .join(", ");
             anyhow::bail!(
-                "found project context for multiple agents ({ids}); choose one explicitly once for this project:\n  outcall claude\n  outcall codex\n\
+                "found project context for multiple agents ({ids}); choose one explicitly once for this project:\n  outcall run claude\n  outcall run codex\n\
                  Future `outcall start` runs will reuse the saved project default."
             )
         }
@@ -1542,7 +1542,7 @@ fn detect_default_recipe() -> Result<RecipeSelection> {
         }),
         [] => anyhow::bail!(
             "could not infer which agent to start; no Claude or Codex auth candidates were found.\n\
-             Run `outcall doctor`, then choose one explicitly:\n  outcall claude\n  outcall codex"
+             Run `outcall doctor`, then choose one explicitly:\n  outcall run claude\n  outcall run codex"
         ),
         many => {
             let ids = many
@@ -1551,7 +1551,7 @@ fn detect_default_recipe() -> Result<RecipeSelection> {
                 .collect::<Vec<_>>()
                 .join(", ");
             anyhow::bail!(
-                "found auth candidates for multiple agents ({ids}); choose one explicitly once for this project:\n  outcall claude\n  outcall codex\n\
+                "found auth candidates for multiple agents ({ids}); choose one explicitly once for this project:\n  outcall run claude\n  outcall run codex\n\
                  Future `outcall start` runs will reuse the saved project default."
             )
         }
@@ -1594,8 +1594,8 @@ fn print_first_run_recommendation() {
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("Recommended first command:");
-            println!("  outcall claude");
-            println!("  outcall codex");
+            println!("  outcall run claude");
+            println!("  outcall run codex");
             println!("  # multiple project context candidates detected: {ids}");
             return;
         }
@@ -1610,8 +1610,8 @@ fn print_first_run_recommendation() {
         [] => {
             println!("Recommended first command:");
             println!("  outcall start          # after you export provider auth");
-            println!("  outcall claude         # choose Claude explicitly");
-            println!("  outcall codex          # choose Codex explicitly");
+            println!("  outcall run claude     # choose Claude explicitly");
+            println!("  outcall run codex      # choose Codex explicitly");
         }
         many => {
             let ids = many
@@ -1620,8 +1620,8 @@ fn print_first_run_recommendation() {
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("Recommended first command:");
-            println!("  outcall claude");
-            println!("  outcall codex");
+            println!("  outcall run claude");
+            println!("  outcall run codex");
             println!("  # multiple auth candidates detected: {ids}");
         }
     }
@@ -1817,7 +1817,8 @@ fn cmd_recipe_run(
         "Starting recipe \"{}\" with auth mode {:?}.",
         recipe.id, auth_result.effective_mode
     );
-    launch_managed_recipe_container(socket, &project_dir, config, args)
+    let entrypoint_args = rewrite_recipe_entrypoint_args(&project_dir, &config.workspace, args)?;
+    launch_managed_recipe_container(socket, &project_dir, config, entrypoint_args)
 }
 
 fn cmd_recipe_test(
@@ -2553,6 +2554,145 @@ fn ensure_recipe_initialized(
     Ok(())
 }
 
+fn ensure_recipe_setup_state(
+    project_dir: &std::path::Path,
+    recipe: &outcall::recipes::Recipe,
+    force: bool,
+) -> Result<()> {
+    let outcall_dir = project_dir.join(".outcall");
+    let rules_dir = outcall_dir.join("rules");
+    std::fs::create_dir_all(&rules_dir)
+        .with_context(|| format!("failed to create {}", rules_dir.display()))?;
+
+    if force {
+        cmd_init(Some(recipe.id), true)?;
+        return Ok(());
+    }
+
+    println!("Initialized Outcall in {}.", project_dir.display());
+
+    let mut wrote_any = false;
+    if outcall_dir
+        .join("recipes")
+        .join(recipe.id)
+        .join("recipe.yaml")
+        .exists()
+    {
+        println!("  recipe files already exist for {}", recipe.id);
+    } else {
+        let written = outcall::recipes::init_recipe(project_dir, recipe, false)?;
+        for path in written {
+            println!("  wrote {}", path.display());
+        }
+        wrote_any = true;
+    }
+
+    let selected = save_default_recipe(project_dir, recipe.id)?;
+    println!("  wrote {}", selected.display());
+    println!("  ensured {}", rules_dir.display());
+    if !wrote_any {
+        println!("  kept existing generated recipe files");
+    }
+    println!();
+    println!("Next:");
+    println!("  outcall start");
+    println!("  outcall setup         # repeat first-run checks without launching");
+    println!("  outcall start --detach");
+    Ok(())
+}
+
+fn rewrite_recipe_entrypoint_args(
+    project_dir: &std::path::Path,
+    workspace: &str,
+    args: Vec<String>,
+) -> Result<Vec<String>> {
+    let abs_project_dir = std::fs::canonicalize(project_dir)
+        .with_context(|| format!("failed to canonicalize {}", project_dir.display()))?;
+    let mut rewritten = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-o" || arg == "--output-last-message" {
+            let path = iter
+                .next()
+                .with_context(|| format!("missing value for {}", arg))?;
+            rewritten.push(arg);
+            rewritten.push(rewrite_container_output_path(
+                &abs_project_dir,
+                workspace,
+                &path,
+            )?);
+            continue;
+        }
+        if let Some((flag, value)) = arg.split_once('=') {
+            if flag == "--output-last-message" {
+                let rewritten_value =
+                    rewrite_container_output_path(&abs_project_dir, workspace, value)?;
+                rewritten.push(format!("{flag}={rewritten_value}"));
+                continue;
+            }
+        }
+        rewritten.push(arg);
+    }
+    Ok(rewritten)
+}
+
+fn rewrite_container_output_path(
+    project_dir: &std::path::Path,
+    workspace: &str,
+    path: &str,
+) -> Result<String> {
+    let candidate = std::path::Path::new(path);
+    if !candidate.is_absolute() {
+        return Ok(path.to_string());
+    }
+    if let Ok(relative) = candidate.strip_prefix(project_dir) {
+        return workspace_output_path(workspace, candidate, relative);
+    }
+
+    if let Some(resolved) = resolve_output_path_for_workspace(candidate)? {
+        if let Ok(relative) = resolved.strip_prefix(project_dir) {
+            return workspace_output_path(workspace, candidate, relative);
+        }
+    }
+    anyhow::bail!(
+        "output path {} is outside the mounted workspace; use a relative path or a file inside {}",
+        candidate.display(),
+        project_dir.display()
+    );
+}
+
+fn resolve_output_path_for_workspace(
+    candidate: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>> {
+    let Some(parent) = candidate.parent() else {
+        return Ok(None);
+    };
+    if !parent.exists() {
+        return Ok(None);
+    }
+    let resolved_parent = std::fs::canonicalize(parent)
+        .with_context(|| format!("failed to canonicalize {}", parent.display()))?;
+    Ok(candidate.file_name().map(|name| resolved_parent.join(name)))
+}
+
+fn workspace_output_path(
+    workspace: &str,
+    original: &std::path::Path,
+    relative: &std::path::Path,
+) -> Result<String> {
+    let relative = relative
+        .to_str()
+        .with_context(|| format!("non-utf8 output path: {}", original.display()))?;
+    let relative = relative.trim_start_matches('/');
+    if relative.is_empty() {
+        anyhow::bail!(
+            "output path {} resolves to the project root; choose a file path inside the workspace",
+            original.display()
+        );
+    }
+    Ok(format!("{}/{}", workspace.trim_end_matches('/'), relative))
+}
+
 fn ensure_docker_access() -> Result<()> {
     let context_name = docker_context_name().unwrap_or_else(|_| "unknown".to_string());
     let output = match command_output_with_timeout("docker", &["info"], docker_probe_timeout()) {
@@ -2875,8 +3015,13 @@ fn doctor_proc_value(label: &str, path: &std::path::Path, expected: &str, hint: 
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandTimeoutError, command_output_with_timeout, doctor_platform_line_for};
+    use super::{
+        CommandTimeoutError, command_output_with_timeout, doctor_platform_line_for,
+        ensure_recipe_setup_state, rewrite_container_output_path, rewrite_recipe_entrypoint_args,
+    };
+    use std::path::Path;
     use std::time::Duration;
+    use tempfile::tempdir;
 
     #[test]
     fn doctor_platform_message_covers_linux_macos_and_other_hosts() {
@@ -2914,6 +3059,71 @@ mod tests {
             matches!(err, CommandTimeoutError::TimedOut { .. }),
             "expected timeout error, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn rewrite_container_output_path_maps_absolute_workspace_paths() {
+        let rewritten = rewrite_container_output_path(
+            Path::new("/tmp/project"),
+            "/workspace",
+            "/tmp/project/out/last.txt",
+        )
+        .expect("workspace path should rewrite");
+        assert_eq!(rewritten, "/workspace/out/last.txt");
+    }
+
+    #[test]
+    fn rewrite_container_output_path_rejects_paths_outside_workspace() {
+        let err = rewrite_container_output_path(
+            Path::new("/tmp/project"),
+            "/workspace",
+            "/tmp/elsewhere/last.txt",
+        )
+        .expect_err("external path should be rejected");
+        assert!(
+            err.to_string().contains("outside the mounted workspace"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rewrite_recipe_entrypoint_args_updates_output_flag_values() {
+        let temp = tempdir().expect("tempdir");
+        let rewritten = rewrite_recipe_entrypoint_args(
+            temp.path(),
+            "/workspace",
+            vec![
+                "exec".into(),
+                "--output-last-message".into(),
+                temp.path().join("out.txt").display().to_string(),
+                format!(
+                    "--output-last-message={}",
+                    temp.path().join("out2.txt").display()
+                ),
+            ],
+        )
+        .expect("args should rewrite");
+        assert_eq!(
+            rewritten,
+            vec![
+                "exec",
+                "--output-last-message",
+                "/workspace/out.txt",
+                "--output-last-message=/workspace/out2.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn ensure_recipe_setup_state_is_idempotent_without_force() {
+        let temp = tempdir().expect("tempdir");
+        let recipe = outcall::recipes::get_recipe("codex").expect("codex recipe");
+        ensure_recipe_setup_state(temp.path(), recipe, false).expect("first setup should succeed");
+        ensure_recipe_setup_state(temp.path(), recipe, false)
+            .expect("second setup should keep existing files");
+        let default_recipe = std::fs::read_to_string(temp.path().join(".outcall/default-recipe"))
+            .expect("default recipe should exist");
+        assert_eq!(default_recipe.trim(), "codex");
     }
 }
 

@@ -95,7 +95,7 @@ fn cli_without_subcommand_with_ambiguous_auth_prints_explicit_choices() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "expected onboarding output: {stderr}");
     assert!(
-        stdout.contains("Recommended first command:\n  outcall claude\n  outcall codex"),
+        stdout.contains("Recommended first command:\n  outcall run claude\n  outcall run codex"),
         "expected explicit recipe choices, got: {stdout}"
     );
 }
