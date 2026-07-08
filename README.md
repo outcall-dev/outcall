@@ -5,7 +5,7 @@
 ## Badges
 
 [![CI](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.25-blue.svg)](https://github.com/outcall-dev/outcall/releases)
+[![Version](https://img.shields.io/badge/version-0.1.26-blue.svg)](https://github.com/outcall-dev/outcall/releases)
 [![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcalld-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcalld)
 
 ## Workspace
