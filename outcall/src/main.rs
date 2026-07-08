@@ -2706,11 +2706,18 @@ fn doctor_command(command: &str, args: &[&str]) {
 }
 
 fn doctor_platform() {
-    let os = std::env::consts::OS;
+    println!("{}", doctor_platform_line_for(std::env::consts::OS));
+}
+
+fn doctor_platform_line_for(os: &str) -> String {
     if os == "linux" {
-        println!("  PASS platform: Linux host");
+        "  PASS platform: Linux host (native daemon runtime available)".to_string()
+    } else if os == "macos" {
+        "  INFO platform: macOS host detected; CLI runs locally and Outcall uses Docker Desktop's Linux runtime for the daemon and agent containers".to_string()
     } else {
-        println!("  WARN platform: {os} host detected; outcalld only runs on Linux");
+        format!(
+            "  WARN platform: {os} host detected; the isolated daemon runtime still requires Linux"
+        )
     }
 }
 
@@ -2771,6 +2778,27 @@ fn doctor_proc_value(label: &str, path: &std::path::Path, expected: &str, hint: 
         Err(e) => {
             println!("  WARN {label}: {} ({e}; {hint})", path.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::doctor_platform_line_for;
+
+    #[test]
+    fn doctor_platform_message_covers_linux_macos_and_other_hosts() {
+        assert_eq!(
+            doctor_platform_line_for("linux"),
+            "  PASS platform: Linux host (native daemon runtime available)"
+        );
+        assert_eq!(
+            doctor_platform_line_for("macos"),
+            "  INFO platform: macOS host detected; CLI runs locally and Outcall uses Docker Desktop's Linux runtime for the daemon and agent containers"
+        );
+        assert_eq!(
+            doctor_platform_line_for("windows"),
+            "  WARN platform: windows host detected; the isolated daemon runtime still requires Linux"
+        );
     }
 }
 
