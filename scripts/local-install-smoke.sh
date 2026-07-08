@@ -32,8 +32,14 @@ case "$os:$arch" in
     target="aarch64-unknown-linux-gnu"
     docker_image_archive="outcalld-image-linux-arm64.tar.gz"
     ;;
-  Darwin:x86_64) target="x86_64-apple-darwin" ;;
-  Darwin:arm64) target="aarch64-apple-darwin" ;;
+  Darwin:x86_64)
+    target="x86_64-apple-darwin"
+    docker_image_archive="outcalld-image-linux-amd64.tar.gz"
+    ;;
+  Darwin:arm64)
+    target="aarch64-apple-darwin"
+    docker_image_archive="outcalld-image-linux-arm64.tar.gz"
+    ;;
   *)
     echo "error: unsupported platform $os $arch" >&2
     exit 1

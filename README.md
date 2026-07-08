@@ -59,9 +59,9 @@ make install-smoke POST_INSTALL='outcall codex -- --version'
 Any extra command passed to `scripts/local-install-smoke.sh` runs after install
 inside a fresh temporary project with the newly installed binaries on `PATH`.
 
-On Linux, the installer also preloads the matching `outcalld` Docker image when
-Docker is available, so `outcall start` does not need a first-run registry
-pull.
+On Linux and macOS, the installer preloads the matching Linux `outcalld`
+Docker image when Docker is available, so `outcall start` does not need a
+first-run registry pull.
 
 ## First-time agent flow
 
