@@ -1,7 +1,11 @@
 .PHONY: build stop install-smoke install-smoke-doctor-codex install-smoke-doctor-claude
 
 build:
-	cargo build --workspace --locked
+	@cargo build --workspace --locked || { \
+		tmp_target="$$(mktemp -d "$${TMPDIR:-/tmp}/outcall-build-target.XXXXXX")"; \
+		echo "default Cargo target dir unavailable; retrying with CARGO_TARGET_DIR=$$tmp_target"; \
+		CARGO_TARGET_DIR="$$tmp_target" cargo build --workspace --locked; \
+	}
 
 stop:
 	@true
