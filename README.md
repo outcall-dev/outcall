@@ -26,9 +26,9 @@ Five Cargo crates:
 cargo build --workspace
 ```
 
-Linux is still required for the actual daemon runtime, but macOS works for the
-first-run Claude/Codex recipe flow by running `outcalld` inside Docker Desktop's
-Linux VM.
+Linux is still the native daemon runtime, but macOS is supported for the
+first-run Claude/Codex recipe flow by running `outcalld` and the agent
+containers inside Docker Desktop's Linux VM.
 
 ## Fast install
 
