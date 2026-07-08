@@ -2554,12 +2554,25 @@ fn ensure_recipe_initialized(
 }
 
 fn ensure_docker_access() -> Result<()> {
-    let output = std::process::Command::new("docker")
-        .args(["info"])
-        .output()
-        .context(
-            "failed to invoke `docker info`; install Docker and ensure the CLI is available",
-        )?;
+    let context_name = docker_context_name().unwrap_or_else(|_| "unknown".to_string());
+    let output = match command_output_with_timeout("docker", &["info"], docker_probe_timeout()) {
+        Ok(output) => output,
+        Err(CommandTimeoutError::TimedOut { timeout }) => {
+            anyhow::bail!(
+                "Docker is not ready for Outcall.\n\
+                 Detail: `docker info` did not respond within {} seconds.\n\
+                 Active Docker context: {context_name}\n\
+                 Start or restart Docker Desktop, wait for the daemon to finish booting, then rerun `outcall`.\n\
+                 Run `outcall doctor` if you want the full prerequisite report first.",
+                timeout.as_secs()
+            );
+        }
+        Err(CommandTimeoutError::Io(e)) => {
+            return Err(e).context(
+                "failed to invoke `docker info`; install Docker and ensure the CLI is available",
+            );
+        }
+    };
     if output.status.success() {
         return Ok(());
     }
@@ -2690,7 +2703,7 @@ fn build_recipe_image(
 }
 
 fn doctor_command(command: &str, args: &[&str]) {
-    match std::process::Command::new(command).args(args).output() {
+    match command_output_with_timeout(command, args, doctor_command_timeout()) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
             let first = version.lines().next().unwrap_or("available");
@@ -2701,8 +2714,87 @@ fn doctor_command(command: &str, args: &[&str]) {
             let msg = stderr.lines().next().unwrap_or("command failed");
             println!("  WARN {command}: {msg}");
         }
-        Err(e) => println!("  WARN {command}: {e}"),
+        Err(CommandTimeoutError::TimedOut { timeout }) => {
+            println!(
+                "  WARN {command}: timed out after {} seconds",
+                timeout.as_secs()
+            );
+        }
+        Err(CommandTimeoutError::Io(e)) => println!("  WARN {command}: {e}"),
     }
+}
+
+fn doctor_command_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(3)
+}
+
+fn docker_probe_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(5)
+}
+
+#[derive(Debug)]
+enum CommandTimeoutError {
+    TimedOut { timeout: std::time::Duration },
+    Io(anyhow::Error),
+}
+
+fn command_output_with_timeout(
+    command: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> std::result::Result<std::process::Output, CommandTimeoutError> {
+    use std::process::Command;
+    use std::thread;
+    use std::time::Instant;
+
+    let mut child = Command::new(command)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| CommandTimeoutError::Io(e.into()))?;
+    let start = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|e| CommandTimeoutError::Io(e.into()));
+            }
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CommandTimeoutError::TimedOut { timeout });
+            }
+            Ok(None) => thread::sleep(std::time::Duration::from_millis(100)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CommandTimeoutError::Io(e.into()));
+            }
+        }
+    }
+}
+
+fn docker_context_name() -> Result<String> {
+    let output =
+        command_output_with_timeout("docker", &["context", "show"], doctor_command_timeout())
+            .map_err(|err| match err {
+                CommandTimeoutError::TimedOut { timeout } => anyhow::anyhow!(
+                    "`docker context show` timed out after {} seconds",
+                    timeout.as_secs()
+                ),
+                CommandTimeoutError::Io(e) => e,
+            })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        anyhow::bail!("docker context show failed: {detail}");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn doctor_platform() {
@@ -2783,7 +2875,8 @@ fn doctor_proc_value(label: &str, path: &std::path::Path, expected: &str, hint: 
 
 #[cfg(test)]
 mod tests {
-    use super::doctor_platform_line_for;
+    use super::{CommandTimeoutError, command_output_with_timeout, doctor_platform_line_for};
+    use std::time::Duration;
 
     #[test]
     fn doctor_platform_message_covers_linux_macos_and_other_hosts() {
@@ -2798,6 +2891,28 @@ mod tests {
         assert_eq!(
             doctor_platform_line_for("windows"),
             "  WARN platform: windows host detected; the isolated daemon runtime still requires Linux"
+        );
+    }
+
+    #[test]
+    fn command_output_with_timeout_returns_output_for_fast_command() {
+        let output =
+            command_output_with_timeout("sh", &["-c", "printf ok"], Duration::from_secs(1))
+                .expect("fast command should succeed");
+        assert!(
+            output.status.success(),
+            "fast command should exit successfully"
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "ok");
+    }
+
+    #[test]
+    fn command_output_with_timeout_times_out_slow_command() {
+        let err = command_output_with_timeout("sh", &["-c", "sleep 2"], Duration::from_millis(100))
+            .expect_err("slow command should time out");
+        assert!(
+            matches!(err, CommandTimeoutError::TimedOut { .. }),
+            "expected timeout error, got: {err:?}"
         );
     }
 }
