@@ -36,6 +36,29 @@ containers inside Docker Desktop's Linux VM.
 curl -fsSL https://outcall.dev/install.sh | sh
 ```
 
+When you are changing the installer or release packaging locally, use the same
+`file://` flow as CI:
+
+```sh
+sh scripts/local-install-smoke.sh
+```
+
+That builds release binaries, packages a local release directory, runs
+`scripts/install.sh` against it, and verifies the installed binary versions
+from a clean temporary home.
+
+For quicker iteration during installer work:
+
+```sh
+make install-smoke
+make install-smoke-doctor-codex
+make install-smoke-doctor-claude
+make install-smoke POST_INSTALL='outcall codex -- --version'
+```
+
+Any extra command passed to `scripts/local-install-smoke.sh` runs after install
+inside a fresh temporary project with the newly installed binaries on `PATH`.
+
 On Linux, the installer also preloads the matching `outcalld` Docker image when
 Docker is available, so `outcall start` does not need a first-run registry
 pull.
