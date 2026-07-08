@@ -1,4 +1,10 @@
-.PHONY: install-smoke install-smoke-doctor-codex install-smoke-doctor-claude
+.PHONY: build stop install-smoke install-smoke-doctor-codex install-smoke-doctor-claude
+
+build:
+	cargo build --workspace --locked
+
+stop:
+	@true
 
 install-smoke:
 	sh scripts/local-install-smoke.sh $(POST_INSTALL)
