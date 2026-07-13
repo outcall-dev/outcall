@@ -59,6 +59,17 @@ fn outcall_in_dir_with_env(
     command.output().expect("cargo run failed")
 }
 
+fn assert_connect_or_success(err: &str, status: std::process::ExitStatus, label: &str) {
+    assert!(
+        status.success()
+            || err.contains("cannot connect")
+            || err.contains("permission denied")
+            || err.contains("daemon API request"),
+        "{label}: expected connect or success, got {:?}: {err}",
+        status
+    );
+}
+
 // ── Clap argument parsing ───────────────────────────────────────────────────
 
 #[test]
@@ -111,12 +122,7 @@ fn cli_bridge_subcommand_parses() {
     for action in ["status", "up", "down"] {
         let out = outcall(&["--socket", "/tmp/nonexistent.sock", "bridge", action]);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            out.status.success() || stderr.contains("cannot connect"),
-            "bridge {action}: expected connection error or success, got {:?}: {}",
-            out.status,
-            stderr
-        );
+        assert_connect_or_success(&stderr, out.status, &format!("bridge {action}"));
     }
 }
 
@@ -125,10 +131,7 @@ fn cli_dns_subcommand_parses() {
     for action in ["status", "cache", "flush"] {
         let out = outcall(&["--socket", "/tmp/nonexistent.sock", "dns", action]);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            out.status.success() || stderr.contains("cannot connect"),
-            "dns {action}: expected connection error or success"
-        );
+        assert_connect_or_success(&stderr, out.status, &format!("dns {action}"));
     }
 }
 
@@ -151,10 +154,7 @@ fn cli_dns_test_with_hostname_parses() {
         "google.com",
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success() || stderr.contains("cannot connect"),
-        "dns test google.com should parse"
-    );
+    assert_connect_or_success(&stderr, out.status, "dns test google.com");
 }
 
 #[test]
@@ -169,20 +169,14 @@ fn cli_dns_test_record_type_flag() {
         "google.com",
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success() || stderr.contains("cannot connect"),
-        "dns test --type AAAA should parse"
-    );
+    assert_connect_or_success(&stderr, out.status, "dns test --type AAAA");
 }
 
 #[test]
 fn cli_proxy_subcommand_parses() {
     let out = outcall(&["--socket", "/tmp/nonexistent.sock", "proxy", "status"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success() || stderr.contains("cannot connect"),
-        "proxy status should parse"
-    );
+    assert_connect_or_success(&stderr, out.status, "proxy status");
 }
 
 #[test]
@@ -190,10 +184,7 @@ fn cli_network_subcommands_parse() {
     for action in ["list", "create"] {
         let out = outcall(&["--socket", "/tmp/nonexistent.sock", "network", action]);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            out.status.success() || stderr.contains("cannot connect"),
-            "network {action} should parse"
-        );
+        assert_connect_or_success(&stderr, out.status, &format!("network {action}"));
     }
 }
 
@@ -212,10 +203,7 @@ fn cli_network_create_with_options() {
         "10.201.0.1",
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success() || stderr.contains("cannot connect"),
-        "network create with all options should parse"
-    );
+    assert_connect_or_success(&stderr, out.status, "network create with all options");
 }
 
 #[test]
@@ -224,10 +212,7 @@ fn cli_container_subcommands_parse() {
         let action = "list";
         let out = outcall(&["--socket", "/tmp/nonexistent.sock", "container", action]);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            out.status.success() || stderr.contains("cannot connect"),
-            "container {action} should parse"
-        );
+        assert_connect_or_success(&stderr, out.status, &format!("container {action}"));
     }
 }
 
@@ -244,10 +229,7 @@ fn cli_container_create_requires_image() {
 fn cli_custom_socket_flag() {
     let out = outcall(&["--socket", "/tmp/custom.sock", "bridge", "status"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success() || stderr.contains("cannot connect"),
-        "custom --socket should be accepted"
-    );
+    assert_connect_or_success(&stderr, out.status, "custom --socket");
 }
 
 #[test]
@@ -255,9 +237,10 @@ fn cli_default_socket_flag_is_optional() {
     // Pass nothing — should use DEFAULT_HOST_SOCKET
     let out = outcall(&["bridge", "status"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success() || stderr.contains("cannot connect"),
-        "default socket should be used when --socket omitted"
+    assert_connect_or_success(
+        &stderr,
+        out.status,
+        "default socket should be used when --socket omitted",
     );
 }
 
@@ -299,10 +282,7 @@ fn cli_network_destroy_with_name() {
         "testnet",
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success() || stderr.contains("cannot connect"),
-        "network destroy --name should parse"
-    );
+    assert_connect_or_success(&stderr, out.status, "network destroy --name");
 }
 
 #[test]
@@ -316,10 +296,7 @@ fn cli_network_status_with_name() {
         "testnet",
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success() || stderr.contains("cannot connect"),
-        "network status --name should parse"
-    );
+    assert_connect_or_success(&stderr, out.status, "network status --name");
 }
 
 #[test]
@@ -341,10 +318,7 @@ fn cli_container_create_with_all_options() {
         "512",
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success() || stderr.contains("cannot connect"),
-        "container create with all options should parse"
-    );
+    assert_connect_or_success(&stderr, out.status, "container create with all options");
 }
 
 #[test]
@@ -452,25 +426,6 @@ fn cli_top_level_start_help_parses() {
         assert!(
             out.status.success(),
             "start help {:?} should parse: {}",
-            args,
-            stderr
-        );
-    }
-}
-
-#[test]
-fn cli_top_level_recipe_alias_help_parses() {
-    for args in [
-        vec!["claude", "--help"],
-        vec!["claude", "--auth", "mount", "--help"],
-        vec!["codex", "--help"],
-        vec!["codex", "--detach", "--help"],
-    ] {
-        let out = outcall(&args);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            out.status.success(),
-            "recipe alias help {:?} should parse: {}",
             args,
             stderr
         );

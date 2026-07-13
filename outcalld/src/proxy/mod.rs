@@ -14,6 +14,7 @@
 //!   3. If ALLOW → connect upstream, forward request, relay response.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -548,7 +549,9 @@ fn build_http_ctx(
         }),
         network: Some(NetworkContext {
             hostname: Some(host.to_string()),
-            ip: String::new(),
+            ip: host
+                .parse::<IpAddr>()
+                .map_or_else(|_| String::new(), |ip| ip.to_string()),
             port,
             protocol: "tcp".into(),
         }),

@@ -103,8 +103,7 @@ outcall doctor claude
 outcall doctor codex
 ```
 
-The older `outcall claude` / `outcall codex` commands remain as aliases for
-`outcall run <recipe>`. The lower-level flow is:
+The lower-level flow is:
 
 ```sh
 outcall init <recipe>

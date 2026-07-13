@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 use outcall::{parse_memory_arg, urlencoded};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
@@ -180,10 +182,6 @@ enum Commands {
         #[command(flatten)]
         launch: RecipeLaunchArgs,
     },
-    /// Initialize and launch an isolated Claude Code container
-    Claude(RecipeLaunchArgs),
-    /// Initialize and launch an isolated Codex container
-    Codex(RecipeLaunchArgs),
     /// Manage the TLS interception CA (S011)
     Ca {
         #[command(subcommand)]
@@ -670,8 +668,6 @@ fn main() -> Result<()> {
         Some(Commands::Start { recipe, launch }) => {
             cmd_start(&cli.socket, recipe.as_deref(), launch)
         }
-        Some(Commands::Claude(args)) => cmd_recipe_alias(&cli.socket, "claude", args),
-        Some(Commands::Codex(args)) => cmd_recipe_alias(&cli.socket, "codex", args),
         Some(Commands::Ca { action }) => match action {
             CaAction::Init { out } => cmd_ca_init(out),
             CaAction::Bundle => cmd_ca_bundle(&cli.socket),
@@ -765,19 +761,6 @@ fn cmd_onboarding(socket: &str) -> Result<()> {
     println!("  outcall doctor        # inspect Docker, scaffold, and auth detection");
     println!("  outcall recipe list   # show built-in recipes");
     Ok(())
-}
-
-fn cmd_recipe_alias(socket: &str, recipe: &str, args: RecipeLaunchArgs) -> Result<()> {
-    cmd_run(
-        socket,
-        recipe,
-        args.force,
-        args.no_build,
-        args.auth,
-        args.force_auth_copy,
-        args.detach,
-        args.args,
-    )
 }
 
 fn default_launch_args() -> RecipeLaunchArgs {
@@ -1145,7 +1128,16 @@ fn cmd_start_with_selection(
         selection.recipe.id,
         selection.source.label()
     );
-    cmd_recipe_alias(socket, selection.recipe.id, args)
+    cmd_run(
+        socket,
+        selection.recipe.id,
+        args.force,
+        args.no_build,
+        args.auth,
+        args.force_auth_copy,
+        args.detach,
+        args.args,
+    )
 }
 
 // ── Recipe commands ───────────────────────────────────────────────────────
@@ -1818,7 +1810,7 @@ fn cmd_recipe_run(
         recipe.id, auth_result.effective_mode
     );
     let entrypoint_args = rewrite_recipe_entrypoint_args(&project_dir, &config.workspace, args)?;
-    launch_managed_recipe_container(socket, &project_dir, config, entrypoint_args)
+    launch_managed_recipe_container(socket, &project_dir, config, entrypoint_args).map(|_| ())
 }
 
 fn cmd_recipe_test(
@@ -1857,7 +1849,7 @@ fn cmd_recipe_test(
         );
     }
 
-    recipe_smoke_test(&project_dir, &config, recipe)?;
+    recipe_smoke_test(socket, &project_dir, &config)?;
     println!("Recipe test passed: {}", recipe.id);
     Ok(())
 }
@@ -2146,7 +2138,7 @@ fn launch_managed_recipe_container(
     project_dir: &std::path::Path,
     config: outcall::agent_config::AgentConfig,
     entrypoint_args: Vec<String>,
-) -> Result<()> {
+) -> Result<String> {
     let image = config.effective_image();
     let name = config.effective_name(project_dir);
     let workspace = config.workspace.clone();
@@ -2252,7 +2244,7 @@ fn launch_managed_recipe_container(
         println!("  Attach: docker attach {}", result.name);
         println!("  Logs:   docker logs -f {}", result.name);
         println!("  Stop:   outcall agent --stop {}", result.name);
-        return Ok(());
+        return Ok(result.name);
     }
 
     println!("  Container running. Press Ctrl+C to detach.");
@@ -2267,7 +2259,7 @@ fn launch_managed_recipe_container(
     }
 
     println!("\nAgent '{}' stopped.", result.name);
-    Ok(())
+    Ok(result.name)
 }
 
 fn parse_cpu_shares(value: &str) -> Result<i64> {
@@ -2488,49 +2480,28 @@ fn ensure_default_network(socket: &str) -> Result<()> {
 }
 
 fn recipe_smoke_test(
+    socket: &str,
     project_dir: &std::path::Path,
     config: &outcall::agent_config::AgentConfig,
-    recipe: &outcall::recipes::Recipe,
 ) -> Result<()> {
-    let image = config.effective_image();
-    let workspace = &config.workspace;
-    let abs_project_dir = std::fs::canonicalize(project_dir)
-        .with_context(|| format!("failed to canonicalize {}", project_dir.display()))?;
+    let mut smoke_config = config.clone();
+    smoke_config.name = Some(format!(
+        "{}-smoke-{}",
+        config.effective_name(project_dir),
+        std::process::id()
+    ));
 
-    let mut args = vec![
-        "run".to_string(),
-        "--rm".to_string(),
-        "--network".to_string(),
-        config.network.clone(),
-        "-v".to_string(),
-        format!("{}:{}", abs_project_dir.display(), workspace),
-        "-w".to_string(),
-        workspace.clone(),
-    ];
+    println!("Running managed recipe smoke test...");
+    let container_name = launch_managed_recipe_container(
+        socket,
+        project_dir,
+        smoke_config,
+        vec!["--version".to_string()],
+    )?;
 
-    for vol in &config.volumes {
-        args.extend_from_slice(&["-v".to_string(), vol.clone()]);
+    if let Err(err) = container_remove_request(socket, &container_name, true) {
+        eprintln!("warning: failed to remove smoke container {container_name}: {err}");
     }
-    for (key, value) in &config.env {
-        args.extend_from_slice(&["-e".to_string(), format!("{}={}", key, value)]);
-    }
-    args.extend_from_slice(&["--entrypoint".to_string(), recipe.id.to_string()]);
-    args.push(image);
-    args.push("--version".to_string());
-
-    println!("Running recipe smoke test...");
-    let output = std::process::Command::new("docker")
-        .args(&args)
-        .output()
-        .context("failed to invoke docker run for recipe smoke test")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("recipe smoke test failed: {}", stderr.trim());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let first_line = stdout.lines().next().unwrap_or("ok");
-    println!("  PASS entrypoint: {first_line}");
     Ok(())
 }
 
@@ -2825,7 +2796,24 @@ fn build_recipe_image(
     recipe: &outcall::recipes::Recipe,
     image: &str,
 ) -> Result<()> {
-    let dockerfile = outcall::recipes::recipe_dockerfile(project_dir, recipe);
+    let recipe_dir = outcall::recipes::recipe_dockerfile(project_dir, recipe)
+        .parent()
+        .context("recipe dockerfile has no parent path")?
+        .to_path_buf();
+    let fingerprint = recipe_directory_fingerprint(&recipe_dir)
+        .context("failed to compute recipe build fingerprint")?;
+    let fingerprint_path = recipe_dir.join(".outcall-image-fingerprint");
+
+    if docker_image_exists(image)? && is_recipe_image_cached(&fingerprint_path, &fingerprint)? {
+        println!("Recipe image {image} already up-to-date; skipping build.");
+        return Ok(());
+    }
+
+    if docker_image_exists(image)? {
+        println!("Rebuilding recipe image {image} (recipe context changed).");
+    }
+
+    let dockerfile = recipe_dir.join("Dockerfile");
     println!("Building recipe image {image}...");
     let status = std::process::Command::new("docker")
         .arg("build")
@@ -2838,6 +2826,81 @@ fn build_recipe_image(
         .context("failed to invoke docker build")?;
     if !status.success() {
         anyhow::bail!("docker build failed (exit {:?})", status.code());
+    }
+
+    std::fs::write(&fingerprint_path, format!("{fingerprint}\n"))
+        .with_context(|| format!("failed to write {}", fingerprint_path.display()))?;
+    Ok(())
+}
+
+fn docker_image_exists(image: &str) -> Result<bool> {
+    let output = std::process::Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", image])
+        .output()
+        .context("failed to invoke docker image inspect")?;
+
+    Ok(output.status.success())
+}
+
+fn is_recipe_image_cached(fingerprint_path: &std::path::Path, fingerprint: &str) -> Result<bool> {
+    if !fingerprint_path.exists() {
+        return Ok(false);
+    }
+
+    let existing = std::fs::read_to_string(fingerprint_path)
+        .with_context(|| format!("failed to read {}", fingerprint_path.display()))?;
+
+    Ok(existing.trim() == fingerprint)
+}
+
+fn recipe_directory_fingerprint(recipe_dir: &std::path::Path) -> Result<String> {
+    let mut files = Vec::new();
+    collect_files(recipe_dir, &mut files, recipe_dir)
+        .with_context(|| format!("failed to collect files from {}", recipe_dir.display()))?;
+    files.sort();
+
+    let mut hasher = DefaultHasher::new();
+    for file in files {
+        let relative = file
+            .strip_prefix(recipe_dir)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        relative.hash(&mut hasher);
+
+        let bytes =
+            std::fs::read(&file).with_context(|| format!("failed to read {}", file.display()))?;
+        hasher.write(&bytes);
+    }
+
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
+fn collect_files(
+    dir: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+    root: &std::path::Path,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir).context("failed to read recipe directory")? {
+        let entry = entry.context("failed to read recipe directory entry")?;
+        let path = entry.path();
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        if rel == std::path::Path::new(".outcall-image-fingerprint") {
+            continue;
+        }
+
+        let metadata = entry
+            .metadata()
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+
+        if metadata.is_dir() {
+            collect_files(&path, files, root)?;
+            continue;
+        }
+
+        if metadata.is_file() {
+            files.push(path);
+        }
     }
     Ok(())
 }
@@ -3824,6 +3887,16 @@ fn cmd_container_stop(socket: &str, name: &str, timeout: Option<i64>) -> Result<
 }
 
 fn cmd_container_remove(socket: &str, name: &str, force: bool) -> Result<()> {
+    let result = container_remove_request(socket, name, force)?;
+    println!("Container \"{}\" removed.", result.name);
+    Ok(())
+}
+
+fn container_remove_request(
+    socket: &str,
+    name: &str,
+    force: bool,
+) -> Result<ContainerRemoveResult> {
     let req = outcall_api::ContainerRemoveRequest {
         name: name.to_string(),
         force: Some(force),
@@ -3835,9 +3908,8 @@ fn cmd_container_remove(socket: &str, name: &str, force: bool) -> Result<()> {
         anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
     }
 
-    let result: ContainerRemoveResult = serde_json::from_value(resp.data.context("no data")?)?;
-    println!("Container \"{}\" removed.", result.name);
-    Ok(())
+    serde_json::from_value(resp.data.context("no data")?)
+        .context("failed to parse container remove response")
 }
 
 fn cmd_container_pull(socket: &str, image: &str) -> Result<()> {
