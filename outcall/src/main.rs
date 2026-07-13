@@ -2172,7 +2172,8 @@ fn launch_managed_recipe_container(
         )
     };
 
-    let interactive = !config.detach && entrypoint_args.is_empty() && config.command.is_none();
+    let batch_command = !entrypoint_args.is_empty() || config.command.is_some();
+    let interactive = !config.detach && !batch_command;
     let tty = interactive && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let cmd = if !entrypoint_args.is_empty() {
         Some(entrypoint_args)
@@ -2247,6 +2248,15 @@ fn launch_managed_recipe_container(
         return Ok(result.name);
     }
 
+    // Commands passed after `--` are one-shot recipe invocations, not an
+    // interactive agent session. Waiting avoids the race where a quick command
+    // exits successfully before `docker attach` has connected.
+    if batch_command {
+        wait_for_recipe_container(&result.name)?;
+        println!("\nAgent '{}' stopped.", result.name);
+        return Ok(result.name);
+    }
+
     println!("  Container running. Press Ctrl+C to detach.");
     println!();
 
@@ -2260,6 +2270,41 @@ fn launch_managed_recipe_container(
 
     println!("\nAgent '{}' stopped.", result.name);
     Ok(result.name)
+}
+
+fn wait_for_recipe_container(name: &str) -> Result<()> {
+    let wait = std::process::Command::new("docker")
+        .args(["wait", name])
+        .output()
+        .context("failed to invoke docker wait")?;
+    if !wait.status.success() {
+        anyhow::bail!(
+            "failed while waiting for agent container {name}: {}",
+            String::from_utf8_lossy(&wait.stderr).trim()
+        );
+    }
+
+    let logs = std::process::Command::new("docker")
+        .args(["logs", name])
+        .output()
+        .context("failed to invoke docker logs")?;
+    print!("{}", String::from_utf8_lossy(&logs.stdout));
+    eprint!("{}", String::from_utf8_lossy(&logs.stderr));
+    if !logs.status.success() {
+        anyhow::bail!(
+            "failed to read agent container logs for {name}: {}",
+            String::from_utf8_lossy(&logs.stderr).trim()
+        );
+    }
+
+    let exit_code = String::from_utf8_lossy(&wait.stdout)
+        .trim()
+        .parse::<i32>()
+        .context("docker wait returned an invalid exit code")?;
+    if exit_code != 0 {
+        anyhow::bail!("agent exited with code {exit_code}");
+    }
+    Ok(())
 }
 
 fn parse_cpu_shares(value: &str) -> Result<i64> {
@@ -2485,6 +2530,10 @@ fn recipe_smoke_test(
     config: &outcall::agent_config::AgentConfig,
 ) -> Result<()> {
     let mut smoke_config = config.clone();
+    // Smoke runs must wait for the recipe command and inspect its exit status;
+    // a detached container could otherwise be removed before it reports a
+    // startup failure.
+    smoke_config.detach = false;
     smoke_config.name = Some(format!(
         "{}-smoke-{}",
         config.effective_name(project_dir),
@@ -2597,7 +2646,8 @@ fn rewrite_recipe_entrypoint_args(
         if let Some((flag, value)) = arg.split_once('=')
             && flag == "--output-last-message"
         {
-            let rewritten_value = rewrite_container_output_path(&abs_project_dir, workspace, value)?;
+            let rewritten_value =
+                rewrite_container_output_path(&abs_project_dir, workspace, value)?;
             rewritten.push(format!("{flag}={rewritten_value}"));
             continue;
         }
