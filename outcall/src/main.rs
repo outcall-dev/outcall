@@ -1176,18 +1176,17 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
     }
     println!("  ensured {}", rules_dir.display());
 
-    if load_default_recipe(&project_dir)?.is_none() {
-        if let Ok(selection) = detect_default_recipe() {
-            if !matches!(selection.source, RecipeSource::SavedDefault) {
-                let selected = save_default_recipe(&project_dir, selection.recipe.id)?;
-                println!("  wrote {}", selected.display());
-                println!(
-                    "  selected default recipe: {} ({})",
-                    selection.recipe.id,
-                    selection.source.label()
-                );
-            }
-        }
+    if load_default_recipe(&project_dir)?.is_none()
+        && let Ok(selection) = detect_default_recipe()
+        && !matches!(selection.source, RecipeSource::SavedDefault)
+    {
+        let selected = save_default_recipe(&project_dir, selection.recipe.id)?;
+        println!("  wrote {}", selected.display());
+        println!(
+            "  selected default recipe: {} ({})",
+            selection.recipe.id,
+            selection.source.label()
+        );
     }
 
     println!();
@@ -1340,6 +1339,7 @@ fn cmd_setup_inner(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_run(
     socket: &str,
     id: &str,
@@ -1915,7 +1915,7 @@ fn stage_recipe_auth(
     match effective_mode {
         RecipeAuthMode::Auto => unreachable!("auto mode should resolve before staging"),
         RecipeAuthMode::Copy => {
-            let staged = outcall::recipes::stage_auth_copy(&project_dir, recipe, force_auth_copy)?;
+            let staged = outcall::recipes::stage_auth_copy(project_dir, recipe, force_auth_copy)?;
             if staged.copied.is_empty() {
                 println!("No user auth files copied for recipe \"{}\".", recipe.id);
             } else {
@@ -2311,15 +2311,15 @@ fn ensure_daemon_ready(socket: &str, rules_dir: Option<&std::path::Path>) -> Res
             if output.status.success()
                 && String::from_utf8_lossy(&output.stdout).trim() == "true" =>
         {
-            if let Some(ref desired) = desired_rules_dir {
-                if daemon_rules_mount_mismatch(DEFAULT_DAEMON_NAME, desired)? {
-                    println!(
-                        "Restarting outcall-daemon to mount project rules from {}...",
-                        desired.display()
-                    );
-                    cmd_daemon_stop(None)?;
-                    start_daemon_with_rules(socket, desired)?;
-                }
+            if let Some(ref desired) = desired_rules_dir
+                && daemon_rules_mount_mismatch(DEFAULT_DAEMON_NAME, desired)?
+            {
+                println!(
+                    "Restarting outcall-daemon to mount project rules from {}...",
+                    desired.display()
+                );
+                cmd_daemon_stop(None)?;
+                start_daemon_with_rules(socket, desired)?;
             }
             wait_for_daemon_socket(socket)
         }
@@ -2385,13 +2385,13 @@ fn wait_for_daemon_socket(socket: &str) -> Result<()> {
             match daemon_exec_socket_ready(socket) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {
-                    if let Some(state) = daemon_container_state(DEFAULT_DAEMON_NAME)? {
-                        if state != "running" {
-                            let logs = daemon_container_logs(DEFAULT_DAEMON_NAME)?;
-                            anyhow::bail!(
-                                "outcalld container is not running (state: {state}) while waiting for {socket}\n{logs}"
-                            );
-                        }
+                    if let Some(state) = daemon_container_state(DEFAULT_DAEMON_NAME)?
+                        && state != "running"
+                    {
+                        let logs = daemon_container_logs(DEFAULT_DAEMON_NAME)?;
+                        anyhow::bail!(
+                            "outcalld container is not running (state: {state}) while waiting for {socket}\n{logs}"
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(100));
                 }
@@ -2414,13 +2414,13 @@ fn wait_for_daemon_socket(socket: &str) -> Result<()> {
         match UnixStream::connect(socket) {
             Ok(_) => return Ok(()),
             Err(err) => {
-                if let Some(state) = daemon_container_state(DEFAULT_DAEMON_NAME)? {
-                    if state != "running" {
-                        let logs = daemon_container_logs(DEFAULT_DAEMON_NAME)?;
-                        anyhow::bail!(
-                            "outcalld container is not running (state: {state}) while waiting for {socket}\n{logs}"
-                        );
-                    }
+                if let Some(state) = daemon_container_state(DEFAULT_DAEMON_NAME)?
+                    && state != "running"
+                {
+                    let logs = daemon_container_logs(DEFAULT_DAEMON_NAME)?;
+                    anyhow::bail!(
+                        "outcalld container is not running (state: {state}) while waiting for {socket}\n{logs}"
+                    );
                 }
                 last_error = Some(err);
                 std::thread::sleep(Duration::from_millis(100));
@@ -2594,13 +2594,12 @@ fn rewrite_recipe_entrypoint_args(
             )?);
             continue;
         }
-        if let Some((flag, value)) = arg.split_once('=') {
-            if flag == "--output-last-message" {
-                let rewritten_value =
-                    rewrite_container_output_path(&abs_project_dir, workspace, value)?;
-                rewritten.push(format!("{flag}={rewritten_value}"));
-                continue;
-            }
+        if let Some((flag, value)) = arg.split_once('=')
+            && flag == "--output-last-message"
+        {
+            let rewritten_value = rewrite_container_output_path(&abs_project_dir, workspace, value)?;
+            rewritten.push(format!("{flag}={rewritten_value}"));
+            continue;
         }
         rewritten.push(arg);
     }
@@ -2620,10 +2619,10 @@ fn rewrite_container_output_path(
         return workspace_output_path(workspace, candidate, relative);
     }
 
-    if let Some(resolved) = resolve_output_path_for_workspace(candidate)? {
-        if let Ok(relative) = resolved.strip_prefix(project_dir) {
-            return workspace_output_path(workspace, candidate, relative);
-        }
+    if let Some(resolved) = resolve_output_path_for_workspace(candidate)?
+        && let Ok(relative) = resolved.strip_prefix(project_dir)
+    {
+        return workspace_output_path(workspace, candidate, relative);
     }
     anyhow::bail!(
         "output path {} is outside the mounted workspace; use a relative path or a file inside {}",
@@ -4324,6 +4323,7 @@ const DEFAULT_DAEMON_NAME: &str = "outcall-daemon";
 const DEFAULT_DAEMON_IMAGE: &str =
     concat!("ghcr.io/outcall-dev/outcalld:v", env!("CARGO_PKG_VERSION"));
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_daemon_start(
     image: Option<String>,
     bridge: Option<String>,

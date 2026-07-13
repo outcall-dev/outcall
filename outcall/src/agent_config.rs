@@ -212,11 +212,11 @@ fn next_project_container_name(project_dir: &Path) -> String {
         .args(["ps", "-a", "--format", "{{.Names}}"])
         .output();
 
-    if let Ok(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return next_project_container_name_from_existing(&base, stdout.lines());
-        }
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return next_project_container_name_from_existing(&base, stdout.lines());
     }
 
     format!("{base}-1")
@@ -229,10 +229,10 @@ fn next_project_container_name_from_existing<'a>(
     let prefix = format!("{base}-");
     let mut used = std::collections::BTreeSet::new();
     for line in existing {
-        if let Some(rest) = line.strip_prefix(&prefix) {
-            if let Ok(index) = rest.parse::<u32>() {
-                used.insert(index);
-            }
+        if let Some(rest) = line.strip_prefix(&prefix)
+            && let Ok(index) = rest.parse::<u32>()
+        {
+            used.insert(index);
         }
     }
 

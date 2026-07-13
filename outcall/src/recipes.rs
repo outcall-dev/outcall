@@ -617,10 +617,10 @@ pub fn expanded_path(path: &str) -> PathBuf {
 }
 
 fn expanded_path_with_home(path: &str, home: Option<&Path>) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = home {
-            return home.join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = home
+    {
+        return home.join(rest);
     }
     PathBuf::from(path)
 }
