@@ -80,10 +80,8 @@ fn cli_without_subcommand_prints_onboarding() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "expected onboarding output: {stderr}");
     assert!(
-        stdout.contains(
-            "Recommended first command:\n  outcall start          # after you export provider auth"
-        ),
-        "expected start recommendation, got: {stdout}"
+        stdout.contains("Recommended first command:\n  outcall run claude"),
+        "expected explicit recipe recommendation, got: {stdout}"
     );
     assert!(
         stdout.contains("outcall setup"),
@@ -402,6 +400,7 @@ fn cli_top_level_run_help_parses() {
         vec!["run", "--help"],
         vec!["run", "claude", "--help"],
         vec!["run", "codex", "--auth", "mount", "--help"],
+        vec!["run", "codex", "--name", "review-1", "--help"],
     ] {
         let out = outcall(&args);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -415,123 +414,82 @@ fn cli_top_level_run_help_parses() {
 }
 
 #[test]
-fn cli_top_level_start_help_parses() {
+fn cli_auth_stages_detected_env_credentials_without_docker() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_with_env(
+        temp.path(),
+        &["auth", "codex", "--auth", "env-only"],
+        &[("CODEX_API_KEY", "test-codex-key")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "auth should succeed: {stderr}");
+    assert!(
+        stdout.contains("Authentication ready for Codex CLI"),
+        "expected auth confirmation, got: {stdout}"
+    );
+    assert!(
+        temp.path().join(".outcall/default-recipe").exists(),
+        "auth should persist the selected project recipe"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(".outcall/auth/codex/mode"))
+            .expect("read saved auth mode"),
+        "env-only",
+        "auth should persist the explicit mode for subsequent auto runs"
+    );
+}
+
+#[test]
+fn cli_allow_edits_project_rule_yaml_without_docker() {
+    let temp = tempdir().expect("tempdir");
+    let out = outcall_in_dir_clean_env(temp.path(), &["allow", "codex", "https://api.sentry.io"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "allow should succeed: {stderr}");
+    assert!(
+        stdout.contains("Default deny remains active"),
+        "expected default deny reminder, got: {stdout}"
+    );
+    let rules = std::fs::read_to_string(temp.path().join(".outcall/rules/codex.yaml"))
+        .expect("read generated rules");
+    assert!(rules.contains("codex-host-api-sentry-io"));
+    assert!(rules.contains("codex-github"));
+}
+
+#[test]
+fn cli_first_run_convenience_commands_render_help() {
     for args in [
-        vec!["start", "--help"],
-        vec!["start", "claude", "--help"],
-        vec!["start", "codex", "--auth", "mount", "--help"],
+        vec!["doctor", "--fix", "--help"],
+        vec!["auth", "--help"],
+        vec!["allow", "--help"],
+        vec!["policy", "explain", "--help"],
+        vec!["ps", "--help"],
+        vec!["logs", "--help"],
+        vec!["stop", "--help"],
     ] {
         let out = outcall(&args);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             out.status.success(),
-            "start help {:?} should parse: {}",
-            args,
-            stderr
+            "help {:?} should parse: {stderr}",
+            args
         );
     }
 }
 
 #[test]
-fn cli_top_level_start_without_detectable_auth_exits_usefully() {
+fn cli_start_alias_is_not_available() {
     let temp = tempdir().expect("tempdir");
-    let out = outcall_in_dir_clean_env(temp.path(), &["start"]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "start with no auth should fail");
-    assert!(
-        stderr.contains("could not infer which agent to start"),
-        "expected a useful detection error, got: {stderr}"
-    );
-}
-
-#[test]
-fn cli_top_level_start_forwards_agent_args_without_treating_them_as_recipe() {
-    let temp = tempdir().expect("tempdir");
-    let out = outcall_in_dir_with_env(
-        temp.path(),
-        &["start", "--", "--version"],
-        &[("ANTHROPIC_API_KEY", "test-key")],
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("unknown recipe \"--version\""),
-        "start should not treat forwarded args as a recipe: {stderr}"
-    );
-    assert!(
-        stdout.contains("Starting with recipe: claude"),
-        "start should auto-detect claude before forwarding args, got stdout: {stdout}"
-    );
-}
-
-#[test]
-fn cli_top_level_init_recipe_persists_project_default_for_start() {
-    let temp = tempdir().expect("tempdir");
-    let init = outcall_in_dir(temp.path(), &["init", "claude"]);
-    let init_stderr = String::from_utf8_lossy(&init.stderr);
-    assert!(
-        init.status.success(),
-        "init claude should succeed: {init_stderr}"
-    );
-
-    let out = outcall_in_dir_with_env(
-        temp.path(),
-        &["start", "--", "--version"],
-        &[
-            ("ANTHROPIC_API_KEY", "test-anthropic"),
-            ("CODEX_API_KEY", "test-codex"),
-        ],
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stdout.contains("Starting with recipe: claude"),
-        "start should prefer the saved project default recipe, got stdout: {stdout}\nstderr: {stderr}"
-    );
-}
-
-#[test]
-fn cli_top_level_start_prefers_single_project_context_over_mixed_host_auth() {
-    let temp = tempdir().expect("tempdir");
-    std::fs::write(temp.path().join("AGENTS.md"), "Use Codex in this repo.\n")
-        .expect("write AGENTS.md");
-    let out = outcall_in_dir_with_env(
-        temp.path(),
-        &["start", "--", "--version"],
-        &[
-            ("ANTHROPIC_API_KEY", "test-anthropic"),
-            ("CODEX_API_KEY", "test-codex"),
-        ],
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stdout.contains("Starting with recipe: codex"),
-        "start should prefer codex project context over mixed host auth, got stdout: {stdout}\nstderr: {stderr}"
-    );
-}
-
-#[test]
-fn cli_top_level_start_ambiguous_project_context_error_explains_saved_default() {
-    let temp = tempdir().expect("tempdir");
-    std::fs::write(temp.path().join("AGENTS.md"), "Use Codex in this repo.\n")
-        .expect("write AGENTS.md");
-    std::fs::write(temp.path().join("CLAUDE.md"), "Use Claude in this repo.\n")
-        .expect("write CLAUDE.md");
-    let out = outcall_in_dir_clean_env(temp.path(), &["start"]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !out.status.success(),
-        "ambiguous project context should fail"
-    );
-    assert!(
-        stderr.contains("found project context for multiple agents"),
-        "expected project-context ambiguity error, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("Future `outcall start` runs will reuse the saved project default."),
-        "project-context ambiguity error should explain the one-time explicit choice, got: {stderr}"
-    );
+    for args in [&["start"][..], &["recipe", "run", "codex"][..]] {
+        let out = outcall_in_dir_clean_env(temp.path(), args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "launch alias should fail: {args:?}");
+        assert!(
+            stderr.contains("unrecognized subcommand"),
+            "expected removed alias error for {args:?}, got: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -554,7 +512,7 @@ fn cli_top_level_doctor_reports_project_default_recipe() {
     );
     assert!(
         stdout.contains("project default recipe: codex"),
-        "doctor should recommend start from the saved recipe, got: {stdout}"
+        "doctor should recommend the explicit saved recipe, got: {stdout}"
     );
 }
 
@@ -578,15 +536,15 @@ fn cli_top_level_init_recipe_works_in_clean_project() {
 }
 
 #[test]
-fn cli_top_level_init_without_recipe_points_to_start() {
+fn cli_top_level_init_without_recipe_points_to_explicit_runs() {
     let temp = tempdir().expect("tempdir");
     let out = outcall_in_dir_clean_env(temp.path(), &["init"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "init should succeed: {stderr}");
     assert!(
-        stdout.contains("outcall start"),
-        "init should recommend outcall start, got: {stdout}"
+        stdout.contains("outcall run claude") && stdout.contains("outcall run codex"),
+        "init should recommend explicit recipe runs, got: {stdout}"
     );
 }
 
@@ -599,12 +557,12 @@ fn cli_top_level_init_without_recipe_saves_single_detected_provider() {
     assert!(out.status.success(), "init should succeed: {stderr}");
     assert!(
         stdout.contains("selected default recipe: claude"),
-        "init should save the detected provider for later start runs, got: {stdout}"
+        "init should save the detected provider for later setup commands, got: {stdout}"
     );
 }
 
 #[test]
-fn cli_top_level_doctor_recommends_start_for_single_detected_provider() {
+fn cli_top_level_doctor_recommends_recipe_for_single_detected_provider() {
     let temp = tempdir().expect("tempdir");
     let out = outcall_in_dir_with_env(
         temp.path(),
@@ -619,27 +577,8 @@ fn cli_top_level_doctor_recommends_start_for_single_detected_provider() {
         "doctor should report detected auth candidates, got: {stdout}"
     );
     assert!(
-        stdout.contains("Recommended first command:\n  outcall start"),
-        "doctor should recommend outcall start for a single provider, got: {stdout}"
-    );
-}
-
-#[test]
-fn cli_top_level_start_ambiguous_auth_error_explains_saved_default() {
-    let temp = tempdir().expect("tempdir");
-    let out = outcall_in_dir_with_env(
-        temp.path(),
-        &["start"],
-        &[
-            ("ANTHROPIC_API_KEY", "test-anthropic"),
-            ("CODEX_API_KEY", "test-codex"),
-        ],
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "ambiguous start should fail");
-    assert!(
-        stderr.contains("Future `outcall start` runs will reuse the saved project default."),
-        "ambiguous start error should explain the one-time explicit choice, got: {stderr}"
+        stdout.contains("Recommended first command:\n  outcall run claude"),
+        "doctor should recommend the detected explicit recipe, got: {stdout}"
     );
 }
 
@@ -660,7 +599,7 @@ fn cli_top_level_setup_without_recipe_uses_detected_provider() {
 }
 
 #[test]
-fn cli_top_level_setup_without_recipe_shows_same_ambiguity_guidance_as_start() {
+fn cli_top_level_setup_without_recipe_shows_explicit_ambiguity_guidance() {
     let temp = tempdir().expect("tempdir");
     let out = outcall_in_dir_with_env(
         temp.path(),
@@ -673,7 +612,7 @@ fn cli_top_level_setup_without_recipe_shows_same_ambiguity_guidance_as_start() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "ambiguous setup should fail");
     assert!(
-        stderr.contains("Future `outcall start` runs will reuse the saved project default."),
-        "setup ambiguity should explain the one-time explicit choice, got: {stderr}"
+        stderr.contains("outcall run claude") && stderr.contains("outcall run codex"),
+        "setup ambiguity should explain explicit recipe choices, got: {stderr}"
     );
 }

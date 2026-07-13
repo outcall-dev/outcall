@@ -5,6 +5,7 @@
 pub mod agent_boot;
 pub mod agent_config;
 pub mod host_resources;
+pub mod policy;
 pub mod recipes;
 
 use anyhow::Context;
