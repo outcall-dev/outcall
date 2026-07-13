@@ -132,23 +132,19 @@ jobs:
       - name: Export amd64 daemon image archive
         run: |
           mkdir -p release
-          docker buildx build \
-            --platform linux/amd64 \
-            --tag ghcr.io/outcall-dev/outcalld:${RELEASE_TAG} \
-            --tag ghcr.io/outcall-dev/outcalld:latest \
-            --output type=docker,dest=release/outcalld-image-linux-amd64.tar \
-            .
+          # Export the already-published manifest variant. Rebuilding here repeats
+          # the expensive cross-platform daemon compilation for each archive.
+          image="${REGISTRY}/${IMAGE_NAME}:${RELEASE_TAG}"
+          docker pull --platform linux/amd64 "$image"
+          docker image save "$image" -o release/outcalld-image-linux-amd64.tar
           gzip -f release/outcalld-image-linux-amd64.tar
           sha256sum release/outcalld-image-linux-amd64.tar.gz > release/outcalld-image-linux-amd64.tar.gz.sha256
 
       - name: Export arm64 daemon image archive
         run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            --tag ghcr.io/outcall-dev/outcalld:${RELEASE_TAG} \
-            --tag ghcr.io/outcall-dev/outcalld:latest \
-            --output type=docker,dest=release/outcalld-image-linux-arm64.tar \
-            .
+          image="${REGISTRY}/${IMAGE_NAME}:${RELEASE_TAG}"
+          docker pull --platform linux/arm64 "$image"
+          docker image save "$image" -o release/outcalld-image-linux-arm64.tar
           gzip -f release/outcalld-image-linux-arm64.tar
           sha256sum release/outcalld-image-linux-arm64.tar.gz > release/outcalld-image-linux-arm64.tar.gz.sha256
 

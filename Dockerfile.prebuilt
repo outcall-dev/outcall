@@ -1,0 +1,8 @@
+ARG BASE_IMAGE=outcall-daemon-runtime:latest
+FROM ${BASE_IMAGE}
+
+COPY outcalld /usr/local/bin/outcalld
+COPY outcall /usr/local/bin/outcall
+COPY outcall-agent /usr/local/bin/outcall-agent
+
+ENTRYPOINT ["outcalld"]

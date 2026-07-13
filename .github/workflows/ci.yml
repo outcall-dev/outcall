@@ -141,7 +141,9 @@ jobs:
 
   installer-smoke:
     name: installer smoke (linux)
-    runs-on: ubuntu-latest
+    # Host-built binaries are placed in the Debian Bookworm daemon image.
+    # Ubuntu 22.04's glibc is compatible with Bookworm; ubuntu-latest is not.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
 
@@ -166,14 +168,7 @@ jobs:
           cp target/release/outcall-agent release-smoke/x86_64-unknown-linux-gnu/
           tar -czf release-smoke/x86_64-unknown-linux-gnu.tar.gz -C release-smoke/x86_64-unknown-linux-gnu .
           sha256sum release-smoke/x86_64-unknown-linux-gnu.tar.gz > release-smoke/x86_64-unknown-linux-gnu.tar.gz.sha256
-          docker build \
-            -t ghcr.io/outcall-dev/outcalld:v"$VERSION" \
-            -t ghcr.io/outcall-dev/outcalld:latest \
-            .
-          docker save \
-            ghcr.io/outcall-dev/outcalld:v"$VERSION" \
-            ghcr.io/outcall-dev/outcalld:latest | gzip > release-smoke/outcalld-image-linux-amd64.tar.gz
-          sha256sum release-smoke/outcalld-image-linux-amd64.tar.gz > release-smoke/outcalld-image-linux-amd64.tar.gz.sha256
+          sh scripts/build-local-daemon-image.sh release-smoke
           printf '%s' "$VERSION" > release-smoke/VERSION
 
       - name: Enable bridge netfilter
@@ -275,7 +270,8 @@ jobs:
 
   secure-install-runtime:
     name: secure install + runtime + security validation
-    runs-on: ubuntu-latest
+    # Keep host-built binaries compatible with the Debian Bookworm runtime image.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
 
@@ -293,40 +289,8 @@ jobs:
       - name: Build daemon image for local preload
         run: |
           set -eu
-          ROOT_DIR="$(git rev-parse --show-toplevel)"
-          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' outcall/Cargo.toml | head -n1)"
           mkdir -p "$RUNNER_TEMP/outcall-ci-release"
-          if [ -f "$ROOT_DIR/scripts/e2e/Dockerfile" ]; then
-            DOCKERFILE="$ROOT_DIR/scripts/e2e/Dockerfile"
-          elif [ -f "$ROOT_DIR/application/scripts/e2e/Dockerfile" ]; then
-            DOCKERFILE="$ROOT_DIR/application/scripts/e2e/Dockerfile"
-          elif [ -f "$ROOT_DIR/Dockerfile" ]; then
-            DOCKERFILE="$ROOT_DIR/Dockerfile"
-          elif [ -f "$ROOT_DIR/../application/scripts/e2e/Dockerfile" ]; then
-            DOCKERFILE="$ROOT_DIR/../application/scripts/e2e/Dockerfile"
-            ROOT_DIR="$(cd "$ROOT_DIR/.." && pwd)"
-          elif [ -f "$ROOT_DIR/../Dockerfile" ]; then
-            DOCKERFILE="$ROOT_DIR/../Dockerfile"
-            ROOT_DIR="$(cd "$ROOT_DIR/.." && pwd)"
-          else
-            CANDIDATE=$(find "$ROOT_DIR" "$ROOT_DIR/.." -maxdepth 4 -type f \( -name Dockerfile -o -path '*/scripts/e2e/Dockerfile' \) | head -n 1)
-            if [ -n "$CANDIDATE" ]; then
-              DOCKERFILE="$CANDIDATE"
-              if [[ "$DOCKERFILE" == */scripts/e2e/Dockerfile ]]; then
-                ROOT_DIR="$(dirname "$(dirname "$DOCKERFILE")")"
-              else
-                ROOT_DIR="$(dirname "$DOCKERFILE")"
-              fi
-            else
-              echo "No supported daemon Dockerfile found in repository."
-              exit 1
-            fi
-          fi
-          docker build -f "$DOCKERFILE" \
-            -t "ghcr.io/outcall-dev/outcalld:v$VERSION" \
-            -t "ghcr.io/outcall-dev/outcalld:latest" "$ROOT_DIR"
-          docker save "ghcr.io/outcall-dev/outcalld:v$VERSION" | gzip > "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz"
-          sha256sum "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz" > "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz.sha256"
+          sh scripts/build-local-daemon-image.sh "$RUNNER_TEMP/outcall-ci-release"
 
       - name: Package local installer artifacts
         run: |
