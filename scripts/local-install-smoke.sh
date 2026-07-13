@@ -58,6 +58,11 @@ cp "$repo_root/target/release/outcall" "$release_root/$target/"
 cp "$repo_root/target/release/outcalld" "$release_root/$target/"
 cp "$repo_root/target/release/outcall-agent" "$release_root/$target/"
 tar -czf "$release_root/$target.tar.gz" -C "$release_root/$target" .
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum "$release_root/$target.tar.gz" > "$release_root/$target.tar.gz.sha256"
+else
+  shasum -a 256 "$release_root/$target.tar.gz" > "$release_root/$target.tar.gz.sha256"
+fi
 
 if [ -n "$docker_image_archive" ] && command -v docker >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
   echo "==> Building local daemon image archive"
@@ -68,6 +73,11 @@ if [ -n "$docker_image_archive" ] && command -v docker >/dev/null 2>&1 && comman
   docker save \
     "ghcr.io/outcall-dev/outcalld:v$version" \
     "ghcr.io/outcall-dev/outcalld:latest" | gzip > "$release_root/$docker_image_archive"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$release_root/$docker_image_archive" > "$release_root/$docker_image_archive.sha256"
+  else
+    shasum -a 256 "$release_root/$docker_image_archive" > "$release_root/$docker_image_archive.sha256"
+  fi
 fi
 
 echo "==> Installing from local file:// release"

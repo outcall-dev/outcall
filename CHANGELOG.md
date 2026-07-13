@@ -45,8 +45,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `outcall start`.
 - **Onboarding docs:** README, installation, quickstart, CLI reference, and
   website copy now lead with `curl -fsSL https://outcall.dev/install.sh | sh`
-  followed by `outcall`, then `outcall start`, with explicit `outcall claude`
-  / `outcall codex` fallbacks when detection is ambiguous.
+  followed by `outcall`, then `outcall start`, with explicit
+  `outcall run claude` / `outcall run codex` fallbacks when detection is
+  ambiguous.
 - **Daemon bootstrap:** the CLI now defaults to the matching versioned daemon
   image tag instead of `latest`, and the installer preloads that image when
   Docker is available.

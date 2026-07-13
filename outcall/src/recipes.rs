@@ -14,9 +14,18 @@ pub struct Recipe {
     pub readme: &'static str,
     pub context: &'static str,
     pub agent_config: &'static str,
+    pub policy_templates: &'static [PolicyTemplate],
     pub auth_env: &'static [&'static str],
     pub user_paths: &'static [&'static str],
     pub project_paths: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyTemplate {
+    pub name: &'static str,
+    pub id: &'static str,
+    pub description: &'static str,
+    pub condition: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +52,37 @@ const CODEX_USER_PATHS: &[&str] = &[
     "~/.codex/AGENTS.md",
 ];
 const CODEX_PROJECT_PATHS: &[&str] = &["AGENTS.md", ".codex/config.toml"];
+
+const CLAUDE_GITHUB_POLICY: PolicyTemplate = PolicyTemplate {
+    name: "github",
+    id: "claude-github",
+    description: "Claude Code may access GitHub for repository operations.",
+    condition: "http.host == \"github.com\" || http.host.endsWith(\".github.com\") || dns.query == \"github.com\" || dns.query.endsWith(\".github.com\")",
+};
+
+const CODEX_GITHUB_POLICY: PolicyTemplate = PolicyTemplate {
+    name: "github",
+    id: "codex-github",
+    description: "Codex may access GitHub for repository operations.",
+    condition: "http.host == \"github.com\" || http.host.endsWith(\".github.com\") || dns.query == \"github.com\" || dns.query.endsWith(\".github.com\")",
+};
+
+const CLAUDE_API_POLICY: PolicyTemplate = PolicyTemplate {
+    name: "anthropic",
+    id: "claude-anthropic-api",
+    description: "Claude Code may call Anthropic APIs over HTTPS.",
+    condition: "http.host == \"api.anthropic.com\" || dns.query == \"api.anthropic.com\"",
+};
+
+const CODEX_API_POLICY: PolicyTemplate = PolicyTemplate {
+    name: "openai",
+    id: "codex-openai-api",
+    description: "Codex may call OpenAI and ChatGPT endpoints over HTTPS.",
+    condition: "http.host == \"api.openai.com\" || http.host == \"chatgpt.com\" || dns.query == \"api.openai.com\" || dns.query == \"chatgpt.com\"",
+};
+
+const CLAUDE_POLICY_TEMPLATES: &[PolicyTemplate] = &[CLAUDE_API_POLICY, CLAUDE_GITHUB_POLICY];
+const CODEX_POLICY_TEMPLATES: &[PolicyTemplate] = &[CODEX_API_POLICY, CODEX_GITHUB_POLICY];
 
 const CLAUDE_MANIFEST: &str = r#"schema: outcall.recipe/v1
 id: claude
@@ -320,6 +360,7 @@ pub static RECIPES: &[Recipe] = &[
         readme: CLAUDE_README,
         context: CLAUDE_CONTEXT,
         agent_config: CLAUDE_AGENT_CONFIG,
+        policy_templates: CLAUDE_POLICY_TEMPLATES,
         auth_env: CLAUDE_AUTH_ENV,
         user_paths: CLAUDE_USER_PATHS,
         project_paths: CLAUDE_PROJECT_PATHS,
@@ -334,6 +375,7 @@ pub static RECIPES: &[Recipe] = &[
         readme: CODEX_README,
         context: CODEX_CONTEXT,
         agent_config: CODEX_AGENT_CONFIG,
+        policy_templates: CODEX_POLICY_TEMPLATES,
         auth_env: CODEX_AUTH_ENV,
         user_paths: CODEX_USER_PATHS,
         project_paths: CODEX_PROJECT_PATHS,
@@ -592,8 +634,9 @@ pub fn ensure_outcall_gitignore(project_dir: &Path) -> Result<Option<PathBuf>> {
     let path = project_dir.join(".outcall").join(".gitignore");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let has_auth = existing.lines().any(|line| line.trim() == "auth/");
+    let has_home = existing.lines().any(|line| line.trim() == "home/");
     let has_run = existing.lines().any(|line| line.trim() == "run/");
-    if has_auth && has_run {
+    if has_auth && has_home && has_run {
         return Ok(None);
     }
 
@@ -603,6 +646,9 @@ pub fn ensure_outcall_gitignore(project_dir: &Path) -> Result<Option<PathBuf>> {
     }
     if !has_auth {
         next.push_str("auth/\n");
+    }
+    if !has_home {
+        next.push_str("home/\n");
     }
     if !has_run {
         next.push_str("run/\n");
@@ -617,10 +663,10 @@ pub fn expanded_path(path: &str) -> PathBuf {
 }
 
 fn expanded_path_with_home(path: &str, home: Option<&Path>) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = home {
-            return home.join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = home
+    {
+        return home.join(rest);
     }
     PathBuf::from(path)
 }

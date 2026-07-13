@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="${OUTCALL_VERSION:-0.1.28}"
+VERSION="${OUTCALL_VERSION:-0.1.29}"
 BIN_DIR="${OUTCALL_BIN_DIR:-$HOME/.local/bin}"
 BASE_URL="${OUTCALL_RELEASE_BASE_URL:-https://github.com/outcall-dev/outcall/releases/download/v${VERSION}}"
 
@@ -17,6 +17,34 @@ need_cmd curl
 need_cmd tar
 need_cmd mktemp
 need_cmd install
+if ! command -v sha256sum >/dev/null 2>&1; then
+  need_cmd shasum
+fi
+
+checksum() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1"
+  else
+    shasum -a 256 "$1"
+  fi
+}
+
+verify_checksum() {
+  archive_path="$1"
+  checksum_path="$2"
+  expected=""
+  read -r expected _ < "$checksum_path" || true
+  if [ -z "$expected" ]; then
+    echo "error: checksum file $checksum_path does not contain a SHA-256 digest" >&2
+    exit 1
+  fi
+  set -- $(checksum "$archive_path")
+  actual="$1"
+  if [ "$actual" != "$expected" ]; then
+    echo "error: SHA-256 verification failed for $(basename "$archive_path")" >&2
+    exit 1
+  fi
+}
 
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -55,6 +83,8 @@ trap cleanup EXIT INT TERM
 
 echo "==> Downloading Outcall v${VERSION} for ${target}"
 curl -fsSL -o "$tmpdir/$archive" "$BASE_URL/$archive"
+curl -fsSL -o "$tmpdir/$archive.sha256" "$BASE_URL/$archive.sha256"
+verify_checksum "$tmpdir/$archive" "$tmpdir/$archive.sha256"
 
 echo "==> Installing binaries to $BIN_DIR"
 mkdir -p "$BIN_DIR"
@@ -63,20 +93,16 @@ install -m 0755 "$tmpdir/outcall" "$BIN_DIR/outcall"
 install -m 0755 "$tmpdir/outcalld" "$BIN_DIR/outcalld"
 install -m 0755 "$tmpdir/outcall-agent" "$BIN_DIR/outcall-agent"
 
-if [ -n "$docker_image_archive" ] && command -v docker >/dev/null 2>&1; then
-  if command -v gzip >/dev/null 2>&1; then
-    echo "==> Preloading daemon image for Docker"
-    if curl -fsSL -o "$tmpdir/$docker_image_archive" "$BASE_URL/$docker_image_archive"; then
-      if gzip -dc "$tmpdir/$docker_image_archive" | docker load >/dev/null; then
-        echo "Loaded daemon image archive: $docker_image_archive"
-      else
-        echo "warning: failed to docker load $docker_image_archive; first run may fall back to a registry pull" >&2
-      fi
-    else
-      echo "warning: daemon image archive not available at $BASE_URL/$docker_image_archive; first run may fall back to a registry pull" >&2
-    fi
+if [ -n "$docker_image_archive" ] && command -v docker >/dev/null 2>&1 && [ "${OUTCALL_SKIP_IMAGE_PRELOAD:-0}" != "1" ]; then
+  echo "==> Preloading verified daemon image for Docker"
+  curl -fsSL -o "$tmpdir/$docker_image_archive" "$BASE_URL/$docker_image_archive"
+  curl -fsSL -o "$tmpdir/$docker_image_archive.sha256" "$BASE_URL/$docker_image_archive.sha256"
+  verify_checksum "$tmpdir/$docker_image_archive" "$tmpdir/$docker_image_archive.sha256"
+  if docker load -i "$tmpdir/$docker_image_archive" >/dev/null; then
+    echo "Loaded daemon image archive: $docker_image_archive"
   else
-    echo "warning: gzip not found; skipping daemon image preload" >&2
+    echo "error: failed to load verified daemon image archive $docker_image_archive" >&2
+    exit 1
   fi
 fi
 
@@ -96,17 +122,15 @@ echo "  $BIN_DIR/outcalld"
 echo "  $BIN_DIR/outcall-agent"
 
 echo
+next_outcall="$BIN_DIR/outcall"
+echo "First run (works even before you update PATH):"
+echo "  cd /path/to/your/project"
+echo "  $next_outcall run codex"
+echo "  $next_outcall run claude"
+echo
 if [ "$os" = "Linux" ]; then
   echo "Next:"
-  echo "  cd /path/to/your/project"
-  echo "  outcall"
-  echo "  outcall start         # explicit equivalent if you want to skip auto-detect messaging"
-  echo
-  echo "Use \`outcall\` as the first-run entrypoint. If Outcall can infer the provider"
-  echo "for this project and host, it starts the isolated agent directly. Otherwise it"
-  echo "prints the shortest useful next commands."
-  echo
-  echo "If Outcall cannot infer the provider, choose one explicitly:"
+  echo "  outcall run codex"
   echo "  outcall run claude"
   echo "  outcall run codex"
   echo
@@ -116,10 +140,8 @@ if [ "$os" = "Linux" ]; then
   echo "  outcall doctor codex"
 else
   echo "Next:"
-  echo "  cd /path/to/your/project"
-  echo "  outcall"
-  echo "  outcall run claude    # explicit Claude setup"
-  echo "  outcall run codex     # explicit Codex setup"
+  echo "  outcall run codex"
+  echo "  outcall run claude"
   echo
   echo "On macOS, Outcall uses Docker Desktop's Linux runtime for the daemon and"
   echo "agent containers."

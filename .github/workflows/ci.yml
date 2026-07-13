@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -164,6 +165,7 @@ jobs:
           cp target/release/outcalld release-smoke/x86_64-unknown-linux-gnu/
           cp target/release/outcall-agent release-smoke/x86_64-unknown-linux-gnu/
           tar -czf release-smoke/x86_64-unknown-linux-gnu.tar.gz -C release-smoke/x86_64-unknown-linux-gnu .
+          sha256sum release-smoke/x86_64-unknown-linux-gnu.tar.gz > release-smoke/x86_64-unknown-linux-gnu.tar.gz.sha256
           docker build \
             -t ghcr.io/outcall-dev/outcalld:v"$VERSION" \
             -t ghcr.io/outcall-dev/outcalld:latest \
@@ -171,6 +173,7 @@ jobs:
           docker save \
             ghcr.io/outcall-dev/outcalld:v"$VERSION" \
             ghcr.io/outcall-dev/outcalld:latest | gzip > release-smoke/outcalld-image-linux-amd64.tar.gz
+          sha256sum release-smoke/outcalld-image-linux-amd64.tar.gz > release-smoke/outcalld-image-linux-amd64.tar.gz.sha256
           printf '%s' "$VERSION" > release-smoke/VERSION
 
       - name: Enable bridge netfilter
@@ -205,7 +208,7 @@ jobs:
           mkdir -p "$project_dir"
           cd "$project_dir"
           set +e
-          timeout 180 outcall start -- --version
+          timeout 180 outcall run claude -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -245,7 +248,7 @@ jobs:
           mkdir -p "$project_dir"
           cd "$project_dir"
           set +e
-          timeout 180 outcall start -- --version
+          timeout 180 outcall run codex -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -323,6 +326,7 @@ jobs:
             -t "ghcr.io/outcall-dev/outcalld:v$VERSION" \
             -t "ghcr.io/outcall-dev/outcalld:latest" "$ROOT_DIR"
           docker save "ghcr.io/outcall-dev/outcalld:v$VERSION" | gzip > "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz"
+          sha256sum "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz" > "$RUNNER_TEMP/outcall-ci-release/outcalld-image-linux-amd64.tar.gz.sha256"
 
       - name: Package local installer artifacts
         run: |
@@ -332,6 +336,7 @@ jobs:
             "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu/"
           tar -czf "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu.tar.gz" \
             -C "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu" .
+          sha256sum "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu.tar.gz" > "$RUNNER_TEMP/outcall-ci-release/x86_64-unknown-linux-gnu.tar.gz.sha256"
 
       - name: Enforce bridge netfilter (hard preflight requirement)
         run: |
@@ -373,7 +378,7 @@ jobs:
           cd "$PROJECT_DIR"
 
           set +e
-          timeout 180 outcall start -- --version
+          timeout 180 outcall run claude -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -407,7 +412,7 @@ jobs:
           cd "$PROJECT_DIR"
 
           set +e
-          timeout 180 outcall start -- --version
+          timeout 180 outcall run codex -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then

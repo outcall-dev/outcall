@@ -92,8 +92,17 @@ impl BridgeManager {
         let _ = Command::new("modprobe").arg("br_netfilter").output().await;
 
         // 2) Sysctl write via direct procfs path — sysctl(1) isn't always
-        // installed in minimal containers, procfs always is.
+        // installed in minimal containers, procfs always is. Docker Desktop
+        // exposes this as read-only when it has already enabled the setting,
+        // so avoid reporting a false security degradation in that case.
         const PATH: &str = "/proc/sys/net/bridge/bridge-nf-call-iptables";
+        if matches!(tokio::fs::read_to_string(PATH).await, Ok(value) if value.trim() == "1") {
+            info!(
+                sysctl = PATH,
+                "bridge netfilter already enabled (T-2 enforceable)"
+            );
+            return;
+        }
         match tokio::fs::write(PATH, b"1").await {
             Ok(()) => info!(sysctl = PATH, "bridge netfilter enabled (T-2 enforceable)"),
             Err(e) => warn!(

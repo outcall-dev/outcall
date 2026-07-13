@@ -5,7 +5,7 @@
 ## Badges
 
 [![CI](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml/badge.svg)](https://github.com/outcall-dev/outcall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.28-blue.svg)](https://github.com/outcall-dev/outcall/releases)
+[![Version](https://img.shields.io/badge/version-0.1.29-blue.svg)](https://github.com/outcall-dev/outcall/releases)
 [![Container](https://img.shields.io/badge/container-ghcr.io%2Foutcall--dev%2Foutcalld-blue.svg)](https://github.com/outcall-dev/outcall/pkgs/container/outcalld)
 
 ## Workspace
@@ -60,71 +60,54 @@ Any extra command passed to `scripts/local-install-smoke.sh` runs after install
 inside a fresh temporary project with the newly installed binaries on `PATH`.
 
 On Linux and macOS, the installer preloads the matching Linux `outcalld`
-Docker image when Docker is available, so `outcall start` does not need a
+Docker image when Docker is available, so `outcall run <recipe>` does not need a
 first-run registry pull.
 
 ## First-time agent flow
 
-The CLI ships a small built-in recipe registry for common agent runtimes:
-
-```sh
-outcall
-```
-
-Running bare `outcall` is the default first-run entrypoint. When the current
-project or host clearly matches Claude or Codex, it runs the same flow as
-`outcall start`. When detection is ambiguous or no provider auth/config is
-available yet, it prints the recommended next commands instead.
-
-If Outcall cannot infer the provider cleanly, choose one explicitly:
+The CLI ships a small built-in recipe registry for common agent runtimes.
+Choose the provider explicitly:
 
 ```sh
 outcall run claude
 outcall run codex
 ```
 
-`outcall start` remains the explicit equivalent. When the machine clearly
-matches Claude or Codex, it writes the project-local `.outcall/` scaffold,
-checks Docker and generated files, inspects likely auth/context sources, builds
-the recipe image, ensures the daemon and default network exist, runs a smoke
-container with the recipe entrypoint, and then starts the real isolated agent
-container.
-
-`outcall run claude` and `outcall run codex` are the preferred explicit forms.
-They skip provider detection and persist the project's default recipe, so after
-you choose once on a mixed-provider machine, later runs can go back to
-`outcall start`.
+`outcall run <recipe>` is the only agent launch command. It writes the
+project-local `.outcall/` scaffold, checks Docker and generated files, stages
+selected authentication, builds the recipe image when needed, ensures the
+daemon and managed network exist, and then starts the isolated agent container.
+It persists the selected recipe for policy and setup commands, but every launch
+remains explicit.
 
 If the first run stops on a prerequisite, inspect the host and recipe checks
 directly:
 
 ```sh
-outcall doctor claude
-outcall doctor codex
+outcall doctor --fix claude
+outcall doctor --fix codex
 ```
 
-The older `outcall claude` / `outcall codex` commands remain as aliases for
-`outcall run <recipe>`. The lower-level flow is:
+The lower-level flow is:
 
 ```sh
 outcall init <recipe>
 outcall doctor <recipe>
 outcall recipe test <recipe>
-outcall recipe run <recipe>
+outcall run <recipe>
 ```
 
 The intermediate shortcut is:
 
 ```sh
-outcall setup
-outcall start
+outcall setup <recipe>
 ```
 
 You can still pin the provider explicitly when needed:
 
 ```sh
-outcall setup claude
-outcall setup codex
+outcall run claude --detach
+outcall run codex --detach
 ```
 
 Recipes do not mount your whole home directory. By default they copy only the

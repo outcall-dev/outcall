@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 use outcall::{parse_memory_arg, urlencoded};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
@@ -30,28 +32,6 @@ struct Cli {
 
     #[command(subcommand)]
     command: Option<Commands>,
-}
-
-#[derive(clap::Args, Clone)]
-struct RecipeLaunchArgs {
-    /// Overwrite existing generated files
-    #[arg(long)]
-    force: bool,
-    /// Skip docker build and use the local recipe image as-is
-    #[arg(long)]
-    no_build: bool,
-    /// How to transfer provider auth/config into the container
-    #[arg(long, value_enum, default_value_t = RecipeAuthMode::Auto)]
-    auth: RecipeAuthMode,
-    /// Re-copy staged auth files even if they already exist
-    #[arg(long)]
-    force_auth_copy: bool,
-    /// Run in detached mode
-    #[arg(short, long)]
-    detach: bool,
-    /// Arguments passed to the recipe agent entrypoint
-    #[arg(trailing_var_arg = true)]
-    args: Vec<String>,
 }
 
 #[derive(clap::Subcommand)]
@@ -132,6 +112,47 @@ enum Commands {
     Doctor {
         /// Optional recipe ID to check in detail, e.g. claude or codex
         recipe: Option<String>,
+        /// Repair Docker readiness, the project scaffold, daemon image, and managed network
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Stage only the selected provider authentication for this project
+    Auth {
+        /// Recipe ID, e.g. claude or codex
+        recipe: String,
+        /// How to transfer provider auth/config into the container
+        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Auto)]
+        auth: RecipeAuthMode,
+        /// Re-copy staged auth files even if they already exist
+        #[arg(long)]
+        force: bool,
+    },
+    /// Add a recipe-defined named grant or an exact HTTPS hostname to project rules
+    Allow {
+        /// Recipe ID, e.g. claude or codex
+        recipe: String,
+        /// Named recipe grant (for example github) or exact hostname/HTTPS URL
+        target: String,
+    },
+    /// Explain the effective project-local rule file for a recipe
+    Policy {
+        #[command(subcommand)]
+        action: PolicyAction,
+    },
+    /// List Outcall-managed agent containers
+    Ps,
+    /// Show logs for a managed agent container
+    Logs {
+        /// Container name
+        name: String,
+        /// Follow log output
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// Stop a managed agent container
+    Stop {
+        /// Container name
+        name: String,
     },
     /// Initialize, verify, and smoke-test a first-time recipe setup
     Setup {
@@ -169,21 +190,13 @@ enum Commands {
         /// Run in detached mode
         #[arg(short, long)]
         detach: bool,
+        /// Custom container name (default: <folder>-1, <folder>-2, ...)
+        #[arg(long)]
+        name: Option<String>,
         /// Arguments passed to the recipe agent entrypoint
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
-    /// Start an isolated Claude/Codex container, auto-detecting the provider when possible
-    Start {
-        /// Optional recipe ID, e.g. claude or codex
-        recipe: Option<String>,
-        #[command(flatten)]
-        launch: RecipeLaunchArgs,
-    },
-    /// Initialize and launch an isolated Claude Code container
-    Claude(RecipeLaunchArgs),
-    /// Initialize and launch an isolated Codex container
-    Codex(RecipeLaunchArgs),
     /// Manage the TLS interception CA (S011)
     Ca {
         #[command(subcommand)]
@@ -232,6 +245,15 @@ enum RulesAction {
 }
 
 #[derive(clap::Subcommand)]
+enum PolicyAction {
+    /// List active project rules and the named grants this recipe understands
+    Explain {
+        /// Recipe ID. Uses the project's selected recipe when omitted.
+        recipe: Option<String>,
+    },
+}
+
+#[derive(clap::Subcommand)]
 enum RecipeAction {
     /// List built-in recipes
     List,
@@ -252,26 +274,6 @@ enum RecipeAction {
     Doctor {
         /// Recipe ID, e.g. claude or codex
         id: String,
-    },
-    /// Build the recipe image, stage auth, and start the agent
-    Run {
-        /// Recipe ID, e.g. claude or codex
-        id: String,
-        /// Skip docker build and use the local recipe image as-is
-        #[arg(long)]
-        no_build: bool,
-        /// How to transfer provider auth/config into the container
-        #[arg(long, value_enum, default_value_t = RecipeAuthMode::Auto)]
-        auth: RecipeAuthMode,
-        /// Re-copy staged auth files even if they already exist
-        #[arg(long)]
-        force_auth_copy: bool,
-        /// Run in detached mode
-        #[arg(short, long)]
-        detach: bool,
-        /// Arguments passed to the recipe agent entrypoint
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
     },
     /// Smoke-test the recipe image and first-run prerequisites
     Test {
@@ -543,7 +545,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        None => cmd_onboarding(&cli.socket),
+        None => cmd_onboarding(),
         Some(Commands::Bridge { action }) => match action {
             BridgeAction::Status => cmd_bridge_status(&cli.socket),
             BridgeAction::Up => cmd_bridge_up(&cli.socket),
@@ -634,7 +636,19 @@ fn main() -> Result<()> {
             NetworkAction::Destroy { name } => cmd_network_destroy(&cli.socket, name),
         },
         Some(Commands::Init { recipe, force }) => cmd_init(recipe.as_deref(), force),
-        Some(Commands::Doctor { recipe }) => cmd_doctor(recipe.as_deref()),
+        Some(Commands::Doctor { recipe, fix }) => cmd_doctor(&cli.socket, recipe.as_deref(), fix),
+        Some(Commands::Auth {
+            recipe,
+            auth,
+            force,
+        }) => cmd_auth(&recipe, auth, force),
+        Some(Commands::Allow { recipe, target }) => cmd_allow(&cli.socket, &recipe, &target),
+        Some(Commands::Policy { action }) => match action {
+            PolicyAction::Explain { recipe } => cmd_policy_explain(recipe.as_deref()),
+        },
+        Some(Commands::Ps) => cmd_container_list(&cli.socket),
+        Some(Commands::Logs { name, follow }) => cmd_agent_logs(&name, follow),
+        Some(Commands::Stop { name }) => cmd_container_stop(&cli.socket, &name, None),
         Some(Commands::Setup {
             recipe,
             force,
@@ -656,6 +670,7 @@ fn main() -> Result<()> {
             auth,
             force_auth_copy,
             detach,
+            name,
             args,
         }) => cmd_run(
             &cli.socket,
@@ -665,13 +680,9 @@ fn main() -> Result<()> {
             auth,
             force_auth_copy,
             detach,
+            name,
             args,
         ),
-        Some(Commands::Start { recipe, launch }) => {
-            cmd_start(&cli.socket, recipe.as_deref(), launch)
-        }
-        Some(Commands::Claude(args)) => cmd_recipe_alias(&cli.socket, "claude", args),
-        Some(Commands::Codex(args)) => cmd_recipe_alias(&cli.socket, "codex", args),
         Some(Commands::Ca { action }) => match action {
             CaAction::Init { out } => cmd_ca_init(out),
             CaAction::Bundle => cmd_ca_bundle(&cli.socket),
@@ -714,22 +725,6 @@ fn main() -> Result<()> {
             RecipeAction::Show { id } => cmd_recipe_show(&id),
             RecipeAction::Init { id, force } => cmd_recipe_init(&id, force),
             RecipeAction::Doctor { id } => cmd_recipe_doctor(&id),
-            RecipeAction::Run {
-                id,
-                no_build,
-                auth,
-                force_auth_copy,
-                detach,
-                args,
-            } => cmd_recipe_run(
-                &cli.socket,
-                &id,
-                no_build,
-                auth,
-                force_auth_copy,
-                detach,
-                args,
-            ),
             RecipeAction::Test {
                 id,
                 no_build,
@@ -748,47 +743,18 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_onboarding(socket: &str) -> Result<()> {
-    if let Ok(selection) = detect_default_recipe() {
-        println!("Outcall");
-        println!();
-        return cmd_start_with_selection(socket, selection, default_launch_args());
-    }
-
+fn cmd_onboarding() -> Result<()> {
     println!("Outcall");
     println!();
     print_first_run_recommendation();
     println!();
     println!("Common commands:");
-    println!("  outcall start         # initialize and launch the isolated agent");
+    println!("  outcall run claude    # initialize and launch Claude Code");
+    println!("  outcall run codex     # initialize and launch Codex CLI");
     println!("  outcall setup         # initialize, verify, and smoke-test without launching");
     println!("  outcall doctor        # inspect Docker, scaffold, and auth detection");
     println!("  outcall recipe list   # show built-in recipes");
     Ok(())
-}
-
-fn cmd_recipe_alias(socket: &str, recipe: &str, args: RecipeLaunchArgs) -> Result<()> {
-    cmd_run(
-        socket,
-        recipe,
-        args.force,
-        args.no_build,
-        args.auth,
-        args.force_auth_copy,
-        args.detach,
-        args.args,
-    )
-}
-
-fn default_launch_args() -> RecipeLaunchArgs {
-    RecipeLaunchArgs {
-        force: false,
-        no_build: false,
-        auth: RecipeAuthMode::Auto,
-        force_auth_copy: false,
-        detach: false,
-        args: Vec::new(),
-    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1116,38 +1082,6 @@ fn write_http_json<T: serde::Serialize>(
     Ok(())
 }
 
-fn cmd_start(socket: &str, recipe: Option<&str>, mut args: RecipeLaunchArgs) -> Result<()> {
-    let selection = match recipe {
-        Some(id) if outcall::recipes::get_recipe(id).is_some() => RecipeSelection {
-            recipe: recipe_or_bail(id)?,
-            source: RecipeSource::Explicit,
-        },
-        Some(id) if id.starts_with('-') => {
-            args.args.insert(0, id.to_string());
-            detect_default_recipe()?
-        }
-        Some(id) => RecipeSelection {
-            recipe: recipe_or_bail(id)?,
-            source: RecipeSource::Explicit,
-        },
-        None => detect_default_recipe()?,
-    };
-    cmd_start_with_selection(socket, selection, args)
-}
-
-fn cmd_start_with_selection(
-    socket: &str,
-    selection: RecipeSelection,
-    args: RecipeLaunchArgs,
-) -> Result<()> {
-    println!(
-        "Starting with recipe: {} ({})",
-        selection.recipe.id,
-        selection.source.label()
-    );
-    cmd_recipe_alias(socket, selection.recipe.id, args)
-}
-
 // ── Recipe commands ───────────────────────────────────────────────────────
 
 fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
@@ -1170,9 +1104,9 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
         println!("  ensured {}", rules_dir.display());
         println!();
         println!("Next:");
-        println!("  outcall start");
+        println!("  outcall run {}", recipe.id);
         println!("  outcall setup         # repeat first-run checks without launching");
-        println!("  outcall start --detach");
+        println!("  outcall run {} --detach", recipe.id);
         return Ok(());
     }
 
@@ -1184,31 +1118,29 @@ fn cmd_init(recipe: Option<&str>, force: bool) -> Result<()> {
     }
     println!("  ensured {}", rules_dir.display());
 
-    if load_default_recipe(&project_dir)?.is_none() {
-        if let Ok(selection) = detect_default_recipe() {
-            if !matches!(selection.source, RecipeSource::SavedDefault) {
-                let selected = save_default_recipe(&project_dir, selection.recipe.id)?;
-                println!("  wrote {}", selected.display());
-                println!(
-                    "  selected default recipe: {} ({})",
-                    selection.recipe.id,
-                    selection.source.label()
-                );
-            }
-        }
+    if load_default_recipe(&project_dir)?.is_none()
+        && let Ok(selection) = detect_default_recipe()
+        && !matches!(selection.source, RecipeSource::SavedDefault)
+    {
+        let selected = save_default_recipe(&project_dir, selection.recipe.id)?;
+        println!("  wrote {}", selected.display());
+        println!(
+            "  selected default recipe: {} ({})",
+            selection.recipe.id,
+            selection.source.label()
+        );
     }
 
     println!();
     println!("Suggested next steps:");
     println!("  outcall doctor");
-    println!("  outcall start");
     println!("  outcall setup");
-    println!("  outcall run claude     # fallback if auto-detect is ambiguous");
+    println!("  outcall run claude");
     println!("  outcall run codex");
     Ok(())
 }
 
-fn cmd_doctor(recipe: Option<&str>) -> Result<()> {
+fn cmd_doctor(socket: &str, recipe: Option<&str>, fix: bool) -> Result<()> {
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
 
     println!("Outcall doctor");
@@ -1269,12 +1201,137 @@ fn cmd_doctor(recipe: Option<&str>) -> Result<()> {
 
     if let Some(id) = recipe {
         println!();
-        return cmd_recipe_doctor(id);
+        cmd_recipe_doctor(id)?;
     }
 
-    println!();
-    print_first_run_recommendation();
+    if recipe.is_none() {
+        println!();
+        print_first_run_recommendation();
+    }
 
+    if fix {
+        println!();
+        cmd_doctor_fix(socket, recipe)?;
+    }
+
+    Ok(())
+}
+
+fn cmd_doctor_fix(socket: &str, requested_recipe: Option<&str>) -> Result<()> {
+    println!("Applying explicit first-run repairs...");
+    ensure_docker_access_with_fix()?;
+
+    let project_dir = std::env::current_dir().context("failed to get current directory")?;
+    let recipe = match requested_recipe {
+        Some(id) => recipe_or_bail(id)?,
+        None => detect_default_recipe()?.recipe,
+    };
+    ensure_recipe_initialized(&project_dir, recipe)?;
+    let selected = save_default_recipe(&project_dir, recipe.id)?;
+    println!(
+        "  PASS project recipe: {} ({})",
+        recipe.id,
+        selected.display()
+    );
+
+    ensure_daemon_image_available()?;
+    ensure_recipe_runtime_ready(socket, &project_dir)?;
+    ensure_runtime_bridge_netfilter_enforceable()?;
+    println!("  PASS managed runtime: daemon and network are ready");
+    println!("Repair complete. Start the agent with:");
+    println!("  {}", recommended_recipe_command(recipe));
+    Ok(())
+}
+
+fn cmd_auth(recipe_id: &str, auth_mode: RecipeAuthMode, force: bool) -> Result<()> {
+    let recipe = recipe_or_bail(recipe_id)?;
+    let project_dir = std::env::current_dir().context("failed to get current directory")?;
+    ensure_recipe_initialized(&project_dir, recipe)?;
+    let selected = save_default_recipe(&project_dir, recipe.id)?;
+    let image = outcall::recipes::recipe_image_name(recipe);
+    let mut config = recipe_agent_config(recipe, &image, true);
+    let staged = stage_recipe_auth(&project_dir, recipe, auth_mode, force, &mut config)?;
+    if !staged.found_auth {
+        anyhow::bail!(
+            "no authentication material found for {}. Set one of: {} or sign in with the provider CLI, then rerun `outcall auth {}`",
+            recipe.name,
+            recipe.auth_env.join(", "),
+            recipe.id
+        );
+    }
+    save_auth_preference(&project_dir, recipe, staged.effective_mode)?;
+
+    println!("Authentication ready for {}.", recipe.name);
+    println!("  Project recipe: {}", selected.display());
+    println!("  Mode: {:?}", staged.effective_mode);
+    println!("  Next: {}", recommended_recipe_command(recipe));
+    Ok(())
+}
+
+fn cmd_allow(socket: &str, recipe_id: &str, target: &str) -> Result<()> {
+    let recipe = recipe_or_bail(recipe_id)?;
+    let project_dir = std::env::current_dir().context("failed to get current directory")?;
+    ensure_recipe_initialized(&project_dir, recipe)?;
+    let change = outcall::policy::allow(&project_dir, recipe, target)?;
+    if change.changed {
+        println!("Allowed {} for {}.", target, recipe.name);
+    } else {
+        println!("{} is already allowed for {}.", target, recipe.name);
+    }
+    println!("  Rules: {}", change.path.display());
+    println!("  Default deny remains active for every other destination.");
+
+    if ensure_docker_access().is_ok() && ensure_recipe_runtime_ready(socket, &project_dir).is_ok() {
+        println!("  Active: reloaded into the managed daemon.");
+    } else {
+        println!("  Pending: the grant will load when you next run this recipe.");
+    }
+    Ok(())
+}
+
+fn cmd_policy_explain(requested_recipe: Option<&str>) -> Result<()> {
+    let project_dir = std::env::current_dir().context("failed to get current directory")?;
+    let recipe = match requested_recipe {
+        Some(id) => recipe_or_bail(id)?,
+        None => detect_default_recipe()?.recipe,
+    };
+    let rules = outcall::policy::explain(&project_dir, recipe)?;
+    println!(
+        "Policy: {} ({})",
+        recipe.id,
+        outcall::policy::rule_path(&project_dir, recipe).display()
+    );
+    println!("Default: block every destination not listed below.");
+    if rules.is_empty() {
+        println!("  No allow rules are configured.");
+    } else {
+        for rule in rules {
+            match rule.description {
+                Some(description) => println!("  {} - {}", rule.id, description),
+                None => println!("  {}", rule.id),
+            }
+        }
+    }
+    let templates = outcall::policy::template_names(recipe).collect::<Vec<_>>();
+    if !templates.is_empty() {
+        println!("Named grants: {}", templates.join(", "));
+    }
+    Ok(())
+}
+
+fn cmd_agent_logs(name: &str, follow: bool) -> Result<()> {
+    let mut args = vec!["logs"];
+    if follow {
+        args.push("--follow");
+    }
+    args.push(name);
+    let status = std::process::Command::new("docker")
+        .args(args)
+        .status()
+        .context("failed to invoke docker logs")?;
+    if !status.success() {
+        anyhow::bail!("docker logs failed for {name}");
+    }
     Ok(())
 }
 
@@ -1341,13 +1398,13 @@ fn cmd_setup_inner(
         println!();
         println!("Setup complete.");
         println!("Next:");
-        println!("  outcall start");
-        println!("  outcall start --detach");
         println!("  {}", recommended_recipe_command(recipe));
+        println!("  {} --detach", recommended_recipe_command(recipe));
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_run(
     socket: &str,
     id: &str,
@@ -1356,19 +1413,36 @@ fn cmd_run(
     auth_mode: RecipeAuthMode,
     force_auth_copy: bool,
     detach: bool,
+    name: Option<String>,
     args: Vec<String>,
 ) -> Result<()> {
-    cmd_setup_inner(
+    let recipe = recipe_or_bail(id)?;
+    let project_dir = std::env::current_dir().context("failed to get current directory")?;
+    let needs_setup = force || !recipe_setup_is_complete(&project_dir, recipe);
+    if needs_setup {
+        cmd_setup_inner(
+            socket,
+            id,
+            force,
+            no_build,
+            auth_mode,
+            force_auth_copy,
+            false,
+        )?;
+    } else {
+        println!("Project recipe is ready; starting {}.", recipe.name);
+    }
+    println!();
+    cmd_recipe_run(
         socket,
         id,
-        force,
-        no_build,
+        no_build || needs_setup,
         auth_mode,
         force_auth_copy,
-        false,
-    )?;
-    println!();
-    cmd_recipe_run(socket, id, true, auth_mode, force_auth_copy, detach, args)
+        detach,
+        name,
+        args,
+    )
 }
 
 fn recipe_or_bail(id: &str) -> Result<&'static outcall::recipes::Recipe> {
@@ -1527,8 +1601,7 @@ fn detect_default_recipe() -> Result<RecipeSelection> {
                 .collect::<Vec<_>>()
                 .join(", ");
             anyhow::bail!(
-                "found project context for multiple agents ({ids}); choose one explicitly once for this project:\n  outcall run claude\n  outcall run codex\n\
-                 Future `outcall start` runs will reuse the saved project default."
+                "found project context for multiple agents ({ids}); choose one explicitly:\n  outcall run claude\n  outcall run codex"
             )
         }
     }
@@ -1551,8 +1624,7 @@ fn detect_default_recipe() -> Result<RecipeSelection> {
                 .collect::<Vec<_>>()
                 .join(", ");
             anyhow::bail!(
-                "found auth candidates for multiple agents ({ids}); choose one explicitly once for this project:\n  outcall run claude\n  outcall run codex\n\
-                 Future `outcall start` runs will reuse the saved project default."
+                "found auth candidates for multiple agents ({ids}); choose one explicitly:\n  outcall run claude\n  outcall run codex"
             )
         }
     }
@@ -1563,14 +1635,14 @@ fn print_first_run_recommendation() {
         Ok(dir) => dir,
         Err(_) => {
             println!("Recommended first command:");
-            println!("  outcall start");
+            println!("  outcall run codex");
             return;
         }
     };
 
     if let Ok(Some(recipe)) = load_default_recipe(&project_dir) {
         println!("Recommended first command:");
-        println!("  outcall start");
+        println!("  outcall run {}", recipe.id);
         println!("  # project default recipe: {}", recipe.id);
         return;
     }
@@ -1582,7 +1654,7 @@ fn print_first_run_recommendation() {
     match context_candidates.as_slice() {
         [recipe] => {
             println!("Recommended first command:");
-            println!("  outcall start");
+            println!("  outcall run {}", recipe.id);
             println!("  # detected {} project context in this repo", recipe.name);
             return;
         }
@@ -1604,12 +1676,11 @@ fn print_first_run_recommendation() {
     match detect_recipe_candidates().as_slice() {
         [recipe] => {
             println!("Recommended first command:");
-            println!("  outcall start");
+            println!("  outcall run {}", recipe.id);
             println!("  # detected {} auth/config on this host", recipe.name);
         }
         [] => {
             println!("Recommended first command:");
-            println!("  outcall start          # after you export provider auth");
             println!("  outcall run claude     # choose Claude explicitly");
             println!("  outcall run codex      # choose Codex explicitly");
         }
@@ -1673,10 +1744,6 @@ fn cmd_recipe_init(id: &str, force: bool) -> Result<()> {
     println!();
     println!("Next:");
     println!("  {}", recommended_recipe_command(recipe));
-    println!(
-        "  outcall recipe run {}   # lower-level equivalent",
-        recipe.id
-    );
     Ok(())
 }
 
@@ -1781,6 +1848,7 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_recipe_run(
     socket: &str,
     id: &str,
@@ -1788,6 +1856,7 @@ fn cmd_recipe_run(
     auth_mode: RecipeAuthMode,
     force_auth_copy: bool,
     detach: bool,
+    name: Option<String>,
     args: Vec<String>,
 ) -> Result<()> {
     let recipe = recipe_or_bail(id)?;
@@ -1801,6 +1870,7 @@ fn cmd_recipe_run(
     }
 
     let mut config = recipe_agent_config(recipe, &image, detach);
+    config.name = name;
     let auth_result = stage_recipe_auth(
         &project_dir,
         recipe,
@@ -1818,7 +1888,7 @@ fn cmd_recipe_run(
         recipe.id, auth_result.effective_mode
     );
     let entrypoint_args = rewrite_recipe_entrypoint_args(&project_dir, &config.workspace, args)?;
-    launch_managed_recipe_container(socket, &project_dir, config, entrypoint_args)
+    launch_managed_recipe_container(socket, &project_dir, config, entrypoint_args).map(|_| ())
 }
 
 fn cmd_recipe_test(
@@ -1857,7 +1927,7 @@ fn cmd_recipe_test(
         );
     }
 
-    recipe_smoke_test(&project_dir, &config, recipe)?;
+    recipe_smoke_test(socket, &project_dir, &config)?;
     println!("Recipe test passed: {}", recipe.id);
     Ok(())
 }
@@ -1869,6 +1939,8 @@ fn recipe_agent_config(
 ) -> outcall::agent_config::AgentConfig {
     let mut env = std::collections::HashMap::new();
     let proxy = format!("http://{}:8080", outcall_api::DEFAULT_GATEWAY);
+    // Recipe containers use a read-only root filesystem. stage_recipe_auth
+    // supplies a writable project-local home mount for each auth mode.
     env.insert("HOME".to_string(), "/home/node".to_string());
     env.insert("HTTP_PROXY".to_string(), proxy.clone());
     env.insert("HTTPS_PROXY".to_string(), proxy);
@@ -1901,7 +1973,15 @@ fn stage_recipe_auth(
         }
     }
 
+    let saved_mode = if auth_mode == RecipeAuthMode::Auto {
+        load_auth_preference(project_dir, recipe)?
+    } else {
+        None
+    };
     let effective_mode = match auth_mode {
+        RecipeAuthMode::Auto if saved_mode.is_some() => {
+            saved_mode.expect("saved auth mode checked")
+        }
         RecipeAuthMode::Auto if should_prefer_auth_mount(recipe) => RecipeAuthMode::Mount,
         RecipeAuthMode::Auto if recipe_has_user_auth_paths(recipe) => RecipeAuthMode::Copy,
         RecipeAuthMode::Auto => RecipeAuthMode::EnvOnly,
@@ -1910,12 +1990,17 @@ fn stage_recipe_auth(
 
     if auth_mode == RecipeAuthMode::Auto {
         println!(
-            "Auto auth mode selected: {}.",
+            "Auto auth mode selected: {}{}.",
             match effective_mode {
                 RecipeAuthMode::Copy => "copy",
                 RecipeAuthMode::Mount => "mount",
                 RecipeAuthMode::EnvOnly => "env-only",
                 RecipeAuthMode::Auto => "auto",
+            },
+            if saved_mode.is_some() {
+                " (saved project choice)"
+            } else {
+                ""
             }
         );
     }
@@ -1923,7 +2008,7 @@ fn stage_recipe_auth(
     match effective_mode {
         RecipeAuthMode::Auto => unreachable!("auto mode should resolve before staging"),
         RecipeAuthMode::Copy => {
-            let staged = outcall::recipes::stage_auth_copy(&project_dir, recipe, force_auth_copy)?;
+            let staged = outcall::recipes::stage_auth_copy(project_dir, recipe, force_auth_copy)?;
             if staged.copied.is_empty() {
                 println!("No user auth files copied for recipe \"{}\".", recipe.id);
             } else {
@@ -1935,10 +2020,18 @@ fn stage_recipe_auth(
                 config
                     .volumes
                     .push(format!("{}:/home/node", staged.home_dir.display()));
+                config
+                    .env
+                    .insert("HOME".to_string(), "/home/node".to_string());
             }
         }
         RecipeAuthMode::Mount => {
             let preserve_home_layout = should_preserve_host_home_layout(recipe);
+            // The auth paths are mounted read-only-ish from the host, while
+            // CLIs still need an ordinary writable home for state and helpers.
+            if !preserve_home_layout {
+                ensure_recipe_home_mount(project_dir, recipe, config)?;
+            }
             let mount_plan = outcall::recipes::auth_mount_plan(recipe, preserve_home_layout);
             if mount_plan.mounts.is_empty() {
                 println!(
@@ -1956,17 +2049,106 @@ fn stage_recipe_auth(
                         config.env.insert("USER".to_string(), user.to_string());
                         config.env.insert("LOGNAME".to_string(), user.to_string());
                     }
+                } else if !mount_plan.mounts.is_empty() {
+                    config
+                        .env
+                        .insert("HOME".to_string(), "/home/node".to_string());
                 }
             }
             config.volumes.extend(mount_plan.mounts);
         }
-        RecipeAuthMode::EnvOnly => {}
+        RecipeAuthMode::EnvOnly => ensure_recipe_home_mount(project_dir, recipe, config)?,
     }
 
     Ok(AuthStageResult {
         found_auth,
         effective_mode,
     })
+}
+
+fn ensure_recipe_home_mount(
+    project_dir: &std::path::Path,
+    recipe: &outcall::recipes::Recipe,
+    config: &mut outcall::agent_config::AgentConfig,
+) -> Result<()> {
+    let home_dir = project_dir.join(".outcall").join("home").join(recipe.id);
+    std::fs::create_dir_all(&home_dir)
+        .with_context(|| format!("failed to create {}", home_dir.display()))?;
+    secure_runtime_dir(&project_dir.join(".outcall").join("home"))?;
+    secure_runtime_dir(&home_dir)?;
+    let mount = format!("{}:/home/node", home_dir.display());
+    if !config.volumes.iter().any(|existing| existing == &mount) {
+        config.volumes.push(mount);
+    }
+    config
+        .env
+        .insert("HOME".to_string(), "/home/node".to_string());
+    Ok(())
+}
+
+fn recipe_setup_is_complete(
+    project_dir: &std::path::Path,
+    recipe: &outcall::recipes::Recipe,
+) -> bool {
+    outcall::recipes::recipe_dockerfile(project_dir, recipe).exists()
+        && outcall::policy::rule_path(project_dir, recipe).exists()
+        && project_dir.join(".outcall").join("agent.yaml").exists()
+        && project_dir
+            .join(".outcall")
+            .join("host-resources.yaml")
+            .exists()
+}
+
+fn auth_preference_path(
+    project_dir: &std::path::Path,
+    recipe: &outcall::recipes::Recipe,
+) -> std::path::PathBuf {
+    project_dir
+        .join(".outcall")
+        .join("auth")
+        .join(recipe.id)
+        .join("mode")
+}
+
+fn save_auth_preference(
+    project_dir: &std::path::Path,
+    recipe: &outcall::recipes::Recipe,
+    mode: RecipeAuthMode,
+) -> Result<()> {
+    let value = match mode {
+        RecipeAuthMode::Auto => "auto",
+        RecipeAuthMode::Copy => "copy",
+        RecipeAuthMode::Mount => "mount",
+        RecipeAuthMode::EnvOnly => "env-only",
+    };
+    let path = auth_preference_path(project_dir, recipe);
+    let parent = path
+        .parent()
+        .context("auth preference path must have a parent")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    std::fs::write(&path, value).with_context(|| format!("failed to write {}", path.display()))?;
+    secure_runtime_file(&path)
+}
+
+fn load_auth_preference(
+    project_dir: &std::path::Path,
+    recipe: &outcall::recipes::Recipe,
+) -> Result<Option<RecipeAuthMode>> {
+    let path = auth_preference_path(project_dir, recipe);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let mode = match value.trim() {
+        "copy" => RecipeAuthMode::Copy,
+        "mount" => RecipeAuthMode::Mount,
+        "env-only" => RecipeAuthMode::EnvOnly,
+        "auto" => RecipeAuthMode::Auto,
+        other => anyhow::bail!("invalid saved auth mode {other:?} in {}", path.display()),
+    };
+    Ok(Some(mode))
 }
 
 fn maybe_prepare_host_broker(
@@ -2146,7 +2328,7 @@ fn launch_managed_recipe_container(
     project_dir: &std::path::Path,
     config: outcall::agent_config::AgentConfig,
     entrypoint_args: Vec<String>,
-) -> Result<()> {
+) -> Result<String> {
     let image = config.effective_image();
     let name = config.effective_name(project_dir);
     let workspace = config.workspace.clone();
@@ -2180,7 +2362,8 @@ fn launch_managed_recipe_container(
         )
     };
 
-    let interactive = !config.detach && entrypoint_args.is_empty() && config.command.is_none();
+    let batch_command = !entrypoint_args.is_empty() || config.command.is_some();
+    let interactive = !config.detach && !batch_command;
     let tty = interactive && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let cmd = if !entrypoint_args.is_empty() {
         Some(entrypoint_args)
@@ -2252,7 +2435,16 @@ fn launch_managed_recipe_container(
         println!("  Attach: docker attach {}", result.name);
         println!("  Logs:   docker logs -f {}", result.name);
         println!("  Stop:   outcall agent --stop {}", result.name);
-        return Ok(());
+        return Ok(result.name);
+    }
+
+    // Commands passed after `--` are one-shot recipe invocations, not an
+    // interactive agent session. Waiting avoids the race where a quick command
+    // exits successfully before `docker attach` has connected.
+    if batch_command {
+        wait_for_recipe_container(&result.name)?;
+        println!("\nAgent '{}' stopped.", result.name);
+        return Ok(result.name);
     }
 
     println!("  Container running. Press Ctrl+C to detach.");
@@ -2267,6 +2459,41 @@ fn launch_managed_recipe_container(
     }
 
     println!("\nAgent '{}' stopped.", result.name);
+    Ok(result.name)
+}
+
+fn wait_for_recipe_container(name: &str) -> Result<()> {
+    let wait = std::process::Command::new("docker")
+        .args(["wait", name])
+        .output()
+        .context("failed to invoke docker wait")?;
+    if !wait.status.success() {
+        anyhow::bail!(
+            "failed while waiting for agent container {name}: {}",
+            String::from_utf8_lossy(&wait.stderr).trim()
+        );
+    }
+
+    let logs = std::process::Command::new("docker")
+        .args(["logs", name])
+        .output()
+        .context("failed to invoke docker logs")?;
+    print!("{}", String::from_utf8_lossy(&logs.stdout));
+    eprint!("{}", String::from_utf8_lossy(&logs.stderr));
+    if !logs.status.success() {
+        anyhow::bail!(
+            "failed to read agent container logs for {name}: {}",
+            String::from_utf8_lossy(&logs.stderr).trim()
+        );
+    }
+
+    let exit_code = String::from_utf8_lossy(&wait.stdout)
+        .trim()
+        .parse::<i32>()
+        .context("docker wait returned an invalid exit code")?;
+    if exit_code != 0 {
+        anyhow::bail!("agent exited with code {exit_code}");
+    }
     Ok(())
 }
 
@@ -2319,15 +2546,15 @@ fn ensure_daemon_ready(socket: &str, rules_dir: Option<&std::path::Path>) -> Res
             if output.status.success()
                 && String::from_utf8_lossy(&output.stdout).trim() == "true" =>
         {
-            if let Some(ref desired) = desired_rules_dir {
-                if daemon_rules_mount_mismatch(DEFAULT_DAEMON_NAME, desired)? {
-                    println!(
-                        "Restarting outcall-daemon to mount project rules from {}...",
-                        desired.display()
-                    );
-                    cmd_daemon_stop(None)?;
-                    start_daemon_with_rules(socket, desired)?;
-                }
+            if let Some(ref desired) = desired_rules_dir
+                && daemon_rules_mount_mismatch(DEFAULT_DAEMON_NAME, desired)?
+            {
+                println!(
+                    "Restarting outcall-daemon to mount project rules from {}...",
+                    desired.display()
+                );
+                cmd_daemon_stop(None)?;
+                start_daemon_with_rules(socket, desired)?;
             }
             wait_for_daemon_socket(socket)
         }
@@ -2393,13 +2620,13 @@ fn wait_for_daemon_socket(socket: &str) -> Result<()> {
             match daemon_exec_socket_ready(socket) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {
-                    if let Some(state) = daemon_container_state(DEFAULT_DAEMON_NAME)? {
-                        if state != "running" {
-                            let logs = daemon_container_logs(DEFAULT_DAEMON_NAME)?;
-                            anyhow::bail!(
-                                "outcalld container is not running (state: {state}) while waiting for {socket}\n{logs}"
-                            );
-                        }
+                    if let Some(state) = daemon_container_state(DEFAULT_DAEMON_NAME)?
+                        && state != "running"
+                    {
+                        let logs = daemon_container_logs(DEFAULT_DAEMON_NAME)?;
+                        anyhow::bail!(
+                            "outcalld container is not running (state: {state}) while waiting for {socket}\n{logs}"
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(100));
                 }
@@ -2422,13 +2649,13 @@ fn wait_for_daemon_socket(socket: &str) -> Result<()> {
         match UnixStream::connect(socket) {
             Ok(_) => return Ok(()),
             Err(err) => {
-                if let Some(state) = daemon_container_state(DEFAULT_DAEMON_NAME)? {
-                    if state != "running" {
-                        let logs = daemon_container_logs(DEFAULT_DAEMON_NAME)?;
-                        anyhow::bail!(
-                            "outcalld container is not running (state: {state}) while waiting for {socket}\n{logs}"
-                        );
-                    }
+                if let Some(state) = daemon_container_state(DEFAULT_DAEMON_NAME)?
+                    && state != "running"
+                {
+                    let logs = daemon_container_logs(DEFAULT_DAEMON_NAME)?;
+                    anyhow::bail!(
+                        "outcalld container is not running (state: {state}) while waiting for {socket}\n{logs}"
+                    );
                 }
                 last_error = Some(err);
                 std::thread::sleep(Duration::from_millis(100));
@@ -2488,49 +2715,32 @@ fn ensure_default_network(socket: &str) -> Result<()> {
 }
 
 fn recipe_smoke_test(
+    socket: &str,
     project_dir: &std::path::Path,
     config: &outcall::agent_config::AgentConfig,
-    recipe: &outcall::recipes::Recipe,
 ) -> Result<()> {
-    let image = config.effective_image();
-    let workspace = &config.workspace;
-    let abs_project_dir = std::fs::canonicalize(project_dir)
-        .with_context(|| format!("failed to canonicalize {}", project_dir.display()))?;
+    let mut smoke_config = config.clone();
+    // Smoke runs must wait for the recipe command and inspect its exit status;
+    // a detached container could otherwise be removed before it reports a
+    // startup failure.
+    smoke_config.detach = false;
+    smoke_config.name = Some(format!(
+        "{}-smoke-{}",
+        config.effective_name(project_dir),
+        std::process::id()
+    ));
 
-    let mut args = vec![
-        "run".to_string(),
-        "--rm".to_string(),
-        "--network".to_string(),
-        config.network.clone(),
-        "-v".to_string(),
-        format!("{}:{}", abs_project_dir.display(), workspace),
-        "-w".to_string(),
-        workspace.clone(),
-    ];
+    println!("Running managed recipe smoke test...");
+    let container_name = launch_managed_recipe_container(
+        socket,
+        project_dir,
+        smoke_config,
+        vec!["--version".to_string()],
+    )?;
 
-    for vol in &config.volumes {
-        args.extend_from_slice(&["-v".to_string(), vol.clone()]);
+    if let Err(err) = container_remove_request(socket, &container_name, true) {
+        eprintln!("warning: failed to remove smoke container {container_name}: {err}");
     }
-    for (key, value) in &config.env {
-        args.extend_from_slice(&["-e".to_string(), format!("{}={}", key, value)]);
-    }
-    args.extend_from_slice(&["--entrypoint".to_string(), recipe.id.to_string()]);
-    args.push(image);
-    args.push("--version".to_string());
-
-    println!("Running recipe smoke test...");
-    let output = std::process::Command::new("docker")
-        .args(&args)
-        .output()
-        .context("failed to invoke docker run for recipe smoke test")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("recipe smoke test failed: {}", stderr.trim());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let first_line = stdout.lines().next().unwrap_or("ok");
-    println!("  PASS entrypoint: {first_line}");
     Ok(())
 }
 
@@ -2595,9 +2805,9 @@ fn ensure_recipe_setup_state(
     }
     println!();
     println!("Next:");
-    println!("  outcall start");
+    println!("  outcall run {}", recipe.id);
     println!("  outcall setup         # repeat first-run checks without launching");
-    println!("  outcall start --detach");
+    println!("  outcall run {} --detach", recipe.id);
     Ok(())
 }
 
@@ -2623,13 +2833,13 @@ fn rewrite_recipe_entrypoint_args(
             )?);
             continue;
         }
-        if let Some((flag, value)) = arg.split_once('=') {
-            if flag == "--output-last-message" {
-                let rewritten_value =
-                    rewrite_container_output_path(&abs_project_dir, workspace, value)?;
-                rewritten.push(format!("{flag}={rewritten_value}"));
-                continue;
-            }
+        if let Some((flag, value)) = arg.split_once('=')
+            && flag == "--output-last-message"
+        {
+            let rewritten_value =
+                rewrite_container_output_path(&abs_project_dir, workspace, value)?;
+            rewritten.push(format!("{flag}={rewritten_value}"));
+            continue;
         }
         rewritten.push(arg);
     }
@@ -2649,10 +2859,10 @@ fn rewrite_container_output_path(
         return workspace_output_path(workspace, candidate, relative);
     }
 
-    if let Some(resolved) = resolve_output_path_for_workspace(candidate)? {
-        if let Ok(relative) = resolved.strip_prefix(project_dir) {
-            return workspace_output_path(workspace, candidate, relative);
-        }
+    if let Some(resolved) = resolve_output_path_for_workspace(candidate)?
+        && let Ok(relative) = resolved.strip_prefix(project_dir)
+    {
+        return workspace_output_path(workspace, candidate, relative);
     }
     anyhow::bail!(
         "output path {} is outside the mounted workspace; use a relative path or a file inside {}",
@@ -2744,6 +2954,52 @@ fn ensure_docker_access() -> Result<()> {
     );
 }
 
+fn ensure_docker_access_with_fix() -> Result<()> {
+    match ensure_docker_access() {
+        Ok(()) => Ok(()),
+        Err(initial_error) if std::env::consts::OS != "macos" => Err(initial_error),
+        Err(initial_error) => {
+            println!("  Starting Docker Desktop and waiting for it to become ready...");
+            let launched = std::process::Command::new("open")
+                .args(["-gja", "Docker"])
+                .status()
+                .context("failed to ask macOS to open Docker Desktop")?;
+            if !launched.success() {
+                return Err(initial_error).context("Docker Desktop did not start");
+            }
+            for _ in 0..90 {
+                if ensure_docker_access().is_ok() {
+                    println!("  PASS docker: Docker Desktop is ready");
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            Err(initial_error).context("Docker Desktop did not become ready within 90 seconds")
+        }
+    }
+}
+
+fn ensure_daemon_image_available() -> Result<()> {
+    let inspected = std::process::Command::new("docker")
+        .args(["image", "inspect", DEFAULT_DAEMON_IMAGE])
+        .output()
+        .context("failed to inspect the Outcall daemon image")?;
+    if inspected.status.success() {
+        println!("  PASS daemon image: {DEFAULT_DAEMON_IMAGE}");
+        return Ok(());
+    }
+
+    println!("  Pulling daemon image: {DEFAULT_DAEMON_IMAGE}");
+    let status = std::process::Command::new("docker")
+        .args(["pull", DEFAULT_DAEMON_IMAGE])
+        .status()
+        .context("failed to invoke docker pull for the Outcall daemon image")?;
+    if !status.success() {
+        anyhow::bail!("failed to pull daemon image {DEFAULT_DAEMON_IMAGE}");
+    }
+    Ok(())
+}
+
 fn containerized_runtime_note() -> Option<String> {
     if std::env::consts::OS == "linux" {
         return None;
@@ -2825,7 +3081,24 @@ fn build_recipe_image(
     recipe: &outcall::recipes::Recipe,
     image: &str,
 ) -> Result<()> {
-    let dockerfile = outcall::recipes::recipe_dockerfile(project_dir, recipe);
+    let recipe_dir = outcall::recipes::recipe_dockerfile(project_dir, recipe)
+        .parent()
+        .context("recipe dockerfile has no parent path")?
+        .to_path_buf();
+    let fingerprint = recipe_directory_fingerprint(&recipe_dir)
+        .context("failed to compute recipe build fingerprint")?;
+    let fingerprint_path = recipe_dir.join(".outcall-image-fingerprint");
+
+    if docker_image_exists(image)? && is_recipe_image_cached(&fingerprint_path, &fingerprint)? {
+        println!("Recipe image {image} already up-to-date; skipping build.");
+        return Ok(());
+    }
+
+    if docker_image_exists(image)? {
+        println!("Rebuilding recipe image {image} (recipe context changed).");
+    }
+
+    let dockerfile = recipe_dir.join("Dockerfile");
     println!("Building recipe image {image}...");
     let status = std::process::Command::new("docker")
         .arg("build")
@@ -2838,6 +3111,81 @@ fn build_recipe_image(
         .context("failed to invoke docker build")?;
     if !status.success() {
         anyhow::bail!("docker build failed (exit {:?})", status.code());
+    }
+
+    std::fs::write(&fingerprint_path, format!("{fingerprint}\n"))
+        .with_context(|| format!("failed to write {}", fingerprint_path.display()))?;
+    Ok(())
+}
+
+fn docker_image_exists(image: &str) -> Result<bool> {
+    let output = std::process::Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", image])
+        .output()
+        .context("failed to invoke docker image inspect")?;
+
+    Ok(output.status.success())
+}
+
+fn is_recipe_image_cached(fingerprint_path: &std::path::Path, fingerprint: &str) -> Result<bool> {
+    if !fingerprint_path.exists() {
+        return Ok(false);
+    }
+
+    let existing = std::fs::read_to_string(fingerprint_path)
+        .with_context(|| format!("failed to read {}", fingerprint_path.display()))?;
+
+    Ok(existing.trim() == fingerprint)
+}
+
+fn recipe_directory_fingerprint(recipe_dir: &std::path::Path) -> Result<String> {
+    let mut files = Vec::new();
+    collect_files(recipe_dir, &mut files, recipe_dir)
+        .with_context(|| format!("failed to collect files from {}", recipe_dir.display()))?;
+    files.sort();
+
+    let mut hasher = DefaultHasher::new();
+    for file in files {
+        let relative = file
+            .strip_prefix(recipe_dir)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        relative.hash(&mut hasher);
+
+        let bytes =
+            std::fs::read(&file).with_context(|| format!("failed to read {}", file.display()))?;
+        hasher.write(&bytes);
+    }
+
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
+fn collect_files(
+    dir: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+    root: &std::path::Path,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir).context("failed to read recipe directory")? {
+        let entry = entry.context("failed to read recipe directory entry")?;
+        let path = entry.path();
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        if rel == std::path::Path::new(".outcall-image-fingerprint") {
+            continue;
+        }
+
+        let metadata = entry
+            .metadata()
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+
+        if metadata.is_dir() {
+            collect_files(&path, files, root)?;
+            continue;
+        }
+
+        if metadata.is_file() {
+            files.push(path);
+        }
     }
     Ok(())
 }
@@ -3824,6 +4172,16 @@ fn cmd_container_stop(socket: &str, name: &str, timeout: Option<i64>) -> Result<
 }
 
 fn cmd_container_remove(socket: &str, name: &str, force: bool) -> Result<()> {
+    let result = container_remove_request(socket, name, force)?;
+    println!("Container \"{}\" removed.", result.name);
+    Ok(())
+}
+
+fn container_remove_request(
+    socket: &str,
+    name: &str,
+    force: bool,
+) -> Result<ContainerRemoveResult> {
     let req = outcall_api::ContainerRemoveRequest {
         name: name.to_string(),
         force: Some(force),
@@ -3835,9 +4193,8 @@ fn cmd_container_remove(socket: &str, name: &str, force: bool) -> Result<()> {
         anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
     }
 
-    let result: ContainerRemoveResult = serde_json::from_value(resp.data.context("no data")?)?;
-    println!("Container \"{}\" removed.", result.name);
-    Ok(())
+    serde_json::from_value(resp.data.context("no data")?)
+        .context("failed to parse container remove response")
 }
 
 fn cmd_container_pull(socket: &str, image: &str) -> Result<()> {
@@ -4252,6 +4609,7 @@ const DEFAULT_DAEMON_NAME: &str = "outcall-daemon";
 const DEFAULT_DAEMON_IMAGE: &str =
     concat!("ghcr.io/outcall-dev/outcalld:v", env!("CARGO_PKG_VERSION"));
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_daemon_start(
     image: Option<String>,
     bridge: Option<String>,

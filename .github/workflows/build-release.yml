@@ -139,6 +139,7 @@ jobs:
             --output type=docker,dest=release/outcalld-image-linux-amd64.tar \
             .
           gzip -f release/outcalld-image-linux-amd64.tar
+          sha256sum release/outcalld-image-linux-amd64.tar.gz > release/outcalld-image-linux-amd64.tar.gz.sha256
 
       - name: Export arm64 daemon image archive
         run: |
@@ -149,6 +150,7 @@ jobs:
             --output type=docker,dest=release/outcalld-image-linux-arm64.tar \
             .
           gzip -f release/outcalld-image-linux-arm64.tar
+          sha256sum release/outcalld-image-linux-arm64.tar.gz > release/outcalld-image-linux-arm64.tar.gz.sha256
 
       - name: Upload daemon image archives to Release
         uses: softprops/action-gh-release@v2
@@ -156,7 +158,9 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
             release/outcalld-image-linux-amd64.tar.gz
+            release/outcalld-image-linux-amd64.tar.gz.sha256
             release/outcalld-image-linux-arm64.tar.gz
+            release/outcalld-image-linux-arm64.tar.gz.sha256
           overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
