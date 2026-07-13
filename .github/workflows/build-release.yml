@@ -119,6 +119,11 @@ jobs:
             type=ref,event=tag
             type=raw,value=latest
 
+      - name: Start container release timer
+        id: container_timer
+        shell: bash
+        run: echo "started_at=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -160,3 +165,23 @@ jobs:
           overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Report container release duration
+        if: always()
+        env:
+          STARTED_AT: ${{ steps.container_timer.outputs.started_at }}
+          WARN_AFTER_SECONDS: 2700
+        shell: bash
+        run: |
+          set -eu
+          if [ -z "${STARTED_AT:-}" ]; then
+            echo "Container release timer did not start." >&2
+            exit 0
+          fi
+          elapsed_seconds=$(( $(date +%s) - STARTED_AT ))
+          elapsed_minutes=$(( (elapsed_seconds + 59) / 60 ))
+          echo "### Container release duration" >> "$GITHUB_STEP_SUMMARY"
+          echo "${elapsed_minutes} minutes (${elapsed_seconds} seconds)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$elapsed_seconds" -gt "$WARN_AFTER_SECONDS" ]; then
+            echo "::warning title=Slow container release::Container publish and archive export took ${elapsed_minutes} minutes (threshold: 45 minutes)."
+          fi
