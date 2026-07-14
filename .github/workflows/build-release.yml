@@ -135,6 +135,11 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # GitHub-hosted builders are ephemeral. Keep the multi-architecture
+          # Rust compilation cache scoped to this release image across tags.
+          cache-from: type=gha,scope=outcalld-release
+          # A cache outage must not prevent publishing verified release assets.
+          cache-to: type=gha,scope=outcalld-release,mode=max,ignore-error=true
 
       - name: Verify release-tag image manifest
         run: docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${RELEASE_TAG}" > /dev/null
