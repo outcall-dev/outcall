@@ -116,7 +116,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=tag
+            # This workflow is dispatched from main and checks out RELEASE_TAG.
+            # Use the explicit input rather than the dispatch ref, which is main.
+            type=raw,value=${{ env.RELEASE_TAG }}
             type=raw,value=latest
 
       - name: Start container release timer
@@ -133,6 +135,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Verify release-tag image manifest
+        run: docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${RELEASE_TAG}" > /dev/null
 
       - name: Export amd64 daemon image archive
         run: |
