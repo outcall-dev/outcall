@@ -118,7 +118,7 @@ impl AgentConfig {
             );
         }
         let template = r#"# Outcall Agent Configuration
-# This file customizes how `outcall agent` boots containers for this project.
+# This file customizes how `outcall run <recipe>` boots containers for this project.
 
 # Docker image to use (default: outcall/agent:latest)
 # image: my-custom-agent:latest
@@ -169,25 +169,6 @@ impl AgentConfig {
             .with_context(|| format!("failed to write {}", config_path.display()))?;
 
         Ok(config_path)
-    }
-
-    /// Merge CLI flags into config (CLI takes precedence)
-    pub fn merge(&mut self, cli: &AgentCliFlags) {
-        if let Some(ref image) = cli.image {
-            self.image = Some(image.clone());
-        }
-        if let Some(ref name) = cli.name {
-            self.name = Some(name.clone());
-        }
-        if let Some(ref network) = cli.network {
-            self.network = network.clone();
-        }
-        if let Some(ref workspace) = cli.workspace {
-            self.workspace = workspace.clone();
-        }
-        if cli.detach {
-            self.detach = true;
-        }
     }
 
     /// Get the effective image name
@@ -275,16 +256,6 @@ fn sanitized_project_name(project_dir: &Path) -> String {
     }
 }
 
-/// CLI flags that can override config file values
-#[derive(Debug, Clone, Default)]
-pub struct AgentCliFlags {
-    pub image: Option<String>,
-    pub name: Option<String>,
-    pub network: Option<String>,
-    pub workspace: Option<String>,
-    pub detach: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,7 +276,7 @@ mod tests {
     fn next_project_container_name_fills_first_gap() {
         let next = next_project_container_name_from_existing(
             "foobar",
-            ["foobar-1", "foobar-3", "other-1"].into_iter(),
+            ["foobar-1", "foobar-3", "other-1"],
         );
         assert_eq!(next, "foobar-2");
     }

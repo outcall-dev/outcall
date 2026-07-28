@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(any(target_os = "linux", test))]
+mod container_env;
+
 pub mod rules;
 
 #[cfg(target_os = "linux")]

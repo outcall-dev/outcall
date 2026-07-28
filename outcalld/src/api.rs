@@ -406,7 +406,7 @@ async fn container_create(
         .await
     {
         Ok(result) => Json(ApiResponse::ok(result)),
-        Err(e) => Json(ApiResponse::err(e.to_string())),
+        Err(e) => Json(ApiResponse::err(format!("{e:#}"))),
     }
 }
 

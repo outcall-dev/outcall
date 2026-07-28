@@ -56,45 +56,6 @@ enum Commands {
         #[command(subcommand)]
         action: ContainerAction,
     },
-    /// Boot an AI agent for the current project
-    Agent {
-        /// Custom agent name (default: <folder>-1, <folder>-2, ...)
-        #[arg(short, long)]
-        name: Option<String>,
-        /// Custom Docker image
-        #[arg(short, long)]
-        image: Option<String>,
-        /// Network to connect to
-        #[arg(short, long)]
-        network: Option<String>,
-        /// Workspace mount path inside container
-        #[arg(short, long)]
-        workspace: Option<String>,
-        /// Run in detached mode
-        #[arg(short, long)]
-        detach: bool,
-        /// Stop a running agent
-        #[arg(long)]
-        stop: bool,
-        /// List running agents
-        #[arg(long)]
-        list: bool,
-        /// Show agent logs
-        #[arg(long)]
-        logs: bool,
-        /// Follow log output (with --logs)
-        #[arg(short, long)]
-        follow: bool,
-        /// Initialize .outcall directory with template config
-        #[arg(long)]
-        init: bool,
-        /// Agent name for --stop or --logs
-        #[arg(long)]
-        agent_name: Option<String>,
-        /// Command to pass to agent entrypoint
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
-    },
     /// Manage outcall networks
     Network {
         #[command(subcommand)]
@@ -127,11 +88,11 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Add a recipe-defined named grant or an exact HTTPS hostname to project rules
+    /// Allow a recipe grant, exact HTTPS host, or declared host resource
     Allow {
         /// Recipe ID, e.g. claude or codex
         recipe: String,
-        /// Named recipe grant (for example github) or exact hostname/HTTPS URL
+        /// Named grant, exact hostname/HTTPS URL, tool:<id>, or file:<id>
         target: String,
     },
     /// Explain the effective project-local rule file for a recipe
@@ -340,8 +301,23 @@ enum HostBrokerAction {
     /// Serve declared host tools/files over a Unix socket, gated by daemon rules
     Serve {
         /// Unix socket exposed by the host broker
-        #[arg(long, default_value = "/tmp/outcall-broker/host-broker.sock")]
-        socket: String,
+        #[arg(
+            long = "broker-socket",
+            default_value = "/tmp/outcall-broker/host-broker.sock"
+        )]
+        broker_socket: String,
+        /// Optional path to host-resources.yaml
+        #[arg(long)]
+        config: Option<String>,
+        /// Shared bearer token required by broker clients
+        #[arg(long)]
+        auth_token: Option<String>,
+    },
+    /// Serve declared host tools/files over loopback TCP for Docker Desktop
+    ServeTcp {
+        /// Loopback TCP address exposed through Docker Desktop host forwarding
+        #[arg(long)]
+        listen: String,
         /// Optional path to host-resources.yaml
         #[arg(long)]
         config: Option<String>,
@@ -578,53 +554,6 @@ fn main() -> Result<()> {
             }
             ContainerAction::Pull { image } => cmd_container_pull(&cli.socket, &image),
         },
-        Some(Commands::Agent {
-            name,
-            image,
-            network,
-            workspace,
-            detach,
-            stop,
-            list,
-            logs,
-            follow,
-            init,
-            agent_name,
-            args,
-        }) => {
-            if init {
-                let project_dir = std::env::current_dir()?;
-                let _ = outcall::agent_boot::init_outcall(&project_dir)?;
-                return Ok(());
-            }
-
-            if list {
-                return outcall::agent_boot::list_agents();
-            }
-
-            if stop {
-                let default_name = outcall::agent_boot::auto_detect_name();
-                let name = agent_name.as_deref().unwrap_or(&default_name);
-                return outcall::agent_boot::stop_agent(name);
-            }
-
-            if logs {
-                let default_name = outcall::agent_boot::auto_detect_name();
-                let name = agent_name.as_deref().unwrap_or(&default_name);
-                return outcall::agent_boot::agent_logs(name, follow);
-            }
-
-            // Boot agent
-            let project_dir = std::env::current_dir()?;
-            let flags = outcall::agent_config::AgentCliFlags {
-                image,
-                name,
-                network,
-                workspace,
-                detach,
-            };
-            outcall::agent_boot::boot_agent(&project_dir, flags, args)
-        }
         Some(Commands::Network { action }) => match action {
             NetworkAction::Create {
                 name,
@@ -734,10 +663,15 @@ fn main() -> Result<()> {
         },
         Some(Commands::HostBroker { action }) => match action {
             HostBrokerAction::Serve {
-                socket,
+                broker_socket,
                 config,
                 auth_token,
-            } => cmd_host_broker_serve(&cli.socket, &socket, config.as_deref(), auth_token),
+            } => cmd_host_broker_serve(&cli.socket, &broker_socket, config.as_deref(), auth_token),
+            HostBrokerAction::ServeTcp {
+                listen,
+                config,
+                auth_token,
+            } => cmd_host_broker_serve_tcp(&cli.socket, &listen, config.as_deref(), auth_token),
         },
         Some(Commands::Ui { port, no_open }) => cmd_ui(&cli.socket, port, !no_open),
     }
@@ -788,9 +722,42 @@ struct BrokerFileReadResult {
 
 #[derive(Debug, Clone)]
 struct HostBrokerRuntime {
-    host_socket: std::path::PathBuf,
-    container_socket: String,
+    transport: HostBrokerTransport,
     auth_token: String,
+}
+
+#[derive(Debug, Clone)]
+enum HostBrokerTransport {
+    Unix {
+        host_socket: std::path::PathBuf,
+        container_socket: String,
+    },
+    Http {
+        listen_addr: std::net::SocketAddr,
+        container_url: String,
+    },
+}
+
+#[derive(Deserialize)]
+struct GeneratedHostBrokerRuleFile {
+    version: String,
+    rules: Vec<GeneratedHostBrokerRule>,
+}
+
+#[derive(Deserialize)]
+struct GeneratedHostBrokerRule {
+    id: String,
+    description: String,
+    condition: String,
+    action: String,
+    priority: i32,
+    egress: GeneratedHostBrokerEgress,
+}
+
+#[derive(Deserialize)]
+struct GeneratedHostBrokerEgress {
+    mode: String,
+    ports: Vec<u16>,
 }
 
 fn cmd_host_broker_serve(
@@ -803,7 +770,7 @@ fn cmd_host_broker_serve(
     let config_path = config
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| outcall::host_resources::default_config_path(&project_dir));
-    let token = auth_token.unwrap_or_else(random_broker_token);
+    let token = resolve_broker_auth_token(auth_token);
     let token_hint = token.clone();
     let listener = bind_broker_socket(socket)?;
 
@@ -817,6 +784,7 @@ fn cmd_host_broker_serve(
 
     loop {
         let (mut stream, _) = listener.accept().context("host broker accept failed")?;
+        configure_unix_broker_stream(&stream)?;
         if let Err(err) = handle_broker_connection(&mut stream, daemon_socket, &config_path, &token)
         {
             let _ = write_http_json(
@@ -832,6 +800,68 @@ fn cmd_host_broker_serve(
     }
 }
 
+fn cmd_host_broker_serve_tcp(
+    daemon_socket: &str,
+    listen: &str,
+    config: Option<&str>,
+    auth_token: Option<String>,
+) -> Result<()> {
+    let project_dir = std::env::current_dir().context("failed to get current directory")?;
+    let config_path = config
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| outcall::host_resources::default_config_path(&project_dir));
+    let token = resolve_broker_auth_token(auth_token);
+    let listener = std::net::TcpListener::bind(listen)
+        .with_context(|| format!("failed to bind loopback broker at {listen}"))?;
+    let local_addr = listener
+        .local_addr()
+        .context("failed to inspect loopback broker address")?;
+    if !local_addr.ip().is_loopback() {
+        anyhow::bail!("host broker TCP listener must bind to a loopback address");
+    }
+
+    println!("Host broker listening on http://{local_addr}");
+    println!("Config: {}", config_path.display());
+    println!("Auth token: {token}");
+
+    loop {
+        let (mut stream, _) = listener.accept().context("host broker accept failed")?;
+        configure_tcp_broker_stream(&stream)?;
+        if let Err(err) = handle_broker_connection(&mut stream, daemon_socket, &config_path, &token)
+        {
+            let _ = write_http_json(
+                &mut stream,
+                500,
+                &Response {
+                    success: false,
+                    data: None,
+                    error: Some(err.to_string()),
+                },
+            );
+        }
+    }
+}
+
+fn configure_unix_broker_stream(stream: &UnixStream) -> Result<()> {
+    let timeout = Some(std::time::Duration::from_secs(10));
+    stream
+        .set_read_timeout(timeout)
+        .context("failed to set host broker read timeout")?;
+    stream
+        .set_write_timeout(timeout)
+        .context("failed to set host broker write timeout")
+}
+
+fn configure_tcp_broker_stream(stream: &std::net::TcpStream) -> Result<()> {
+    let timeout = Some(std::time::Duration::from_secs(10));
+    stream
+        .set_read_timeout(timeout)
+        .context("failed to set host broker read timeout")?;
+    stream
+        .set_write_timeout(timeout)
+        .context("failed to set host broker write timeout")
+}
+
 fn bind_broker_socket(socket: &str) -> Result<std::os::unix::net::UnixListener> {
     let path = std::path::Path::new(socket);
     if let Some(parent) = path.parent() {
@@ -844,25 +874,13 @@ fn bind_broker_socket(socket: &str) -> Result<std::os::unix::net::UnixListener> 
     Ok(listener)
 }
 
-fn handle_broker_connection(
-    stream: &mut std::os::unix::net::UnixStream,
+fn handle_broker_connection<S: Read + Write>(
+    stream: &mut S,
     daemon_socket: &str,
     config_path: &std::path::Path,
     auth_token: &str,
 ) -> Result<()> {
     let request = read_http_request(stream)?;
-    if request.path == "/v1/health" {
-        return write_http_json(
-            stream,
-            200,
-            &Response {
-                success: true,
-                data: Some(serde_json::json!({"ok": true})),
-                error: None,
-            },
-        );
-    }
-
     let auth = request
         .headers
         .get("authorization")
@@ -881,19 +899,29 @@ fn handle_broker_connection(
         );
     }
 
+    if request.path == "/v1/health" {
+        return write_http_json(
+            stream,
+            200,
+            &Response {
+                success: true,
+                data: Some(serde_json::json!({"ok": true})),
+                error: None,
+            },
+        );
+    }
+
     let config = outcall::host_resources::load_from_path(config_path)?;
     match request.path.as_str() {
         "/v1/tool/exec" => {
             let req: BrokerToolExecRequest =
                 serde_json::from_slice(&request.body).context("invalid tool exec request")?;
-            let result = broker_exec_tool(daemon_socket, &config, req)?;
-            write_http_json(stream, 200, &Response::ok(result))
+            write_broker_result(stream, broker_exec_tool(daemon_socket, &config, req))
         }
         "/v1/file/read" => {
             let req: BrokerFileReadRequest =
                 serde_json::from_slice(&request.body).context("invalid file read request")?;
-            let result = broker_read_file(daemon_socket, &config, req)?;
-            write_http_json(stream, 200, &Response::ok(result))
+            write_broker_result(stream, broker_read_file(daemon_socket, &config, req))
         }
         _ => write_http_json(
             stream,
@@ -904,6 +932,42 @@ fn handle_broker_connection(
                 error: Some(format!("unknown broker path {}", request.path)),
             },
         ),
+    }
+}
+
+fn write_broker_result<S: Write, T: serde::Serialize>(
+    stream: &mut S,
+    result: Result<T>,
+) -> Result<()> {
+    match result {
+        Ok(data) => write_http_json(stream, 200, &Response::ok(data)),
+        Err(error) => {
+            let status = broker_error_status(&error);
+            write_http_json(
+                stream,
+                status,
+                &Response {
+                    success: false,
+                    data: None,
+                    error: Some(error.to_string()),
+                },
+            )
+        }
+    }
+}
+
+fn broker_error_status(error: &anyhow::Error) -> u16 {
+    let message = error.to_string();
+    if message.starts_with("blocked by rules")
+        || message.starts_with("host tool not declared")
+        || message.starts_with("host file root not declared")
+        || message.contains("escapes declared host file root")
+    {
+        403
+    } else if message.starts_with("relative_path is ") {
+        400
+    } else {
+        500
     }
 }
 
@@ -927,7 +991,8 @@ fn broker_exec_tool(
         },
     )?;
 
-    let path = outcall::host_resources::expand_home(&tool.path);
+    let project_dir = std::env::current_dir().context("failed to get current project directory")?;
+    let path = outcall::host_resources::resolve_tool_path(&project_dir, tool)?;
     let mut command = std::process::Command::new(&path);
     command.args(&tool.default_args).args(&req.args);
     if let Some(cwd) = req.cwd {
@@ -1027,21 +1092,40 @@ fn random_broker_token() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn resolve_broker_auth_token(explicit: Option<String>) -> String {
+    explicit
+        .or_else(|| std::env::var("OUTCALL_HOST_BROKER_TOKEN").ok())
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(random_broker_token)
+}
+
 struct RawHttpRequest {
     path: String,
     headers: std::collections::HashMap<String, String>,
     body: Vec<u8>,
 }
 
-fn read_http_request(stream: &mut std::os::unix::net::UnixStream) -> Result<RawHttpRequest> {
+fn read_http_request(stream: &mut impl Read) -> Result<RawHttpRequest> {
+    const MAX_HEADER_BYTES: usize = 64 * 1024;
+    const MAX_BODY_BYTES: usize = 1024 * 1024;
+
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw)?;
-    let header_end = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .context("malformed HTTP request")?;
+    let mut chunk = [0u8; 8192];
+    let header_end = loop {
+        if let Some(position) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position;
+        }
+        if raw.len() >= MAX_HEADER_BYTES {
+            anyhow::bail!("broker request headers exceed {MAX_HEADER_BYTES} bytes");
+        }
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            anyhow::bail!("unexpected EOF while reading broker request headers");
+        }
+        raw.extend_from_slice(&chunk[..read]);
+    };
+
     let head = String::from_utf8(raw[..header_end].to_vec()).context("invalid HTTP header")?;
-    let body = raw[header_end + 4..].to_vec();
     let mut lines = head.lines();
     let request_line = lines.next().context("missing request line")?;
     let mut parts = request_line.split_whitespace();
@@ -1053,6 +1137,32 @@ fn read_http_request(stream: &mut std::os::unix::net::UnixStream) -> Result<RawH
             headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
         }
     }
+    if headers.contains_key("transfer-encoding") {
+        anyhow::bail!("broker requests do not support Transfer-Encoding");
+    }
+    let content_length = headers
+        .get("content-length")
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .context("invalid Content-Length")?
+        .unwrap_or(0);
+    if content_length > MAX_BODY_BYTES {
+        anyhow::bail!("broker request body exceeds {MAX_BODY_BYTES} bytes");
+    }
+
+    let body_start = header_end + 4;
+    let message_end = body_start + content_length;
+    while raw.len() < message_end {
+        let remaining = message_end - raw.len();
+        let read_len = remaining.min(chunk.len());
+        let read = stream.read(&mut chunk[..read_len])?;
+        if read == 0 {
+            anyhow::bail!("unexpected EOF while reading broker request body");
+        }
+        raw.extend_from_slice(&chunk[..read]);
+    }
+    let body = raw[body_start..message_end].to_vec();
+
     Ok(RawHttpRequest {
         path,
         headers,
@@ -1061,13 +1171,14 @@ fn read_http_request(stream: &mut std::os::unix::net::UnixStream) -> Result<RawH
 }
 
 fn write_http_json<T: serde::Serialize>(
-    stream: &mut std::os::unix::net::UnixStream,
+    stream: &mut impl Write,
     status: u16,
     body: &T,
 ) -> Result<()> {
     let json = serde_json::to_vec(body).context("failed to serialize broker response")?;
     let status_text = match status {
         200 => "OK",
+        400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
         500 => "Internal Server Error",
@@ -1150,7 +1261,7 @@ fn cmd_doctor(socket: &str, recipe: Option<&str>, fix: bool) -> Result<()> {
     doctor_platform();
     doctor_command("docker", &["--version"]);
     doctor_command("git", &["--version"]);
-    doctor_command("docker", &["info"]);
+    doctor_docker_engine();
     doctor_socket_dir(std::path::Path::new("/tmp/outcall"));
     doctor_br_netfilter();
 
@@ -1195,9 +1306,9 @@ fn cmd_doctor(socket: &str, recipe: Option<&str>, fix: bool) -> Result<()> {
     }
 
     println!();
-    println!("Network reminder:");
-    println!("  `outcall network create` creates the default managed network.");
-    println!("  `outcall daemon start` starts the local daemon container when needed.");
+    println!("Managed runtime:");
+    println!("  `outcall run <recipe>` starts or reuses the daemon and network automatically.");
+    println!("  Manual daemon/network commands are available for troubleshooting.");
 
     if let Some(id) = recipe {
         println!();
@@ -1758,7 +1869,7 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
     doctor_platform();
     doctor_command("docker", &["--version"]);
     doctor_command("git", &["--version"]);
-    doctor_command("docker", &["info"]);
+    doctor_docker_engine();
     doctor_socket_dir(std::path::Path::new("/tmp/outcall"));
     doctor_br_netfilter();
 
@@ -1938,13 +2049,9 @@ fn recipe_agent_config(
     detach: bool,
 ) -> outcall::agent_config::AgentConfig {
     let mut env = std::collections::HashMap::new();
-    let proxy = format!("http://{}:8080", outcall_api::DEFAULT_GATEWAY);
     // Recipe containers use a read-only root filesystem. stage_recipe_auth
     // supplies a writable project-local home mount for each auth mode.
     env.insert("HOME".to_string(), "/home/node".to_string());
-    env.insert("HTTP_PROXY".to_string(), proxy.clone());
-    env.insert("HTTPS_PROXY".to_string(), proxy);
-    env.insert("NO_PROXY".to_string(), "localhost,127.0.0.1".to_string());
 
     outcall::agent_config::AgentConfig {
         image: Some(image.to_string()),
@@ -2163,19 +2270,37 @@ fn maybe_prepare_host_broker(
 
     let registry = outcall::host_resources::load_from_path(&registry_path)?;
     if registry.tools.is_empty() && registry.files.is_empty() {
+        if remove_host_broker_transport_rule(project_dir)? {
+            cmd_rules_reload(daemon_socket)?;
+        }
         return Ok(());
     }
 
     let runtime = ensure_host_broker_running(daemon_socket, project_dir, &registry_path)?;
-    println!(
-        "Host broker ready: {} -> {}",
-        runtime.host_socket.display(),
-        runtime.container_socket
-    );
-    config.env.insert(
-        "OUTCALL_HOST_BROKER_SOCKET".to_string(),
-        runtime.container_socket,
-    );
+    match runtime.transport {
+        HostBrokerTransport::Unix {
+            host_socket,
+            container_socket,
+        } => {
+            println!(
+                "Host broker ready: {} -> {}",
+                host_socket.display(),
+                container_socket
+            );
+            config
+                .env
+                .insert("OUTCALL_HOST_BROKER_SOCKET".to_string(), container_socket);
+        }
+        HostBrokerTransport::Http {
+            listen_addr,
+            container_url,
+        } => {
+            println!("Host broker ready: http://{listen_addr} -> {container_url}");
+            config
+                .env
+                .insert("OUTCALL_HOST_BROKER_URL".to_string(), container_url);
+        }
+    }
     config.env.insert(
         "OUTCALL_HOST_BROKER_TOKEN".to_string(),
         runtime.auth_token.clone(),
@@ -2196,13 +2321,13 @@ fn ensure_host_broker_running(
         .with_context(|| format!("failed to create {}", run_dir.display()))?;
     secure_runtime_dir(&run_dir)?;
 
-    let host_socket = run_dir.join("host-broker.sock");
     let token_path = run_dir.join("host-broker.token");
-    let auth_token = if token_path.exists() {
-        std::fs::read_to_string(&token_path)
-            .with_context(|| format!("failed to read {}", token_path.display()))?
-            .trim()
-            .to_string()
+    let existing_token = std::fs::read_to_string(&token_path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| value.len() == 32 && value.chars().all(|ch| ch.is_ascii_hexdigit()));
+    let auth_token = if let Some(token) = existing_token {
+        token
     } else {
         let token = random_broker_token();
         std::fs::write(&token_path, &token)
@@ -2210,14 +2335,42 @@ fn ensure_host_broker_running(
         secure_runtime_file(&token_path)?;
         token
     };
+    secure_runtime_file(&token_path)?;
 
+    if std::env::consts::OS == "macos" {
+        return ensure_tcp_host_broker_running(
+            daemon_socket,
+            project_dir,
+            registry_path,
+            &run_dir,
+            auth_token,
+        );
+    }
+
+    if remove_host_broker_transport_rule(project_dir)? {
+        cmd_rules_reload(daemon_socket)?;
+    }
+    ensure_unix_host_broker_running(daemon_socket, registry_path, &run_dir, auth_token)
+}
+
+fn ensure_unix_host_broker_running(
+    daemon_socket: &str,
+    registry_path: &std::path::Path,
+    run_dir: &std::path::Path,
+    auth_token: String,
+) -> Result<HostBrokerRuntime> {
+    use std::os::unix::process::CommandExt;
+
+    let host_socket = run_dir.join("host-broker.sock");
     let runtime = HostBrokerRuntime {
-        host_socket: host_socket.clone(),
-        container_socket: "/workspace/.outcall/run/host-broker.sock".to_string(),
+        transport: HostBrokerTransport::Unix {
+            host_socket: host_socket.clone(),
+            container_socket: "/workspace/.outcall/run/host-broker.sock".to_string(),
+        },
         auth_token,
     };
 
-    if host_broker_healthy(&host_socket) {
+    if unix_host_broker_healthy(&host_socket, &runtime.auth_token) {
         return Ok(runtime);
     }
 
@@ -2229,38 +2382,223 @@ fn ensure_host_broker_running(
         .arg(daemon_socket)
         .arg("host-broker")
         .arg("serve")
-        .arg("--socket")
+        .arg("--broker-socket")
         .arg(&host_socket)
         .arg("--config")
         .arg(registry_path)
-        .arg("--auth-token")
-        .arg(&runtime.auth_token)
+        .env("OUTCALL_HOST_BROKER_TOKEN", &runtime.auth_token)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    command.process_group(0);
 
-    let _child = command.spawn().with_context(|| {
+    let mut child = command.spawn().with_context(|| {
         format!(
             "failed to start host broker for {}",
             registry_path.display()
         )
     })?;
 
-    wait_for_host_broker(&host_socket)?;
+    if let Err(error) = wait_for_unix_host_broker(&host_socket, &runtime.auth_token) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    write_host_broker_pid(run_dir, child.id())?;
     Ok(runtime)
 }
 
-fn host_broker_healthy(socket: &std::path::Path) -> bool {
+fn ensure_tcp_host_broker_running(
+    daemon_socket: &str,
+    project_dir: &std::path::Path,
+    registry_path: &std::path::Path,
+    run_dir: &std::path::Path,
+    auth_token: String,
+) -> Result<HostBrokerRuntime> {
+    use std::os::unix::process::CommandExt;
+
+    let port_path = run_dir.join("host-broker.port");
+    if let Ok(value) = std::fs::read_to_string(&port_path)
+        && let Ok(port) = value.trim().parse::<u16>()
+    {
+        secure_runtime_file(&port_path)?;
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if tcp_host_broker_healthy(addr, &auth_token) {
+            write_host_broker_transport_rule(project_dir, port)?;
+            cmd_rules_reload(daemon_socket)?;
+            return Ok(tcp_host_broker_runtime(addr, auth_token));
+        }
+    }
+
+    let current_exe =
+        std::env::current_exe().context("failed to resolve current outcall binary")?;
+    for _ in 0..3 {
+        let reservation = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .context("failed to reserve a loopback broker port")?;
+        let addr = reservation
+            .local_addr()
+            .context("failed to inspect reserved broker port")?;
+        drop(reservation);
+
+        let mut command = std::process::Command::new(&current_exe);
+        command
+            .arg("--socket")
+            .arg(daemon_socket)
+            .arg("host-broker")
+            .arg("serve-tcp")
+            .arg("--listen")
+            .arg(addr.to_string())
+            .arg("--config")
+            .arg(registry_path)
+            .env("OUTCALL_HOST_BROKER_TOKEN", &auth_token)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command.process_group(0);
+        let mut child = command.spawn().with_context(|| {
+            format!(
+                "failed to start loopback host broker for {}",
+                registry_path.display()
+            )
+        })?;
+
+        if wait_for_tcp_host_broker(addr, &auth_token) {
+            std::fs::write(&port_path, format!("{}\n", addr.port()))
+                .with_context(|| format!("failed to write {}", port_path.display()))?;
+            secure_runtime_file(&port_path)?;
+            write_host_broker_pid(run_dir, child.id())?;
+            write_host_broker_transport_rule(project_dir, addr.port())?;
+            cmd_rules_reload(daemon_socket)?;
+            return Ok(tcp_host_broker_runtime(addr, auth_token));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    anyhow::bail!("host broker did not become ready on a loopback TCP port")
+}
+
+fn write_host_broker_pid(run_dir: &std::path::Path, pid: u32) -> Result<()> {
+    let path = run_dir.join("host-broker.pid");
+    std::fs::write(&path, format!("{pid}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    secure_runtime_file(&path)
+}
+
+fn tcp_host_broker_runtime(
+    listen_addr: std::net::SocketAddr,
+    auth_token: String,
+) -> HostBrokerRuntime {
+    HostBrokerRuntime {
+        transport: HostBrokerTransport::Http {
+            listen_addr,
+            container_url: format!("http://host.docker.internal:{}", listen_addr.port()),
+        },
+        auth_token,
+    }
+}
+
+fn host_broker_transport_rule_path(project_dir: &std::path::Path) -> std::path::PathBuf {
+    project_dir
+        .join(".outcall")
+        .join("rules")
+        .join(".outcall-host-broker.yaml")
+}
+
+fn write_host_broker_transport_rule(project_dir: &std::path::Path, port: u16) -> Result<()> {
+    let path = host_broker_transport_rule_path(project_dir);
+    let contents = format!(
+        r#"version: "1"
+rules:
+  - id: outcall-host-broker-transport
+    description: Internal Docker Desktop transport to the tokenized host broker.
+    condition: 'http.host == "host.docker.internal" && network.port == {port}'
+    action: allow
+    priority: 0
+    egress:
+      mode: proxy
+      ports: [{port}]
+"#
+    );
+    std::fs::write(&path, contents).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn remove_host_broker_transport_rule(project_dir: &std::path::Path) -> Result<bool> {
+    let path = host_broker_transport_rule_path(project_dir);
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    Ok(true)
+}
+
+fn remove_invalid_host_broker_transport_rule(project_dir: &std::path::Path) -> Result<bool> {
+    let path = host_broker_transport_rule_path(project_dir);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    if valid_host_broker_transport_rule(&raw) {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path)
+        .with_context(|| format!("failed to remove invalid {}", path.display()))?;
+    Ok(true)
+}
+
+fn valid_host_broker_transport_rule(raw: &str) -> bool {
+    let Ok(file) = serde_yaml::from_str::<GeneratedHostBrokerRuleFile>(raw) else {
+        return false;
+    };
+    let [rule] = file.rules.as_slice() else {
+        return false;
+    };
+    let [port] = rule.egress.ports.as_slice() else {
+        return false;
+    };
+    file.version == "1"
+        && rule.id == "outcall-host-broker-transport"
+        && rule.description == "Internal Docker Desktop transport to the tokenized host broker."
+        && rule.condition
+            == format!(
+                "http.host == \"host.docker.internal\" && network.port == {}",
+                port
+            )
+        && rule.action == "allow"
+        && rule.priority == 0
+        && rule.egress.mode == "proxy"
+}
+
+fn unix_host_broker_healthy(socket: &std::path::Path, auth_token: &str) -> bool {
     if !socket.exists() {
         return false;
     }
     let Ok(mut stream) = UnixStream::connect(socket) else {
         return false;
     };
-    if write!(stream, "GET /v1/health HTTP/1.0\r\nHost: localhost\r\n\r\n").is_err() {
+    probe_host_broker(&mut stream, auth_token)
+}
+
+fn tcp_host_broker_healthy(addr: std::net::SocketAddr, auth_token: &str) -> bool {
+    let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200))
+    else {
+        return false;
+    };
+    probe_host_broker(&mut stream, auth_token)
+}
+
+fn probe_host_broker(stream: &mut (impl Read + Write), auth_token: &str) -> bool {
+    if write!(
+        stream,
+        "GET /v1/health HTTP/1.0\r\nHost: localhost\r\nAuthorization: Bearer {auth_token}\r\n\r\n"
+    )
+    .is_err()
+    {
         return false;
     }
-    let Ok(body) = read_body(&mut stream) else {
+    let Ok(body) = read_body(stream) else {
         return false;
     };
     let Ok(resp) = serde_json::from_str::<Response>(&body) else {
@@ -2269,14 +2607,24 @@ fn host_broker_healthy(socket: &std::path::Path) -> bool {
     resp.success
 }
 
-fn wait_for_host_broker(socket: &std::path::Path) -> Result<()> {
+fn wait_for_unix_host_broker(socket: &std::path::Path, auth_token: &str) -> Result<()> {
     for _ in 0..50 {
-        if host_broker_healthy(socket) {
+        if unix_host_broker_healthy(socket, auth_token) {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     anyhow::bail!("host broker did not become ready at {}", socket.display());
+}
+
+fn wait_for_tcp_host_broker(addr: std::net::SocketAddr, auth_token: &str) -> bool {
+    for _ in 0..50 {
+        if tcp_host_broker_healthy(addr, auth_token) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -2316,6 +2664,9 @@ fn secure_runtime_file(_path: &std::path::Path) -> Result<()> {
 }
 
 fn ensure_recipe_runtime_ready(socket: &str, project_dir: &std::path::Path) -> Result<()> {
+    if remove_invalid_host_broker_transport_rule(project_dir)? {
+        println!("Removed invalid generated host broker transport rule.");
+    }
     let rules_dir = project_dir.join(".outcall").join("rules");
     ensure_daemon_ready(socket, Some(&rules_dir))?;
     cmd_rules_reload(socket)?;
@@ -2349,6 +2700,7 @@ fn launch_managed_recipe_container(
 
     let mut volumes = vec![format!("{}:{}", abs_project_dir.display(), workspace)];
     volumes.extend(config.volumes.clone());
+    volumes.push(protected_outcall_mount(&abs_project_dir, &workspace)?);
 
     let env = if config.env.is_empty() {
         None
@@ -2371,7 +2723,8 @@ fn launch_managed_recipe_container(
         config.command.clone()
     };
 
-    let req = outcall_api::ContainerCreateRequest {
+    let automatic_name = config.name.is_none();
+    let mut req = outcall_api::ContainerCreateRequest {
         image,
         network: Some(config.network.clone()),
         name: Some(name.clone()),
@@ -2401,30 +2754,32 @@ fn launch_managed_recipe_container(
     println!("  Network: {}", config.network);
     println!("  Starting container via outcalld...");
 
-    let body = match http_post_json(socket, "/api/v1/container/create", &req) {
-        Ok(body) => body,
-        Err(err) if should_retry_legacy_container_create(&err) => {
-            println!(
-                "  Daemon is using the legacy container API; retrying with compatible fields..."
-            );
-            let legacy_req = outcall_api::ContainerCreateRequest {
-                entrypoint: None,
-                working_dir: None,
-                include_outcall_helper_mounts: None,
-                interactive: None,
-                tty: None,
-                ..req.clone()
-            };
-            http_post_json(socket, "/api/v1/container/create", &legacy_req)?
+    let mut name_retry_count = 0usize;
+    let result: ContainerCreateResult = loop {
+        let resp = post_managed_container_create(socket, &req)?;
+        if resp.success {
+            break serde_json::from_value(resp.data.context("no data")?)?;
         }
-        Err(err) => return Err(err),
-    };
-    let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
-    if !resp.success {
-        anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
-    }
 
-    let result: ContainerCreateResult = serde_json::from_value(resp.data.context("no data")?)?;
+        let error = resp.error.unwrap_or_else(|| "unknown error".into());
+        let current_name = req.name.as_deref().unwrap_or_default();
+        let candidate = config.effective_name(project_dir);
+        if let Some(next_name) = automatic_name_retry_candidate(
+            automatic_name,
+            name_retry_count,
+            current_name,
+            candidate,
+        ) {
+            name_retry_count += 1;
+            println!(
+                "  Container name '{}' was claimed concurrently; retrying as '{}'...",
+                current_name, next_name
+            );
+            req.name = Some(next_name);
+            continue;
+        }
+        anyhow::bail!("{error}");
+    };
 
     if config.detach {
         println!(
@@ -2434,7 +2789,7 @@ fn launch_managed_recipe_container(
         );
         println!("  Attach: docker attach {}", result.name);
         println!("  Logs:   docker logs -f {}", result.name);
-        println!("  Stop:   outcall agent --stop {}", result.name);
+        println!("  Stop:   outcall stop {}", result.name);
         return Ok(result.name);
     }
 
@@ -2460,6 +2815,50 @@ fn launch_managed_recipe_container(
 
     println!("\nAgent '{}' stopped.", result.name);
     Ok(result.name)
+}
+
+fn post_managed_container_create(
+    socket: &str,
+    req: &outcall_api::ContainerCreateRequest,
+) -> Result<Response> {
+    let body = match http_post_json(socket, "/api/v1/container/create", req) {
+        Ok(body) => body,
+        Err(err) if should_retry_legacy_container_create(&err) => {
+            println!(
+                "  Daemon is using the legacy container API; retrying with compatible fields..."
+            );
+            let legacy_req = outcall_api::ContainerCreateRequest {
+                entrypoint: None,
+                working_dir: None,
+                include_outcall_helper_mounts: None,
+                interactive: None,
+                tty: None,
+                ..req.clone()
+            };
+            http_post_json(socket, "/api/v1/container/create", &legacy_req)?
+        }
+        Err(err) => return Err(err),
+    };
+    serde_json::from_str(&body).context("failed to parse response")
+}
+
+fn automatic_name_retry_candidate(
+    automatic_name: bool,
+    retry_count: usize,
+    current_name: &str,
+    candidate: String,
+) -> Option<String> {
+    const MAX_NAME_RETRIES: usize = 20;
+    (automatic_name && retry_count < MAX_NAME_RETRIES && candidate != current_name)
+        .then_some(candidate)
+}
+
+fn protected_outcall_mount(project_dir: &std::path::Path, workspace: &str) -> Result<String> {
+    let outcall_dir = project_dir.join(".outcall");
+    let source = std::fs::canonicalize(&outcall_dir)
+        .with_context(|| format!("failed to canonicalize {}", outcall_dir.display()))?;
+    let destination = format!("{}/.outcall", workspace.trim_end_matches('/'));
+    Ok(format!("{}:{destination}:ro", source.display()))
 }
 
 fn wait_for_recipe_container(name: &str) -> Result<()> {
@@ -3212,6 +3611,17 @@ fn doctor_command(command: &str, args: &[&str]) {
     }
 }
 
+fn doctor_docker_engine() {
+    doctor_command(
+        "docker",
+        &[
+            "version",
+            "--format",
+            "Docker Engine {{.Server.Version}} ({{.Server.Os}}/{{.Server.Arch}})",
+        ],
+    );
+}
+
 fn doctor_command_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(3)
 }
@@ -3319,7 +3729,29 @@ fn doctor_socket_dir(path: &std::path::Path) {
 
 fn doctor_br_netfilter() {
     if std::env::consts::OS != "linux" {
-        println!("  INFO br_netfilter: Linux-only prerequisite");
+        match daemon_container_state(DEFAULT_DAEMON_NAME) {
+            Ok(Some(state)) if state == "running" => {
+                let ipv4 =
+                    daemon_exec_output(["cat", "/proc/sys/net/bridge/bridge-nf-call-iptables"]);
+                let ipv6 =
+                    daemon_exec_output(["cat", "/proc/sys/net/bridge/bridge-nf-call-ip6tables"]);
+                match (ipv4, ipv6) {
+                    (Ok(ipv4), Ok(ipv6)) => println!(
+                        "{}",
+                        runtime_bridge_netfilter_line(ipv4.trim(), ipv6.trim())
+                    ),
+                    (Err(error), _) | (_, Err(error)) => println!(
+                        "  WARN secure unattended mode: could not inspect Docker's Linux runtime ({error})"
+                    ),
+                }
+            }
+            Ok(_) => println!(
+                "  INFO secure unattended mode: bridge netfilter will be checked inside Docker's Linux runtime when `outcall run` starts"
+            ),
+            Err(error) => println!(
+                "  WARN secure unattended mode: could not inspect Docker's Linux runtime ({error})"
+            ),
+        }
         return;
     }
 
@@ -3345,6 +3777,17 @@ fn doctor_br_netfilter() {
     );
 }
 
+fn runtime_bridge_netfilter_line(ipv4: &str, ipv6: &str) -> String {
+    if ipv4 == "1" && ipv6 == "1" {
+        "  PASS secure unattended mode: Docker Linux runtime bridge netfilter enforcement enabled"
+            .to_string()
+    } else {
+        format!(
+            "  WARN secure unattended mode: Docker Linux runtime bridge netfilter is not enforceable (ipv4={ipv4}, ipv6={ipv6}; expected both to be 1)"
+        )
+    }
+}
+
 fn doctor_proc_value(label: &str, path: &std::path::Path, expected: &str, hint: &str) {
     match std::fs::read_to_string(path) {
         Ok(value) => {
@@ -3364,9 +3807,19 @@ fn doctor_proc_value(label: &str, path: &std::path::Path, expected: &str, hint: 
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandTimeoutError, command_output_with_timeout, doctor_platform_line_for,
-        ensure_recipe_setup_state, rewrite_container_output_path, rewrite_recipe_entrypoint_args,
+        BrokerToolExecRequest, Cli, CommandTimeoutError, Commands, HostBrokerAction,
+        automatic_name_retry_candidate, broker_error_status, broker_exec_tool,
+        command_output_with_timeout, daemon_build_inputs, doctor_platform_line_for,
+        ensure_recipe_setup_state, handle_broker_connection, host_broker_transport_rule_path,
+        protected_outcall_mount, read_http_request, remove_invalid_host_broker_transport_rule,
+        resolve_broker_auth_token, resolve_host_file_path, rewrite_container_output_path,
+        rewrite_recipe_entrypoint_args, runtime_bridge_netfilter_line,
+        valid_host_broker_transport_rule, write_host_broker_transport_rule,
     };
+    use clap::Parser;
+    use std::io::{Read, Write};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
     use std::path::Path;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -3384,6 +3837,32 @@ mod tests {
         assert_eq!(
             doctor_platform_line_for("windows"),
             "  WARN platform: windows host detected; the isolated daemon runtime still requires Linux"
+        );
+    }
+
+    #[test]
+    fn runtime_bridge_netfilter_message_reports_enforceability() {
+        assert!(runtime_bridge_netfilter_line("1", "1").contains("PASS secure unattended mode"));
+        assert!(runtime_bridge_netfilter_line("0", "1").contains("WARN secure unattended mode"));
+    }
+
+    #[test]
+    fn automatic_name_retries_only_when_the_candidate_changed() {
+        assert_eq!(
+            automatic_name_retry_candidate(true, 0, "foobar-4", "foobar-5".to_string()),
+            Some("foobar-5".to_string())
+        );
+        assert_eq!(
+            automatic_name_retry_candidate(true, 0, "foobar-4", "foobar-4".to_string()),
+            None
+        );
+        assert_eq!(
+            automatic_name_retry_candidate(false, 0, "fixed", "foobar-5".to_string()),
+            None
+        );
+        assert_eq!(
+            automatic_name_retry_candidate(true, 20, "foobar-4", "foobar-5".to_string()),
+            None
         );
     }
 
@@ -3472,6 +3951,280 @@ mod tests {
         let default_recipe = std::fs::read_to_string(temp.path().join(".outcall/default-recipe"))
             .expect("default recipe should exist");
         assert_eq!(default_recipe.trim(), "codex");
+    }
+
+    #[test]
+    fn broker_http_parser_finishes_without_client_eof() {
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        server
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("read timeout");
+        client
+            .write_all(b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("write request");
+
+        let request = read_http_request(&mut server).expect("parse request");
+        assert_eq!(request.path, "/v1/health");
+        assert!(request.body.is_empty());
+    }
+
+    #[test]
+    fn broker_http_parser_reads_content_length_body() {
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        let body = br#"{"id":"demo"}"#;
+        let request = format!(
+            "POST /v1/tool/exec HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        client
+            .write_all(request.as_bytes())
+            .expect("write request headers");
+        client.write_all(body).expect("write request body");
+
+        let parsed = read_http_request(&mut server).expect("parse request");
+        assert_eq!(parsed.path, "/v1/tool/exec");
+        assert_eq!(parsed.body, body);
+    }
+
+    #[test]
+    fn broker_rejects_invalid_token_before_loading_config() {
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        let body = br#"{"id":"demo"}"#;
+        let request = format!(
+            "POST /v1/tool/exec HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer wrong\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        client
+            .write_all(request.as_bytes())
+            .expect("write request headers");
+        client.write_all(body).expect("write request body");
+        client.shutdown(Shutdown::Write).expect("finish request");
+
+        handle_broker_connection(
+            &mut server,
+            "/tmp/missing-outcall.sock",
+            Path::new("/tmp/missing-host-resources.yaml"),
+            "expected",
+        )
+        .expect("write forbidden response");
+        drop(server);
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).expect("read response");
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(response.contains("invalid broker token"));
+    }
+
+    #[test]
+    fn broker_health_requires_the_shared_token() {
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        client
+            .write_all(b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("write request");
+        client.shutdown(Shutdown::Write).expect("finish request");
+
+        handle_broker_connection(
+            &mut server,
+            "/tmp/missing-outcall.sock",
+            Path::new("/tmp/missing-host-resources.yaml"),
+            "expected",
+        )
+        .expect("write forbidden response");
+        drop(server);
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).expect("read response");
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(response.contains("invalid broker token"));
+    }
+
+    #[test]
+    fn explicit_broker_token_takes_precedence() {
+        assert_eq!(
+            resolve_broker_auth_token(Some("explicit-token".to_string())),
+            "explicit-token"
+        );
+    }
+
+    #[test]
+    fn broker_rejects_undeclared_tool_before_execution() {
+        let config = outcall::host_resources::HostResourcesConfig::default();
+        let error = broker_exec_tool(
+            "/tmp/missing-outcall.sock",
+            &config,
+            BrokerToolExecRequest {
+                id: "missing".to_string(),
+                args: Vec::new(),
+                cwd: None,
+            },
+        )
+        .err()
+        .expect("undeclared tool should fail");
+        assert!(error.to_string().contains("host tool not declared"));
+    }
+
+    #[test]
+    fn broker_file_resolution_rejects_parent_traversal() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).expect("create root");
+        std::fs::write(temp.path().join("outside.txt"), "secret").expect("write fixture");
+
+        let error = resolve_host_file_path(&root, Some("../outside.txt"))
+            .expect_err("parent traversal should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("escapes declared host file root")
+        );
+    }
+
+    #[test]
+    fn broker_cli_keeps_daemon_and_listener_sockets_distinct() {
+        let cli = Cli::try_parse_from([
+            "outcall",
+            "--socket",
+            "/tmp/daemon.sock",
+            "host-broker",
+            "serve",
+            "--broker-socket",
+            "/tmp/broker.sock",
+        ])
+        .expect("parse broker command");
+        assert_eq!(cli.socket, "/tmp/daemon.sock");
+        let Some(Commands::HostBroker {
+            action: HostBrokerAction::Serve { broker_socket, .. },
+        }) = cli.command
+        else {
+            panic!("expected host broker serve command");
+        };
+        assert_eq!(broker_socket, "/tmp/broker.sock");
+    }
+
+    #[test]
+    fn broker_cli_parses_loopback_tcp_listener() {
+        let cli = Cli::try_parse_from([
+            "outcall",
+            "--socket",
+            "/tmp/daemon.sock",
+            "host-broker",
+            "serve-tcp",
+            "--listen",
+            "127.0.0.1:19001",
+        ])
+        .expect("parse TCP broker command");
+        assert_eq!(cli.socket, "/tmp/daemon.sock");
+        let Some(Commands::HostBroker {
+            action: HostBrokerAction::ServeTcp { listen, .. },
+        }) = cli.command
+        else {
+            panic!("expected host broker serve-tcp command");
+        };
+        assert_eq!(listen, "127.0.0.1:19001");
+    }
+
+    #[test]
+    fn broker_transport_rule_allows_only_the_selected_proxy_port() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join(".outcall/rules")).expect("create rules dir");
+
+        write_host_broker_transport_rule(temp.path(), 17890).expect("write transport rule");
+
+        let path = host_broker_transport_rule_path(temp.path());
+        let rule = std::fs::read_to_string(path).expect("read transport rule");
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(&rule).expect("transport rule should be valid YAML");
+        assert_eq!(
+            document["rules"]
+                .as_sequence()
+                .expect("rules should be a sequence")
+                .len(),
+            1
+        );
+        assert!(valid_host_broker_transport_rule(&rule));
+        assert!(rule.contains("http.host == \"host.docker.internal\""));
+        assert!(rule.contains("network.port == 17890"));
+        assert!(rule.contains("mode: proxy"));
+        assert!(rule.contains("ports: [17890]"));
+        assert!(!rule.contains("direct"));
+    }
+
+    #[test]
+    fn invalid_generated_broker_rule_is_removed_before_reload() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join(".outcall/rules")).expect("create rules dir");
+        let path = host_broker_transport_rule_path(temp.path());
+        std::fs::write(
+            &path,
+            "version: \"1\"\nrules:\n- id: bad\ndescription: invalid\n",
+        )
+        .expect("write invalid rule");
+
+        assert!(
+            remove_invalid_host_broker_transport_rule(temp.path())
+                .expect("remove invalid generated rule")
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn project_policy_is_overlay_mounted_read_only() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join(".outcall")).expect("create policy dir");
+        let source =
+            std::fs::canonicalize(temp.path().join(".outcall")).expect("canonicalize policy dir");
+
+        let mount =
+            protected_outcall_mount(temp.path(), "/workspace/").expect("build protected mount");
+
+        assert_eq!(
+            mount,
+            format!("{}:/workspace/.outcall:ro", source.display())
+        );
+    }
+
+    #[test]
+    fn broker_errors_use_security_appropriate_http_statuses() {
+        assert_eq!(
+            broker_error_status(&anyhow::anyhow!("blocked by rules")),
+            403
+        );
+        assert_eq!(
+            broker_error_status(&anyhow::anyhow!("host tool not declared: demo")),
+            403
+        );
+        assert_eq!(
+            broker_error_status(&anyhow::anyhow!(
+                "resolved path escapes declared host file root"
+            )),
+            403
+        );
+        assert_eq!(
+            broker_error_status(&anyhow::anyhow!(
+                "relative_path is required for directory resources"
+            )),
+            400
+        );
+        assert_eq!(
+            broker_error_status(&anyhow::anyhow!("failed to execute host tool")),
+            500
+        );
+    }
+
+    #[test]
+    fn daemon_build_uses_dockerfile_parent_as_context() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).expect("create source");
+        let dockerfile = source.join("Dockerfile");
+        std::fs::write(&dockerfile, "FROM scratch\n").expect("write Dockerfile");
+
+        let (resolved_dockerfile, context) =
+            daemon_build_inputs(&dockerfile).expect("resolve build inputs");
+        let expected_source = std::fs::canonicalize(&source).expect("canonicalize source");
+
+        assert_eq!(resolved_dockerfile, expected_source.join("Dockerfile"));
+        assert_eq!(context, expected_source);
     }
 }
 
@@ -4367,7 +5120,7 @@ fn daemon_http_request_via_exec(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn read_body(stream: &mut UnixStream) -> Result<String> {
+fn read_body(stream: &mut impl Read) -> Result<String> {
     let mut buf = String::new();
     stream.read_to_string(&mut buf)?;
 
@@ -4609,6 +5362,22 @@ const DEFAULT_DAEMON_NAME: &str = "outcall-daemon";
 const DEFAULT_DAEMON_IMAGE: &str =
     concat!("ghcr.io/outcall-dev/outcalld:v", env!("CARGO_PKG_VERSION"));
 
+fn daemon_build_inputs(
+    dockerfile: impl AsRef<std::path::Path>,
+) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let dockerfile = std::fs::canonicalize(dockerfile.as_ref()).with_context(|| {
+        format!(
+            "failed to resolve daemon Dockerfile {}",
+            dockerfile.as_ref().display()
+        )
+    })?;
+    let context = dockerfile
+        .parent()
+        .context("daemon Dockerfile has no parent directory")?
+        .to_path_buf();
+    Ok((dockerfile, context))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_daemon_start(
     image: Option<String>,
@@ -4632,9 +5401,15 @@ fn cmd_daemon_start(
     let (operator_uid, operator_gid) = host_operator_identity()?;
 
     if let Some(dockerfile) = build_from {
-        println!("Building image {image} from {dockerfile}…");
+        let (dockerfile, context) = daemon_build_inputs(dockerfile)?;
+        println!("Building image {image} from {}…", dockerfile.display());
         let status = Command::new("docker")
-            .args(["build", "-f", &dockerfile, "-t", &image, "."])
+            .arg("build")
+            .arg("-f")
+            .arg(&dockerfile)
+            .arg("-t")
+            .arg(&image)
+            .arg(&context)
             .status()
             .context("failed to invoke docker build")?;
         if !status.success() {

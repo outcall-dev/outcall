@@ -21,6 +21,7 @@ use futures::stream::StreamExt;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
+use crate::container_env::container_environment;
 use outcall_api::{
     ContainerCreateRequest, ContainerCreateResult, ContainerInfo, ContainerInspectResult,
     ContainerRemoveResult, ContainerStopResult, ImagePullResult, AGENT_SOCKET_CONTAINER_PATH,
@@ -175,15 +176,9 @@ impl DockerManager {
             binds.extend(user_vols);
         }
 
-        // Build environment (proxy + DNS always present; caller can add more).
-        let mut env = vec![
-            format!("HTTP_PROXY=http://{proxy_addr}"),
-            format!("HTTPS_PROXY=http://{proxy_addr}"),
-            "NO_PROXY=localhost,127.0.0.1".to_string(),
-        ];
-        if let Some(extra) = req.env {
-            env.extend(extra);
-        }
+        // Proxy variables are daemon-owned: callers may add environment
+        // variables, but cannot duplicate or override enforced proxy routing.
+        let env = container_environment(proxy_addr, req.env);
 
         // Build labels — managed-by=outcalld is how we track these containers.
         let mut labels = HashMap::new();

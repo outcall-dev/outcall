@@ -19,14 +19,14 @@ pub struct PolicyRuleSummary {
     pub description: Option<String>,
 }
 
-/// Add a named recipe policy template or an exact-host HTTPS proxy grant.
+/// Add a named recipe grant, exact-host HTTPS grant, or declared host resource.
 ///
 /// The project rule file is the source of truth. Existing rule mappings are
 /// retained as-is; only the requested managed rule is appended when absent.
 pub fn allow(project_dir: &Path, recipe: &Recipe, target: &str) -> Result<PolicyChange> {
     let path = rule_path(project_dir, recipe);
     let mut document = load_rule_document(&path, recipe.rules)?;
-    let (rule_id, rule) = policy_rule(recipe, target)?;
+    let (rule_id, rule) = policy_rule(project_dir, recipe, target)?;
 
     let rules = rules_mut(&mut document)?;
     if rules
@@ -75,13 +75,19 @@ pub fn template_names(recipe: &Recipe) -> impl Iterator<Item = &'static str> {
     recipe.policy_templates.iter().map(|template| template.name)
 }
 
-fn policy_rule(recipe: &Recipe, target: &str) -> Result<(String, Value)> {
+fn policy_rule(project_dir: &Path, recipe: &Recipe, target: &str) -> Result<(String, Value)> {
     if let Some(template) = recipe
         .policy_templates
         .iter()
         .find(|template| template.name == target)
     {
         return Ok((template.id.to_string(), template_rule(template)));
+    }
+
+    if let Some((kind, id)) = target.split_once(':')
+        && matches!(kind, "tool" | "file")
+    {
+        return host_resource_rule(project_dir, recipe, kind, id);
     }
 
     let host = normalize_host(target)?;
@@ -91,17 +97,79 @@ fn policy_rule(recipe: &Recipe, target: &str) -> Result<(String, Value)> {
     Ok((id.clone(), allow_rule(&id, &description, &condition)))
 }
 
+fn host_resource_rule(
+    project_dir: &Path,
+    recipe: &Recipe,
+    kind: &str,
+    id: &str,
+) -> Result<(String, Value)> {
+    validate_resource_id(id)?;
+    let registry = crate::host_resources::load_for_project(project_dir)?;
+    match kind {
+        "tool" => {
+            let tool = crate::host_resources::find_tool(&registry, id).with_context(|| {
+                format!(
+                    "host tool {id:?} is not declared in {}",
+                    crate::host_resources::default_config_path(project_dir).display()
+                )
+            })?;
+            crate::host_resources::resolve_tool_path(project_dir, tool)?;
+        }
+        "file" => {
+            if crate::host_resources::find_file(&registry, id).is_none() {
+                anyhow::bail!(
+                    "host file {id:?} is not declared in {}",
+                    crate::host_resources::default_config_path(project_dir).display()
+                );
+            }
+        }
+        _ => unreachable!("validated host resource kind"),
+    }
+
+    let rule_id = format!("{}-host-{}-{}", recipe.id, kind, id);
+    let resource_kind = if kind == "tool" { "tool" } else { "file root" };
+    let description = format!(
+        "{} may use declared host {resource_kind} {id}.",
+        recipe.name
+    );
+    let condition = format!("run.tool == \"host.{kind}.{id}\"");
+    Ok((
+        rule_id.clone(),
+        basic_allow_rule(&rule_id, &description, &condition),
+    ))
+}
+
+fn validate_resource_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        anyhow::bail!(
+            "host resource IDs must contain only ASCII letters, numbers, dots, underscores, or hyphens"
+        );
+    }
+    Ok(())
+}
+
 fn template_rule(template: &PolicyTemplate) -> Value {
     allow_rule(template.id, template.description, template.condition)
 }
 
 fn allow_rule(id: &str, description: &str, condition: &str) -> Value {
+    let mut rule = basic_allow_rule(id, description, condition);
     let mut egress = Mapping::new();
     egress.insert(
         Value::String("mode".to_string()),
         Value::String("proxy".to_string()),
     );
+    rule.as_mapping_mut()
+        .expect("allow rule is a mapping")
+        .insert(Value::String("egress".to_string()), Value::Mapping(egress));
+    rule
+}
 
+fn basic_allow_rule(id: &str, description: &str, condition: &str) -> Value {
     let mut rule = Mapping::new();
     rule.insert(
         Value::String("id".to_string()),
@@ -119,7 +187,6 @@ fn allow_rule(id: &str, description: &str, condition: &str) -> Value {
         Value::String("action".to_string()),
         Value::String("allow".to_string()),
     );
-    rule.insert(Value::String("egress".to_string()), Value::Mapping(egress));
     Value::Mapping(rule)
 }
 
@@ -139,7 +206,7 @@ fn normalize_host(target: &str) -> Result<String> {
         || !host.contains('.')
     {
         anyhow::bail!(
-            "policy target must be a named recipe grant or an exact hostname, for example github or https://api.sentry.io"
+            "policy target must be a named recipe grant, exact hostname, or declared host resource, for example github, https://api.sentry.io, tool:chrome-mcp, or file:notes"
         );
     }
     Ok(host.to_ascii_lowercase())
@@ -237,8 +304,82 @@ mod tests {
 
     #[test]
     fn rejects_broad_or_ambiguous_hosts() {
+        let project = temp_project("reject");
         let recipe = get_recipe("codex").unwrap();
-        assert!(policy_rule(recipe, "*.example.com").is_err());
-        assert!(policy_rule(recipe, "https://example.com:443").is_err());
+        init_recipe(&project, recipe, false).unwrap();
+        assert!(policy_rule(&project, recipe, "*.example.com").is_err());
+        assert!(policy_rule(&project, recipe, "https://example.com:443").is_err());
+        let _ = std::fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn adds_declared_host_resource_rules() {
+        let project = temp_project("host-resource");
+        let recipe = get_recipe("codex").unwrap();
+        init_recipe(&project, recipe, false).unwrap();
+        std::fs::write(
+            crate::host_resources::default_config_path(&project),
+            r#"version: "1"
+tools:
+  - id: echo-test
+    path: /bin/echo
+files:
+  - id: notes
+    path: /tmp/notes
+"#,
+        )
+        .unwrap();
+
+        let tool = allow(&project, recipe, "tool:echo-test").unwrap();
+        let file = allow(&project, recipe, "file:notes").unwrap();
+        assert_eq!(tool.rule_id, "codex-host-tool-echo-test");
+        assert_eq!(file.rule_id, "codex-host-file-notes");
+
+        let rules = std::fs::read_to_string(rule_path(&project, recipe)).unwrap();
+        assert!(rules.contains(r#"run.tool == "host.tool.echo-test""#));
+        assert!(rules.contains(r#"run.tool == "host.file.notes""#));
+        let _ = std::fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn rejects_undeclared_or_malformed_host_resources() {
+        let project = temp_project("host-resource-reject");
+        let recipe = get_recipe("codex").unwrap();
+        init_recipe(&project, recipe, false).unwrap();
+
+        let undeclared = allow(&project, recipe, "tool:missing").unwrap_err();
+        assert!(undeclared.to_string().contains("is not declared"));
+        let malformed = allow(&project, recipe, "file:../secret").unwrap_err();
+        assert!(malformed.to_string().contains("host resource IDs"));
+        let _ = std::fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn keeps_host_resource_rule_ids_unique() {
+        let project = temp_project("host-resource-id");
+        let recipe = get_recipe("codex").unwrap();
+        init_recipe(&project, recipe, false).unwrap();
+        std::fs::write(
+            crate::host_resources::default_config_path(&project),
+            r#"version: "1"
+tools:
+  - id: echo.test
+    path: /bin/echo
+  - id: echo_test
+    path: /bin/echo
+files: []
+"#,
+        )
+        .unwrap();
+
+        let dotted = allow(&project, recipe, "tool:echo.test").unwrap();
+        let underscored = allow(&project, recipe, "tool:echo_test").unwrap();
+        assert_eq!(dotted.rule_id, "codex-host-tool-echo.test");
+        assert_eq!(underscored.rule_id, "codex-host-tool-echo_test");
+
+        let rules = std::fs::read_to_string(rule_path(&project, recipe)).unwrap();
+        assert!(rules.contains(r#"run.tool == "host.tool.echo.test""#));
+        assert!(rules.contains(r#"run.tool == "host.tool.echo_test""#));
+        let _ = std::fs::remove_dir_all(project);
     }
 }

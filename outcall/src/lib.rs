@@ -2,7 +2,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod agent_boot;
 pub mod agent_config;
 pub mod host_resources;
 pub mod policy;
