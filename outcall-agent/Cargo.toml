@@ -1,6 +1,6 @@
 [package]
 name = "outcall-agent"
-version = "0.1.32"
+version = "0.1.33"
 edition = "2024"
 description = "Agent shim for Outcall (runs inside containers)"
 license = "Apache-2.0"
