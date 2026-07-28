@@ -70,6 +70,25 @@ pub fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+pub fn resolve_tool_path(project_dir: &Path, tool: &HostToolResource) -> Result<PathBuf> {
+    let project_dir = std::fs::canonicalize(project_dir)
+        .with_context(|| format!("failed to canonicalize {}", project_dir.display()))?;
+    let expanded = expand_home(&tool.path);
+    let resolved = std::fs::canonicalize(&expanded)
+        .with_context(|| format!("failed to canonicalize host tool {}", expanded.display()))?;
+    if resolved.starts_with(&project_dir) {
+        anyhow::bail!(
+            "host tool {} resolves inside the writable project; move it outside {}",
+            resolved.display(),
+            project_dir.display()
+        );
+    }
+    if !resolved.is_file() {
+        anyhow::bail!("host tool {} is not a file", resolved.display());
+    }
+    Ok(resolved)
+}
+
 pub fn find_tool<'a>(config: &'a HostResourcesConfig, id: &str) -> Option<&'a HostToolResource> {
     config.tools.iter().find(|tool| tool.id == id)
 }
@@ -104,5 +123,22 @@ auth:
         assert_eq!(parsed.tools[0].default_args, vec!["--json"]);
         assert_eq!(parsed.files[0].id, "notes");
         assert_eq!(parsed.auth.notes.len(), 1);
+    }
+
+    #[test]
+    fn rejects_host_tools_inside_the_writable_project() {
+        let project = tempfile::tempdir().unwrap();
+        let tool_path = project.path().join("agent-controlled-tool");
+        std::fs::write(&tool_path, "#!/bin/sh\n").unwrap();
+        let tool = HostToolResource {
+            id: "unsafe".to_string(),
+            path: tool_path.display().to_string(),
+            notes: None,
+            default_args: Vec::new(),
+            env: HashMap::new(),
+        };
+
+        let error = resolve_tool_path(project.path(), &tool).unwrap_err();
+        assert!(error.to_string().contains("inside the writable project"));
     }
 }

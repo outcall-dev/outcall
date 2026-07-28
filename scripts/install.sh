@@ -132,7 +132,6 @@ if [ "$os" = "Linux" ]; then
   echo "Next:"
   echo "  outcall run codex"
   echo "  outcall run claude"
-  echo "  outcall run codex"
   echo
   echo "If the first run stops on a prerequisite, inspect it with:"
   echo "  outcall doctor"

@@ -4,6 +4,8 @@ mod agent_api;
 mod api;
 #[cfg(target_os = "linux")]
 mod bridge;
+#[cfg(any(target_os = "linux", test))]
+mod container_env;
 #[cfg(target_os = "linux")]
 mod dns;
 #[cfg(target_os = "linux")]

@@ -458,6 +458,43 @@ fn cli_allow_edits_project_rule_yaml_without_docker() {
 }
 
 #[test]
+fn cli_allow_adds_declared_host_resource_rules_without_docker() {
+    let temp = tempdir().expect("tempdir");
+    let init = outcall_in_dir_clean_env(temp.path(), &["init", "codex"]);
+    assert!(
+        init.status.success(),
+        "init should succeed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    std::fs::write(
+        temp.path().join(".outcall/host-resources.yaml"),
+        r#"version: "1"
+tools:
+  - id: echo-test
+    path: /bin/echo
+files:
+  - id: notes
+    path: /tmp/notes
+"#,
+    )
+    .expect("write host resource registry");
+
+    for target in ["tool:echo-test", "file:notes"] {
+        let out = outcall_in_dir_clean_env(temp.path(), &["allow", "codex", target]);
+        assert!(
+            out.status.success(),
+            "allow {target} should succeed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let rules = std::fs::read_to_string(temp.path().join(".outcall/rules/codex.yaml"))
+        .expect("read generated rules");
+    assert!(rules.contains(r#"run.tool == "host.tool.echo-test""#));
+    assert!(rules.contains(r#"run.tool == "host.file.notes""#));
+}
+
+#[test]
 fn cli_first_run_convenience_commands_render_help() {
     for args in [
         vec!["doctor", "--fix", "--help"],
@@ -479,15 +516,22 @@ fn cli_first_run_convenience_commands_render_help() {
 }
 
 #[test]
-fn cli_start_alias_is_not_available() {
+fn cli_legacy_launch_commands_are_not_available() {
     let temp = tempdir().expect("tempdir");
-    for args in [&["start"][..], &["recipe", "run", "codex"][..]] {
+    for args in [
+        &["agent"][..],
+        &["start"][..],
+        &["recipe", "run", "codex"][..],
+    ] {
         let out = outcall_in_dir_clean_env(temp.path(), args);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "launch alias should fail: {args:?}");
+        assert!(
+            !out.status.success(),
+            "legacy launch command should fail: {args:?}"
+        );
         assert!(
             stderr.contains("unrecognized subcommand"),
-            "expected removed alias error for {args:?}, got: {stderr}"
+            "expected removed command error for {args:?}, got: {stderr}"
         );
     }
 }
