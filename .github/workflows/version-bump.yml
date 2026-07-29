@@ -73,8 +73,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
         run: |
-          gh pr create \
+          compare_url="https://github.com/${GITHUB_REPOSITORY}/compare/main...bump/${NEW_VERSION}?expand=1"
+          if pr_output="$(gh pr create \
             --title "chore: bump version to $NEW_VERSION" \
             --body "Version bump PR for v$NEW_VERSION. Will trigger tag-on-merge on merge to main." \
             --base main \
-            --head "bump/$NEW_VERSION"
+            --head "bump/$NEW_VERSION" 2>&1)"; then
+            printf '%s\n' "$pr_output"
+          else
+            printf '%s\n' "$pr_output" >&2
+            case "$pr_output" in
+              *"GitHub Actions is not permitted to create or approve pull requests"*)
+                echo "::warning title=Manual pull request required::Repository policy blocked PR creation. Open $compare_url"
+                printf '### Manual pull request required\n\nRepository policy does not allow GitHub Actions to create pull requests.\n\n[Open the version bump pull request](%s)\n' \
+                  "$compare_url" >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+          fi
