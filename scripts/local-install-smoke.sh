@@ -64,7 +64,9 @@ else
   shasum -a 256 "$release_root/$target.tar.gz" > "$release_root/$target.tar.gz.sha256"
 fi
 
-if [ -n "$docker_image_archive" ] && command -v docker >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
+if [ "${OUTCALL_SKIP_IMAGE_PRELOAD:-0}" = "1" ]; then
+  echo "==> Skipping local daemon image build and preload"
+elif [ -n "$docker_image_archive" ] && command -v docker >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
   echo "==> Building local daemon image archive"
   docker build \
     -t "ghcr.io/outcall-dev/outcalld:v$version" \
@@ -84,6 +86,7 @@ echo "==> Installing from local file:// release"
 OUTCALL_VERSION="$version" \
 OUTCALL_RELEASE_BASE_URL="file://$release_root" \
 OUTCALL_BIN_DIR="$bin_dir" \
+OUTCALL_SKIP_IMAGE_PRELOAD="${OUTCALL_SKIP_IMAGE_PRELOAD:-0}" \
 sh "$repo_root/scripts/install.sh"
 
 echo

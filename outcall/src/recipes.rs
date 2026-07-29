@@ -160,7 +160,8 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git openssh-client bash curl \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code \
+  && claude --version
 
 WORKDIR /workspace
 ENTRYPOINT ["claude"]
@@ -172,7 +173,8 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git openssh-client bash curl \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex
+RUN npm install -g @openai/codex \
+  && codex --version
 
 WORKDIR /workspace
 ENTRYPOINT ["codex"]
@@ -476,13 +478,13 @@ pub fn init_recipe(project_dir: &Path, recipe: &Recipe, force: bool) -> Result<V
         force,
         &mut written,
     )?;
-    write_new(
+    write_agent_config(
         &project_dir.join(".outcall").join("agent.yaml"),
         recipe.agent_config,
         force,
         &mut written,
     )?;
-    write_new(
+    write_shared_template(
         &project_dir.join(".outcall").join("host-resources.yaml"),
         HOST_RESOURCES_TEMPLATE,
         force,
@@ -677,6 +679,45 @@ fn write_new(path: &Path, contents: &str, force: bool, written: &mut Vec<PathBuf
     Ok(())
 }
 
+fn write_agent_config(
+    path: &Path,
+    contents: &str,
+    force: bool,
+    written: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if path.exists() && !force {
+        let existing = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if existing == contents {
+            return Ok(());
+        }
+        if !RECIPES.iter().any(|recipe| existing == recipe.agent_config) {
+            return Ok(());
+        }
+    }
+
+    std::fs::write(path, contents)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    written.push(path.to_path_buf());
+    Ok(())
+}
+
+fn write_shared_template(
+    path: &Path,
+    contents: &str,
+    force: bool,
+    written: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if path.exists() && !force {
+        return Ok(());
+    }
+
+    std::fs::write(path, contents)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    written.push(path.to_path_buf());
+    Ok(())
+}
+
 pub fn ensure_outcall_gitignore(project_dir: &Path) -> Result<Option<PathBuf>> {
     let path = project_dir.join(".outcall").join(".gitignore");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -744,6 +785,22 @@ mod tests {
     }
 
     #[test]
+    fn recipe_images_verify_agent_binary_during_build() {
+        assert!(
+            get_recipe("claude")
+                .unwrap()
+                .dockerfile
+                .contains("&& claude --version")
+        );
+        assert!(
+            get_recipe("codex")
+                .unwrap()
+                .dockerfile
+                .contains("&& codex --version")
+        );
+    }
+
+    #[test]
     fn init_recipe_writes_expected_files() {
         let dir = temp_project("init");
         let recipe = get_recipe("codex").unwrap();
@@ -777,6 +834,46 @@ mod tests {
         assert!(gitignore.contains("auth/\n"));
         assert!(gitignore.contains("run/\n"));
         assert!(gitignore.contains("rules/.outcall-host-broker.yaml\n"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn init_recipe_switches_owned_agent_config_and_preserves_host_registry() {
+        let dir = temp_project("switch");
+        let codex = get_recipe("codex").unwrap();
+        let claude = get_recipe("claude").unwrap();
+        init_recipe(&dir, codex, false).unwrap();
+        let registry = dir.join(".outcall/host-resources.yaml");
+        std::fs::write(&registry, "version: \"1\"\ntools: []\nfiles: []\n").unwrap();
+
+        init_recipe(&dir, claude, false).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".outcall/agent.yaml")).unwrap(),
+            claude.agent_config
+        );
+        assert_eq!(
+            std::fs::read_to_string(registry).unwrap(),
+            "version: \"1\"\ntools: []\nfiles: []\n"
+        );
+        assert!(dir.join(".outcall/recipes/codex/recipe.yaml").exists());
+        assert!(dir.join(".outcall/recipes/claude/recipe.yaml").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn init_recipe_preserves_custom_shared_config() {
+        let dir = temp_project("custom-shared");
+        std::fs::create_dir_all(dir.join(".outcall")).unwrap();
+        let config = dir.join(".outcall/agent.yaml");
+        std::fs::write(&config, "resources:\n  memory: 2g\n").unwrap();
+
+        init_recipe(&dir, get_recipe("codex").unwrap(), false).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(config).unwrap(),
+            "resources:\n  memory: 2g\n"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
