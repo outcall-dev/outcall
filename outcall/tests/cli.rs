@@ -7,27 +7,22 @@ use std::process::Command;
 use tempfile::tempdir;
 
 fn outcall(args: &[&str]) -> std::process::Output {
-    Command::new("cargo")
-        .args(["run", "-q", "--"])
+    Command::new(env!("CARGO_BIN_EXE_outcall"))
         .args(args)
         .output()
-        .expect("cargo run failed")
+        .expect("outcall failed")
 }
 
 fn outcall_in_dir(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    let manifest = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
-    Command::new("cargo")
-        .args(["run", "-q", "--manifest-path", &manifest, "--"])
+    Command::new(env!("CARGO_BIN_EXE_outcall"))
         .args(args)
         .current_dir(dir)
         .output()
-        .expect("cargo run failed")
+        .expect("outcall failed")
 }
 
 fn outcall_in_dir_clean_env(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    let manifest = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
-    Command::new("cargo")
-        .args(["run", "-q", "--manifest-path", &manifest, "--"])
+    Command::new(env!("CARGO_BIN_EXE_outcall"))
         .args(args)
         .current_dir(dir)
         .env("HOME", dir)
@@ -35,7 +30,7 @@ fn outcall_in_dir_clean_env(dir: &std::path::Path, args: &[&str]) -> std::proces
         .env_remove("CODEX_ACCESS_TOKEN")
         .env_remove("CODEX_API_KEY")
         .output()
-        .expect("cargo run failed")
+        .expect("outcall failed")
 }
 
 fn outcall_in_dir_with_env(
@@ -43,10 +38,8 @@ fn outcall_in_dir_with_env(
     args: &[&str],
     envs: &[(&str, &str)],
 ) -> std::process::Output {
-    let manifest = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
-    let mut command = Command::new("cargo");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_outcall"));
     command
-        .args(["run", "-q", "--manifest-path", &manifest, "--"])
         .args(args)
         .current_dir(dir)
         .env("HOME", dir)
@@ -56,7 +49,7 @@ fn outcall_in_dir_with_env(
     for (key, value) in envs {
         command.env(key, value);
     }
-    command.output().expect("cargo run failed")
+    command.output().expect("outcall failed")
 }
 
 fn assert_connect_or_success(err: &str, status: std::process::ExitStatus, label: &str) {
@@ -576,6 +569,59 @@ fn cli_top_level_init_recipe_works_in_clean_project() {
             .join(".outcall/recipes/claude/recipe.yaml")
             .exists(),
         "recipe init should create recipe manifest"
+    );
+}
+
+#[test]
+fn cli_can_add_and_switch_between_builtin_recipes() {
+    let temp = tempdir().expect("tempdir");
+    for recipe in ["codex", "claude"] {
+        let out = outcall_in_dir_clean_env(temp.path(), &["init", recipe]);
+        assert!(
+            out.status.success(),
+            "init {recipe} should succeed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    assert!(
+        temp.path()
+            .join(".outcall/recipes/codex/recipe.yaml")
+            .exists()
+    );
+    assert!(
+        temp.path()
+            .join(".outcall/recipes/claude/recipe.yaml")
+            .exists()
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(".outcall/default-recipe"))
+            .expect("read default recipe")
+            .trim(),
+        "claude"
+    );
+}
+
+#[test]
+fn cli_can_add_recipe_after_generic_init() {
+    let temp = tempdir().expect("tempdir");
+    let generic = outcall_in_dir_clean_env(temp.path(), &["init"]);
+    assert!(
+        generic.status.success(),
+        "generic init should succeed: {}",
+        String::from_utf8_lossy(&generic.stderr)
+    );
+
+    let recipe = outcall_in_dir_clean_env(temp.path(), &["init", "codex"]);
+    assert!(
+        recipe.status.success(),
+        "recipe init should preserve shared scaffold: {}",
+        String::from_utf8_lossy(&recipe.stderr)
+    );
+    assert!(
+        temp.path()
+            .join(".outcall/recipes/codex/recipe.yaml")
+            .exists()
     );
 }
 

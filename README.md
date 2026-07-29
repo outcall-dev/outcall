@@ -56,6 +56,12 @@ make install-smoke-doctor-claude
 make install-smoke POST_INSTALL='outcall run codex -- --version'
 ```
 
+For CLI-only iteration when a compatible daemon image is already present:
+
+```sh
+OUTCALL_SKIP_IMAGE_PRELOAD=1 make install-smoke
+```
+
 Any extra command passed to `scripts/local-install-smoke.sh` runs after install
 inside a fresh temporary project with the newly installed binaries on `PATH`.
 
@@ -72,6 +78,10 @@ Choose the provider explicitly:
 outcall run claude
 outcall run codex
 ```
+
+Run either recipe at any time to switch providers in the same project. Outcall
+keeps each recipe's files and rules separate and preserves shared host-resource
+configuration.
 
 `outcall run <recipe>` is the only agent launch command. It writes the
 project-local `.outcall/` scaffold, checks Docker and generated files, stages

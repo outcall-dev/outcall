@@ -1543,6 +1543,7 @@ fn cmd_run(
     } else {
         println!("Project recipe is ready; starting {}.", recipe.name);
     }
+    save_default_recipe(&project_dir, recipe.id)?;
     println!();
     cmd_recipe_run(
         socket,
@@ -3303,25 +3304,70 @@ fn workspace_output_path(
 }
 
 fn ensure_docker_access() -> Result<()> {
+    let failure = match retry_with_delay(
+        docker_probe_attempts(),
+        docker_probe_retry_delay(),
+        docker_info_probe,
+    ) {
+        Ok(()) => return Ok(()),
+        Err(failure) => failure,
+    };
+
+    if let DockerProbeFailure::Io(error) = failure {
+        return Err(error).context(
+            "failed to invoke `docker info`; install Docker and ensure the CLI is available",
+        );
+    }
+
     let context_name = docker_context_name().unwrap_or_else(|_| "unknown".to_string());
-    let output = match command_output_with_timeout("docker", &["info"], docker_probe_timeout()) {
-        Ok(output) => output,
-        Err(CommandTimeoutError::TimedOut { timeout }) => {
+    match failure {
+        DockerProbeFailure::TimedOut { timeout } => {
             anyhow::bail!(
                 "Docker is not ready for Outcall.\n\
-                 Detail: `docker info` did not respond within {} seconds.\n\
+                 Detail: `docker info` did not respond within {} seconds after {} attempts.\n\
                  Active Docker context: {context_name}\n\
                  Start or restart Docker Desktop, wait for the daemon to finish booting, then rerun `outcall`.\n\
                  Run `outcall doctor` if you want the full prerequisite report first.",
-                timeout.as_secs()
+                timeout.as_secs(),
+                docker_probe_attempts()
             );
         }
-        Err(CommandTimeoutError::Io(e)) => {
-            return Err(e).context(
-                "failed to invoke `docker info`; install Docker and ensure the CLI is available",
+        DockerProbeFailure::Unavailable { detail } if detail.contains("permission denied") => {
+            anyhow::bail!(
+                "Docker is installed but the current user cannot access the Docker socket.\n\
+                 Detail: {detail}\n\
+                 Start Docker Desktop or fix Docker socket permissions, then rerun `outcall`.\n\
+                 Run `outcall doctor` if you want the full prerequisite report first."
             );
         }
-    };
+        DockerProbeFailure::Unavailable { detail } => {
+            anyhow::bail!(
+                "Docker is not ready for Outcall after {} attempts.\n\
+                 Detail: {detail}\n\
+                 Active Docker context: {context_name}\n\
+                 Start Docker and rerun `outcall`.\n\
+                 Run `outcall doctor` if you want the full prerequisite report first.",
+                docker_probe_attempts()
+            );
+        }
+        DockerProbeFailure::Io(_) => unreachable!("I/O failures return before context lookup"),
+    }
+}
+
+#[derive(Debug)]
+enum DockerProbeFailure {
+    TimedOut { timeout: std::time::Duration },
+    Io(anyhow::Error),
+    Unavailable { detail: String },
+}
+
+fn docker_info_probe() -> std::result::Result<(), DockerProbeFailure> {
+    let output = command_output_with_timeout("docker", &["info"], docker_probe_timeout()).map_err(
+        |error| match error {
+            CommandTimeoutError::TimedOut { timeout } => DockerProbeFailure::TimedOut { timeout },
+            CommandTimeoutError::Io(error) => DockerProbeFailure::Io(error),
+        },
+    )?;
     if output.status.success() {
         return Ok(());
     }
@@ -3335,22 +3381,23 @@ fn ensure_docker_access() -> Result<()> {
     } else {
         "docker info failed".to_string()
     };
+    Err(DockerProbeFailure::Unavailable { detail })
+}
 
-    if detail.contains("permission denied") {
-        anyhow::bail!(
-            "Docker is installed but the current user cannot access the Docker socket.\n\
-             Detail: {detail}\n\
-             Start Docker Desktop or fix Docker socket permissions, then rerun `outcall`.\n\
-             Run `outcall doctor` if you want the full prerequisite report first."
-        );
+fn retry_with_delay<T, E>(
+    attempts: usize,
+    delay: std::time::Duration,
+    mut operation: impl FnMut() -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    assert!(attempts > 0, "retry attempts must be greater than zero");
+    for attempt in 1..=attempts {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt == attempts => return Err(error),
+            Err(_) => std::thread::sleep(delay),
+        }
     }
-
-    anyhow::bail!(
-        "Docker is not ready for Outcall.\n\
-         Detail: {detail}\n\
-         Start Docker and rerun `outcall`.\n\
-         Run `outcall doctor` if you want the full prerequisite report first."
-    );
+    unreachable!("positive retry count always returns")
 }
 
 fn ensure_docker_access_with_fix() -> Result<()> {
@@ -3366,12 +3413,20 @@ fn ensure_docker_access_with_fix() -> Result<()> {
             if !launched.success() {
                 return Err(initial_error).context("Docker Desktop did not start");
             }
-            for _ in 0..90 {
-                if ensure_docker_access().is_ok() {
+            let timeout = std::time::Duration::from_secs(90);
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                if docker_info_probe().is_ok() {
                     println!("  PASS docker: Docker Desktop is ready");
                     return Ok(());
                 }
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                std::thread::sleep(
+                    std::time::Duration::from_secs(1).min(deadline.saturating_duration_since(now)),
+                );
             }
             Err(initial_error).context("Docker Desktop did not become ready within 90 seconds")
         }
@@ -3630,6 +3685,14 @@ fn docker_probe_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(5)
 }
 
+fn docker_probe_attempts() -> usize {
+    3
+}
+
+fn docker_probe_retry_delay() -> std::time::Duration {
+    std::time::Duration::from_millis(250)
+}
+
 #[derive(Debug)]
 enum CommandTimeoutError {
     TimedOut { timeout: std::time::Duration },
@@ -3812,9 +3875,10 @@ mod tests {
         command_output_with_timeout, daemon_build_inputs, doctor_platform_line_for,
         ensure_recipe_setup_state, handle_broker_connection, host_broker_transport_rule_path,
         protected_outcall_mount, read_http_request, remove_invalid_host_broker_transport_rule,
-        resolve_broker_auth_token, resolve_host_file_path, rewrite_container_output_path,
-        rewrite_recipe_entrypoint_args, runtime_bridge_netfilter_line,
-        valid_host_broker_transport_rule, write_host_broker_transport_rule,
+        resolve_broker_auth_token, resolve_host_file_path, retry_with_delay,
+        rewrite_container_output_path, rewrite_recipe_entrypoint_args,
+        runtime_bridge_netfilter_line, valid_host_broker_transport_rule,
+        write_host_broker_transport_rule,
     };
     use clap::Parser;
     use std::io::{Read, Write};
@@ -3886,6 +3950,22 @@ mod tests {
             matches!(err, CommandTimeoutError::TimedOut { .. }),
             "expected timeout error, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn retry_with_delay_recovers_from_transient_failures() {
+        let mut attempts = 0;
+        let result = retry_with_delay(3, Duration::ZERO, || {
+            attempts += 1;
+            if attempts < 3 {
+                Err("not ready")
+            } else {
+                Ok("ready")
+            }
+        });
+
+        assert_eq!(result, Ok("ready"));
+        assert_eq!(attempts, 3);
     }
 
     #[test]
