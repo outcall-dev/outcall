@@ -195,7 +195,8 @@ jobs:
           export HOME="$RUNNER_TEMP/outcall-smoke-home-claude"
           rm -rf "$HOME"
           mkdir -p "$HOME"
-          export ANTHROPIC_API_KEY=dummy-smoke-key
+          export CLAUDE_CODE_OAUTH_TOKEN=dummy-smoke-token
+          unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
           unset CODEX_ACCESS_TOKEN CODEX_API_KEY
           project_dir="$RUNNER_TEMP/outcall-smoke-project"
           agent_name="$(basename "$project_dir")-1"
@@ -236,7 +237,7 @@ jobs:
           rm -rf "$HOME"
           mkdir -p "$HOME"
           export CODEX_API_KEY=dummy-smoke-key
-          unset ANTHROPIC_API_KEY CODEX_ACCESS_TOKEN
+          unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CODEX_ACCESS_TOKEN
           project_dir="$RUNNER_TEMP/outcall-smoke-project-codex"
           agent_name="$(basename "$project_dir")-1"
           rm -rf "$project_dir"
@@ -337,7 +338,8 @@ jobs:
           rm -rf "$PROJECT_DIR" "$HOME_DIR"
           mkdir -p "$PROJECT_DIR" "$HOME_DIR"
           export HOME="$HOME_DIR"
-          export ANTHROPIC_API_KEY=dummy-smoke-key
+          export CLAUDE_CODE_OAUTH_TOKEN=dummy-smoke-token
+          unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
           unset CODEX_API_KEY CODEX_ACCESS_TOKEN
           cd "$PROJECT_DIR"
 
@@ -372,7 +374,7 @@ jobs:
           mkdir -p "$PROJECT_DIR" "$HOME_DIR"
           export HOME="$HOME_DIR"
           export CODEX_API_KEY=dummy-smoke-key
-          unset ANTHROPIC_API_KEY CODEX_ACCESS_TOKEN
+          unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CODEX_ACCESS_TOKEN
           cd "$PROJECT_DIR"
 
           set +e

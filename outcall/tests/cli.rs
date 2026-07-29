@@ -26,7 +26,9 @@ fn outcall_in_dir_clean_env(dir: &std::path::Path, args: &[&str]) -> std::proces
         .args(args)
         .current_dir(dir)
         .env("HOME", dir)
+        .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("CODEX_ACCESS_TOKEN")
         .env_remove("CODEX_API_KEY")
         .output()
@@ -43,7 +45,9 @@ fn outcall_in_dir_with_env(
         .args(args)
         .current_dir(dir)
         .env("HOME", dir)
+        .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("CODEX_ACCESS_TOKEN")
         .env_remove("CODEX_API_KEY");
     for (key, value) in envs {
@@ -430,6 +434,34 @@ fn cli_auth_stages_detected_env_credentials_without_docker() {
             .expect("read saved auth mode"),
         "env-only",
         "auth should persist the explicit mode for subsequent auto runs"
+    );
+}
+
+#[test]
+fn cli_auth_prefers_claude_subscription_token_over_host_files() {
+    let temp = tempdir().expect("tempdir");
+    std::fs::create_dir(temp.path().join(".claude")).expect("create host auth candidate");
+    let out = outcall_in_dir_with_env(
+        temp.path(),
+        &["auth", "claude"],
+        &[("CLAUDE_CODE_OAUTH_TOKEN", "test-claude-token")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "auth should succeed: {stderr}");
+    assert!(
+        stdout.contains("Authentication ready for Claude Code"),
+        "expected auth confirmation, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Auto auth mode selected: env-only."),
+        "environment token should win over host auth files, got: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(".outcall/auth/claude/mode"))
+            .expect("read saved auth mode"),
+        "env-only",
+        "auth should persist env-only for unattended Claude runs"
     );
 }
 
