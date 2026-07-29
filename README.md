@@ -120,12 +120,26 @@ outcall run claude --detach
 outcall run codex --detach
 ```
 
-Recipes do not mount your whole home directory. By default they copy only the
-selected provider auth/config paths into `.outcall/auth/<id>/home`. On macOS,
-Claude auto-auth prefers mounting the selected `~/.claude` paths instead of
-copying them because session-backed login state is often not portable into a
-separate Linux home directory. For unattended Claude runs, prefer
-`ANTHROPIC_API_KEY`; mounted login state may still require interactive `/login`.
+Recipes do not mount your whole home directory. Auto auth first uses recognized
+provider environment credentials. Without those, it copies only the selected
+provider auth/config paths into `.outcall/auth/<id>/home`; on macOS, Claude
+instead mounts the selected `~/.claude` paths to preserve their home layout.
+macOS Keychain-backed login state is not portable into the Linux container and
+may still require interactive `/login`.
+
+For unattended Claude subscription runs, generate a long-lived token on the
+host and export it only in the launch environment:
+
+```sh
+claude setup-token
+export CLAUDE_CODE_OAUTH_TOKEN=...
+outcall run claude
+```
+
+Claude API users can instead set `ANTHROPIC_API_KEY` or
+`ANTHROPIC_AUTH_TOKEN`. Treat every credential as a secret; Outcall forwards
+environment credentials to the managed container without writing their values
+into the project scaffold.
 
 Each project scaffold also includes `.outcall/host-resources.yaml` as the
 explicit registry for host tools, host file roots, and auth/session handoff

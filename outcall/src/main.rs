@@ -254,7 +254,7 @@ enum RecipeAction {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 enum RecipeAuthMode {
-    /// Automatically choose copy when recipe files exist, otherwise env-only
+    /// Prefer detected environment credentials, then supported host auth files
     Auto,
     /// Copy selected provider files into .outcall/auth/<recipe>/home
     Copy,
@@ -1915,7 +1915,7 @@ fn cmd_recipe_doctor(id: &str) -> Result<()> {
         println!("  WARN no auth candidates found; choose env, copy, or mount before running");
     } else if should_prefer_env_only_auth(recipe) && !env_auth {
         println!(
-            "  WARN macOS Claude unattended mode is most reliable with ANTHROPIC_API_KEY; mounted login state may still require interactive /login"
+            "  WARN macOS Claude login state may still require interactive /login inside Linux. For unattended subscription auth, run `claude setup-token` on the host and export CLAUDE_CODE_OAUTH_TOKEN; API users can set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"
         );
     }
 
@@ -2074,9 +2074,11 @@ fn stage_recipe_auth(
     config: &mut outcall::agent_config::AgentConfig,
 ) -> Result<AuthStageResult> {
     let mut found_auth = false;
+    let mut env_auth = false;
     for key in recipe.auth_env {
         if let Ok(value) = std::env::var(key) {
             found_auth = true;
+            env_auth = true;
             config.env.insert((*key).to_string(), value);
         }
     }
@@ -2086,15 +2088,13 @@ fn stage_recipe_auth(
     } else {
         None
     };
-    let effective_mode = match auth_mode {
-        RecipeAuthMode::Auto if saved_mode.is_some() => {
-            saved_mode.expect("saved auth mode checked")
-        }
-        RecipeAuthMode::Auto if should_prefer_auth_mount(recipe) => RecipeAuthMode::Mount,
-        RecipeAuthMode::Auto if recipe_has_user_auth_paths(recipe) => RecipeAuthMode::Copy,
-        RecipeAuthMode::Auto => RecipeAuthMode::EnvOnly,
-        mode => mode,
-    };
+    let effective_mode = resolve_recipe_auth_mode(
+        auth_mode,
+        saved_mode,
+        env_auth,
+        should_prefer_auth_mount(recipe),
+        recipe_has_user_auth_paths(recipe),
+    );
 
     if auth_mode == RecipeAuthMode::Auto {
         println!(
@@ -2172,6 +2172,25 @@ fn stage_recipe_auth(
         found_auth,
         effective_mode,
     })
+}
+
+fn resolve_recipe_auth_mode(
+    requested_mode: RecipeAuthMode,
+    saved_mode: Option<RecipeAuthMode>,
+    env_auth: bool,
+    prefer_mount: bool,
+    user_auth_paths: bool,
+) -> RecipeAuthMode {
+    match requested_mode {
+        RecipeAuthMode::Auto if saved_mode.is_some() => {
+            saved_mode.expect("saved auth mode checked")
+        }
+        RecipeAuthMode::Auto if env_auth => RecipeAuthMode::EnvOnly,
+        RecipeAuthMode::Auto if prefer_mount => RecipeAuthMode::Mount,
+        RecipeAuthMode::Auto if user_auth_paths => RecipeAuthMode::Copy,
+        RecipeAuthMode::Auto => RecipeAuthMode::EnvOnly,
+        mode => mode,
+    }
 }
 
 fn ensure_recipe_home_mount(
@@ -2764,20 +2783,22 @@ fn launch_managed_recipe_container(
 
         let error = resp.error.unwrap_or_else(|| "unknown error".into());
         let current_name = req.name.as_deref().unwrap_or_default();
-        let candidate = config.effective_name(project_dir);
-        if let Some(next_name) = automatic_name_retry_candidate(
-            automatic_name,
-            name_retry_count,
-            current_name,
-            candidate,
-        ) {
-            name_retry_count += 1;
-            println!(
-                "  Container name '{}' was claimed concurrently; retrying as '{}'...",
-                current_name, next_name
-            );
-            req.name = Some(next_name);
-            continue;
+        if is_container_name_conflict(&error) {
+            let candidate = config.effective_name(project_dir);
+            if let Some(next_name) = automatic_name_retry_candidate(
+                automatic_name,
+                name_retry_count,
+                current_name,
+                candidate,
+            ) {
+                name_retry_count += 1;
+                println!(
+                    "  Container name '{}' was claimed concurrently; retrying as '{}'...",
+                    current_name, next_name
+                );
+                req.name = Some(next_name);
+                continue;
+            }
         }
         anyhow::bail!("{error}");
     };
@@ -2850,8 +2871,23 @@ fn automatic_name_retry_candidate(
     candidate: String,
 ) -> Option<String> {
     const MAX_NAME_RETRIES: usize = 20;
-    (automatic_name && retry_count < MAX_NAME_RETRIES && candidate != current_name)
-        .then_some(candidate)
+    if !automatic_name || retry_count >= MAX_NAME_RETRIES {
+        return None;
+    }
+    if candidate != current_name {
+        return Some(candidate);
+    }
+
+    let (base, suffix) = current_name.rsplit_once('-')?;
+    let next_suffix = suffix.parse::<u32>().ok()?.checked_add(1)?;
+    Some(format!("{base}-{next_suffix}"))
+}
+
+fn is_container_name_conflict(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("status code 409")
+        && error.contains("container name")
+        && error.contains("already in use")
 }
 
 fn protected_outcall_mount(project_dir: &std::path::Path, workspace: &str) -> Result<String> {
@@ -3871,11 +3907,12 @@ fn doctor_proc_value(label: &str, path: &std::path::Path, expected: &str, hint: 
 mod tests {
     use super::{
         BrokerToolExecRequest, Cli, CommandTimeoutError, Commands, HostBrokerAction,
-        automatic_name_retry_candidate, broker_error_status, broker_exec_tool,
+        RecipeAuthMode, automatic_name_retry_candidate, broker_error_status, broker_exec_tool,
         command_output_with_timeout, daemon_build_inputs, doctor_platform_line_for,
         ensure_recipe_setup_state, handle_broker_connection, host_broker_transport_rule_path,
-        protected_outcall_mount, read_http_request, remove_invalid_host_broker_transport_rule,
-        resolve_broker_auth_token, resolve_host_file_path, retry_with_delay,
+        is_container_name_conflict, protected_outcall_mount, read_http_request,
+        remove_invalid_host_broker_transport_rule, resolve_broker_auth_token,
+        resolve_host_file_path, resolve_recipe_auth_mode, retry_with_delay,
         rewrite_container_output_path, rewrite_recipe_entrypoint_args,
         runtime_bridge_netfilter_line, valid_host_broker_transport_rule,
         write_host_broker_transport_rule,
@@ -3911,14 +3948,14 @@ mod tests {
     }
 
     #[test]
-    fn automatic_name_retries_only_when_the_candidate_changed() {
+    fn automatic_name_retries_with_discovered_or_incremented_candidate() {
         assert_eq!(
             automatic_name_retry_candidate(true, 0, "foobar-4", "foobar-5".to_string()),
             Some("foobar-5".to_string())
         );
         assert_eq!(
             automatic_name_retry_candidate(true, 0, "foobar-4", "foobar-4".to_string()),
-            None
+            Some("foobar-5".to_string())
         );
         assert_eq!(
             automatic_name_retry_candidate(false, 0, "fixed", "foobar-5".to_string()),
@@ -3927,6 +3964,81 @@ mod tests {
         assert_eq!(
             automatic_name_retry_candidate(true, 20, "foobar-4", "foobar-5".to_string()),
             None
+        );
+    }
+
+    #[test]
+    fn automatic_name_retry_requires_numeric_suffix_for_fallback() {
+        assert_eq!(
+            automatic_name_retry_candidate(true, 0, "foobar", "foobar".to_string()),
+            None
+        );
+        assert_eq!(
+            automatic_name_retry_candidate(true, 0, "foobar-final", "foobar-final".to_string()),
+            None
+        );
+        assert_eq!(
+            automatic_name_retry_candidate(
+                true,
+                0,
+                "foobar-4294967295",
+                "foobar-4294967295".into()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn container_name_conflict_detection_is_specific() {
+        assert!(is_container_name_conflict(
+            "daemon request failed with status code 409: Conflict. The container name \"/foobar-4\" is already in use"
+        ));
+        assert!(is_container_name_conflict(
+            "STATUS CODE 409: CONTAINER NAME /FOOBAR-4 IS ALREADY IN USE"
+        ));
+        assert!(!is_container_name_conflict(
+            "daemon request failed with status code 500: container name lookup failed"
+        ));
+        assert!(!is_container_name_conflict(
+            "daemon request failed with status code 409: image is already in use"
+        ));
+    }
+
+    #[test]
+    fn automatic_auth_prefers_environment_credentials() {
+        assert_eq!(
+            resolve_recipe_auth_mode(RecipeAuthMode::Auto, None, true, true, true),
+            RecipeAuthMode::EnvOnly
+        );
+        assert_eq!(
+            resolve_recipe_auth_mode(
+                RecipeAuthMode::Auto,
+                Some(RecipeAuthMode::Mount),
+                true,
+                false,
+                false,
+            ),
+            RecipeAuthMode::Mount
+        );
+    }
+
+    #[test]
+    fn automatic_auth_falls_back_from_mount_to_copy_then_env_only() {
+        assert_eq!(
+            resolve_recipe_auth_mode(RecipeAuthMode::Auto, None, false, true, true),
+            RecipeAuthMode::Mount
+        );
+        assert_eq!(
+            resolve_recipe_auth_mode(RecipeAuthMode::Auto, None, false, false, true),
+            RecipeAuthMode::Copy
+        );
+        assert_eq!(
+            resolve_recipe_auth_mode(RecipeAuthMode::Auto, None, false, false, false),
+            RecipeAuthMode::EnvOnly
+        );
+        assert_eq!(
+            resolve_recipe_auth_mode(RecipeAuthMode::Copy, None, true, true, true),
+            RecipeAuthMode::Copy
         );
     }
 

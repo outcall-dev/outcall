@@ -41,7 +41,11 @@ pub struct AuthMountPlan {
     pub home_override: Option<String>,
 }
 
-const CLAUDE_AUTH_ENV: &[&str] = &["ANTHROPIC_API_KEY"];
+const CLAUDE_AUTH_ENV: &[&str] = &[
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+];
 const CLAUDE_USER_PATHS: &[&str] = &["~/.claude", "~/.claude.json"];
 const CLAUDE_PROJECT_PATHS: &[&str] = &["CLAUDE.md", ".claude/settings.json"];
 
@@ -99,9 +103,11 @@ workspace:
   container: /workspace
   mode: rw
 auth:
-  default_mode: copy
+  default_mode: auto
   env:
+    - CLAUDE_CODE_OAUTH_TOKEN
     - ANTHROPIC_API_KEY
+    - ANTHROPIC_AUTH_TOKEN
   user_paths:
     - ~/.claude
     - ~/.claude.json
@@ -231,9 +237,10 @@ Context and auth candidates:
 
 - Project context: `CLAUDE.md`, `.claude/settings.json`
 - User config/auth: `~/.claude`, `~/.claude.json`
-- Environment auth: `ANTHROPIC_API_KEY`
+- Subscription auth: `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`
+- API auth: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`
 
-Use `outcall recipe doctor claude` before running the container.
+Use `outcall doctor claude` before running the container.
 "#;
 
 const CODEX_README: &str = r#"# Outcall Codex Recipe
@@ -255,7 +262,7 @@ Context and auth candidates:
 - User config/auth: `~/.codex/auth.json`, `~/.codex/config.toml`, `~/.codex/AGENTS.md`
 - Environment auth: `CODEX_ACCESS_TOKEN`, `CODEX_API_KEY`
 
-Use `outcall recipe doctor codex` before running the container.
+Use `outcall doctor codex` before running the container.
 "#;
 
 const CLAUDE_CONTEXT: &str = r#"# Claude Context Transfer
@@ -269,9 +276,13 @@ Transfer candidates:
 - `CLAUDE.md` from the project root for project memory.
 - `.claude/settings.json` for project-scoped settings.
 - `~/.claude` and `~/.claude.json` for user-level Claude Code state.
-- `ANTHROPIC_API_KEY` for environment-variable authentication.
+- `CLAUDE_CODE_OAUTH_TOKEN` for unattended subscription authentication. Generate
+  it on the host with `claude setup-token`, then export it in the launch shell.
+- `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` for API authentication.
 
 Treat copied auth state as secret material. Do not commit `.outcall/auth/`.
+Treat setup tokens as long-lived secrets; Outcall forwards them to the managed
+container but does not write their values into the project scaffold.
 
 Declared host resources are exposed only through the tokenized Outcall broker.
 Use `outcall allow claude tool:<id>` or `outcall allow claude file:<id>` before
@@ -782,6 +793,22 @@ mod tests {
         assert!(get_recipe("claude").is_some());
         assert!(get_recipe("codex").is_some());
         assert!(get_recipe("missing").is_none());
+    }
+
+    #[test]
+    fn claude_recipe_supports_official_unattended_auth_variables() {
+        let recipe = get_recipe("claude").unwrap();
+        assert_eq!(
+            recipe.auth_env,
+            &[
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+            ]
+        );
+        assert!(recipe.manifest.contains("default_mode: auto"));
+        assert!(recipe.readme.contains("claude setup-token"));
+        assert!(!recipe.readme.contains("outcall recipe doctor"));
     }
 
     #[test]
