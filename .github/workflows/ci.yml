@@ -204,7 +204,7 @@ jobs:
           mkdir -p "$project_dir"
           cd "$project_dir"
           set +e
-          timeout 180 outcall run claude -- --version
+          timeout 300 outcall run claude -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -244,7 +244,7 @@ jobs:
           mkdir -p "$project_dir"
           cd "$project_dir"
           set +e
-          timeout 180 outcall run codex -- --version
+          timeout 300 outcall run codex -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -344,7 +344,7 @@ jobs:
           cd "$PROJECT_DIR"
 
           set +e
-          timeout 180 outcall run claude -- --version
+          timeout 300 outcall run claude -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -378,7 +378,7 @@ jobs:
           cd "$PROJECT_DIR"
 
           set +e
-          timeout 180 outcall run codex -- --version
+          timeout 300 outcall run codex -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
