@@ -1,19 +1,13 @@
-//! Mixed proxy modes end-to-end — S012-FR-013.c / S006 + S011.
+//! Proxy rule-mode integration — S003 + S006.
 //!
-//! Verifies that a single outcalld process can serve rules with three
-//! different egress modes simultaneously:
-//!   - `direct_ip`  — bypass proxy, connect to IP directly (FR-014)
-//!   - `proxy`      — SNI peek, no decryption (S006)
-//!   - `intercept`  — MITM with leaf cert (S011, when implemented)
-//!
-//! Each rule respects its own mode; cross-mode interference is not allowed.
+//! Verifies explicit proxy-mode rule evaluation and first-match ordering.
+//! Direct-IP and interception behavior require dedicated runtime tests.
 
 #![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -54,9 +48,9 @@ fn parse_api_response<T: serde::de::DeserializeOwned>(body: &str) -> Option<ApiR
 // ── Daemon spawn helper ───────────────────────────────────────────────────────
 
 async fn spawn_daemon(
-    host_socket: &PathBuf,
-    agent_socket: &PathBuf,
-    rules_dir: &PathBuf,
+    host_socket: &Path,
+    agent_socket: &Path,
+    rules_dir: &Path,
 ) -> Result<(Child, String, String)> {
     let mut cmd = Command::new("outcalld");
     cmd.env("RUST_LOG", "outcalld=warn")
@@ -109,38 +103,6 @@ async fn spawn_daemon(
     let host = host_socket.to_string_lossy().to_string();
     let agent = agent_socket.to_string_lossy().to_string();
     Ok((child, host, agent))
-}
-
-// ── Test: direct_ip rule bypasses proxy ─────────────────────────────────────
-
-/// FR-014: A rule with `mode: direct_ip` bypasses the proxy and connects
-/// directly to the destination IP. No CONNECT, no SNI peek.
-#[tokio::test]
-#[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
-async fn direct_ip_rule_bypasses_proxy() {
-    let tmp = TempDir::new().expect("tempdir");
-    let rules_dir = tmp.path().to_path_buf();
-
-    let yaml = r#"version: "1"
-rules:
-  - id: direct-google
-    condition: 'dns.query == "google.com"'
-    action: allow
-    egress: { mode: direct_ip }
-"#;
-    std::fs::write(rules_dir.join("test.yaml"), yaml).expect("write rules");
-
-    let host_sock = tmp.path().join("host.sock");
-    let agent_sock = tmp.path().join("agent.sock");
-    let (mut daemon, _host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
-        .await
-        .expect("daemon spawned");
-
-    // The direct_ip mode is documented in FR-014.
-    // Current outcalld does not implement direct_ip mode — this test
-    // documents the expected behavior when the mode is implemented.
-    eprintln!("NOTE: direct_ip mode (FR-014) not yet implemented in outcalld");
-    let _ = daemon.kill();
 }
 
 // ── Test: proxy mode uses SNI peek (no decryption) ───────────────────────────
@@ -201,17 +163,15 @@ rules:
     let _ = daemon.kill();
 }
 
-// ── Test: Mixed rules with different modes coexist ───────────────────────────
+// ── Test: Explicit proxy mode ────────────────────────────────────────────────
 
-/// A rule set can contain multiple rules with different modes (proxy,
-/// intercept, direct_ip). Each must behave correctly without affecting others.
+/// An explicit proxy-mode rule behaves like the default proxy mode.
 #[tokio::test]
 #[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
-async fn mixed_modes_coexist_in_single_ruleset() {
+async fn explicit_proxy_mode_is_evaluated() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
 
-    // Three rules with three different modes.
     let yaml = r#"version: "1"
 rules:
   - id: block-evil
@@ -260,13 +220,12 @@ rules:
     let _ = daemon.kill();
 }
 
-// ── Test: Mode resolution priority when multiple rules match ─────────────────
+// ── Test: Rule resolution priority ───────────────────────────────────────────
 
-/// When multiple rules with different modes match the same request,
-/// the first matching rule wins (S003-FR-026).
+/// When multiple rules match the same request, the first matching rule wins.
 #[tokio::test]
 #[ignore = "requires CAP_NET_ADMIN to bring up the outcall0 bridge; run with sudo and `cargo test -- --ignored` on a privileged host"]
-async fn first_matching_rule_wins_across_modes() {
+async fn first_matching_rule_wins() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
 

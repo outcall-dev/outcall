@@ -9,7 +9,8 @@
 #![cfg(target_os = "linux")]
 
 use std::fs;
-use std::path::PathBuf;
+use std::ops::{Deref, DerefMut};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -18,9 +19,62 @@ use tempfile::TempDir;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
 
+struct DaemonGuard(Child);
+
+impl Deref for DaemonGuard {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DaemonGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+struct NetworkGuard {
+    socket: String,
+    name: String,
+    active: bool,
+}
+
+impl NetworkGuard {
+    fn new(socket: &str, name: &str) -> Self {
+        Self {
+            socket: socket.to_string(),
+            name: name.to_string(),
+            active: true,
+        }
+    }
+
+    fn destroy(mut self) -> std::process::Output {
+        let output = outcall_exec(&self.socket, &["network", "destroy", "--name", &self.name]);
+        self.active = !output.status.success();
+        output
+    }
+}
+
+impl Drop for NetworkGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = outcall_exec(&self.socket, &["network", "destroy", "--name", &self.name]);
+        }
+    }
+}
+
 /// Start `outcalld` as a background child process.
-/// Returns the socket path and the Child handle (caller must kill).
-async fn spawn_daemon(socket: &PathBuf, rules_dir: &PathBuf) -> Result<(Child, String)> {
+/// The returned guard kills and reaps the daemon when it leaves scope.
+async fn spawn_daemon(socket: &Path, rules_dir: &Path) -> Result<(DaemonGuard, String)> {
     let mut cmd = Command::new("outcalld");
     cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
@@ -28,12 +82,12 @@ async fn spawn_daemon(socket: &PathBuf, rules_dir: &PathBuf) -> Result<(Child, S
         .arg("--rules-dir")
         .arg(rules_dir.as_os_str())
         .arg("--no-proxy");
-    let mut daemon = cmd
-        // Disable Docker so we don't need a running Docker daemon
+    let daemon = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .context("failed to spawn outcalld")?;
+    let mut daemon = DaemonGuard(daemon);
 
     let timeout = Duration::from_secs(5);
     let poll_interval = Duration::from_millis(25);
@@ -75,7 +129,7 @@ async fn spawn_daemon(socket: &PathBuf, rules_dir: &PathBuf) -> Result<(Child, S
 }
 
 /// Write a minimal allow-all rule YAML into a temp dir.
-fn make_allow_all_rules(dir: &PathBuf) -> Result<()> {
+fn make_allow_all_rules(dir: &Path) -> Result<()> {
     let yaml = r#"version: "1"
 rules:
   - id: allow-all
@@ -346,7 +400,7 @@ async fn cli_network_list_returns_table_or_empty() {
 
 #[tokio::test]
 #[ignore = "requires a running outcalld with CAP_NET_ADMIN; run with sudo and `cargo test -- --ignored` on a privileged host"]
-async fn cli_network_create_succeeds_or_already_exists() {
+async fn cli_network_lifecycle_succeeds() {
     let tmp = TempDir::new().expect("tempdir");
     let rules_dir = tmp.path().to_path_buf();
     make_allow_all_rules(&rules_dir).expect("write rules");
@@ -356,13 +410,29 @@ async fn cli_network_create_succeeds_or_already_exists() {
         .await
         .expect("daemon spawned");
 
-    let out = outcall_exec(&sock, &["network", "create"]);
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let network_name = format!("test-{}-{unique}", std::process::id());
+    let network = NetworkGuard::new(&sock, &network_name);
+    let out = outcall_exec(&sock, &["network", "create", "--name", &network_name]);
     assert_success(&out, "network create");
     let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("created"), "network create output: {s}");
+
+    let out = outcall_exec(&sock, &["network", "create", "--name", &network_name]);
+    assert_success(&out, "idempotent network create");
+    let s = String::from_utf8_lossy(&out.stdout);
     assert!(
-        s.contains("created") || s.contains("already exists"),
-        "network create output: {s}",
+        s.contains("already exists"),
+        "idempotent network create output: {s}",
     );
+
+    let out = network.destroy();
+    assert_success(&out, "network destroy");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("destroyed"), "network destroy output: {s}");
 
     daemon.kill().expect("daemon kill");
 }

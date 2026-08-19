@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use hickory_net::runtime::{RuntimeProvider, Time, TokioRuntimeProvider, TokioTime};
+use hickory_net::runtime::{Time, TokioRuntimeProvider};
 use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::SOA;
 use hickory_proto::rr::{Name, RData, Record, RecordType};
-use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::TokioResolver;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo, Server};
 use hickory_server::zone_handler::MessageResponseBuilder;
@@ -380,7 +380,7 @@ impl DnsHandler {
     ) -> ResponseInfo {
         let soa = soa_record();
         let builder = MessageResponseBuilder::from_message_request(request);
-        let mut metadata = Metadata::response_from_request(&(&*request).metadata);
+        let mut metadata = Metadata::response_from_request(&request.metadata);
         metadata.message_type = MessageType::Response;
         metadata.response_code = ResponseCode::NXDomain;
         metadata.authoritative = true;
@@ -395,7 +395,7 @@ impl DnsHandler {
         response_handle
             .send_response(resp)
             .await
-            .unwrap_or_else(|_| ResponseInfo::from(self.nxdomain_header(&(&*request).metadata)))
+            .unwrap_or_else(|_| ResponseInfo::from(self.nxdomain_header(&request.metadata)))
     }
 
     async fn send_servfail<R: ResponseHandler>(
@@ -404,7 +404,7 @@ impl DnsHandler {
         mut response_handle: R,
     ) -> ResponseInfo {
         let builder = MessageResponseBuilder::from_message_request(request);
-        let mut metadata = Metadata::response_from_request(&(&*request).metadata);
+        let mut metadata = Metadata::response_from_request(&request.metadata);
         metadata.message_type = MessageType::Response;
         metadata.response_code = ResponseCode::ServFail;
         metadata.recursion_available = true;
@@ -412,7 +412,7 @@ impl DnsHandler {
         response_handle
             .send_response(resp)
             .await
-            .unwrap_or_else(|_| ResponseInfo::from(self.servfail_header(&(&*request).metadata)))
+            .unwrap_or_else(|_| ResponseInfo::from(self.servfail_header(&request.metadata)))
     }
 
     async fn send_answer<R: ResponseHandler>(
@@ -422,7 +422,7 @@ impl DnsHandler {
         mut response_handle: R,
     ) -> ResponseInfo {
         let builder = MessageResponseBuilder::from_message_request(request);
-        let mut metadata = Metadata::response_from_request(&(&*request).metadata);
+        let mut metadata = Metadata::response_from_request(&request.metadata);
         metadata.message_type = MessageType::Response;
         metadata.response_code = ResponseCode::NoError;
         metadata.recursion_available = true;
@@ -436,7 +436,7 @@ impl DnsHandler {
         response_handle
             .send_response(resp)
             .await
-            .unwrap_or_else(|_| ResponseInfo::from(self.noerror_header(&(&*request).metadata)))
+            .unwrap_or_else(|_| ResponseInfo::from(self.noerror_header(&request.metadata)))
     }
 }
 
@@ -635,7 +635,7 @@ fn extract_ipv6_destinations(records: &[Record]) -> Vec<String> {
 pub struct DnsServer {
     listen_addr: Mutex<SocketAddr>,
     pub upstreams: Vec<SocketAddr>,
-    pub cache: Arc<Mutex<DnsLruCache>>,
+    cache: Arc<Mutex<DnsLruCache>>,
     pub counters: Arc<DnsCounters>,
     pub running: Arc<AtomicBool>,
     shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,

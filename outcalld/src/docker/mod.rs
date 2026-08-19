@@ -128,6 +128,11 @@ impl DockerManager {
         self.docker.is_none()
     }
 
+    /// Share the established Docker client with other daemon subsystems.
+    pub(crate) fn client(&self) -> Option<Docker> {
+        self.docker.clone()
+    }
+
     // ── Container creation ─────────────────────────────────────────────────
 
     /// Create and start an agent container.
@@ -222,7 +227,7 @@ impl DockerManager {
             host_config: Some(HostConfig {
                 binds: Some(binds),
                 memory: Some(memory),
-                cpu_shares: Some(cpu_shares as i64),
+                cpu_shares: Some(cpu_shares),
                 pids_limit: Some(DEFAULT_PID_LIMIT),
                 readonly_rootfs: Some(true), // bollard field name (no underscore split)
                 privileged: Some(false),
@@ -348,10 +353,7 @@ impl DockerManager {
                     image: c.image.unwrap_or_default(),
                     state: c.state.unwrap_or_default(),
                     network,
-                    created_at: c
-                        .created
-                        .map(|t| format_unix_timestamp(t))
-                        .unwrap_or_default(),
+                    created_at: c.created.map(format_unix_timestamp).unwrap_or_default(),
                 }
             })
             .collect();
@@ -378,7 +380,7 @@ impl DockerManager {
         let hc = details.host_config.as_ref();
         let mounts: Vec<String> = hc
             .and_then(|h| h.binds.as_ref())
-            .map(|b| b.clone())
+            .cloned()
             .unwrap_or_default();
 
         let env: Vec<String> = details
@@ -576,7 +578,7 @@ fn extract_container_id_from_cgroup(content: &str) -> Option<String> {
         // Docker Desktop (and some systemd/containerd setups) can produce cgroup v2 paths like:
         //   "0::/../<64-hex>"
         // Fall back to the last path segment if it looks like a container ID.
-        if let Some(path) = line.split(':').last() {
+        if let Some(path) = line.split(':').next_back() {
             if let Some(last) = path.rsplit('/').next() {
                 if last.len() >= 12 && last.chars().take(12).all(|c| c.is_ascii_hexdigit()) {
                     return Some(last[..12].to_string());

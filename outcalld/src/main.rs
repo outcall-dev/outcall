@@ -1,26 +1,9 @@
-#[cfg(target_os = "linux")]
-mod agent_api;
-#[cfg(target_os = "linux")]
-mod api;
-#[cfg(target_os = "linux")]
-mod bridge;
-#[cfg(any(target_os = "linux", test))]
-mod container_env;
-#[cfg(target_os = "linux")]
-mod dns;
-#[cfg(target_os = "linux")]
-mod docker;
-#[cfg(target_os = "linux")]
-mod dynamic;
-#[cfg(target_os = "linux")]
-mod network;
-#[cfg(target_os = "linux")]
-mod proxy;
-mod rules;
-
 use anyhow::Result;
 use clap::Parser;
 use tracing::info;
+
+#[cfg(target_os = "linux")]
+use outcalld::{agent_api, api, bridge, dns, docker, dynamic, network, proxy, rules};
 
 #[derive(Parser)]
 #[command(name = "outcalld", about = "Outcall security daemon", version)]
@@ -165,29 +148,31 @@ async fn linux_main(args: Args) -> Result<()> {
 
     // Initialize CA for TLS interception (S011-FR-001) before rule engine so intercept
     // rules can be validated at load time.
-    let ca_state = if args.ca_cert.is_some() && args.ca_key.is_some() {
-        let ca_config = outcall_api::CaConfig {
-            cert_path: std::path::PathBuf::from(args.ca_cert.as_ref().unwrap()),
-            key_path: std::path::PathBuf::from(args.ca_key.as_ref().unwrap()),
-        };
-        let pem_bundle = std::fs::read_to_string(&ca_config.cert_path).ok().map(|p| {
-            p.lines()
-                .skip(1)
-                .take_while(|l| !l.starts_with("-----"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        });
-        api::CaState {
-            config: Some(ca_config),
-            interception_enabled: true,
-            pem_bundle,
+    let ca_state = match (&args.ca_cert, &args.ca_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let ca_config = outcall_api::CaConfig {
+                cert_path: std::path::PathBuf::from(cert_path),
+                key_path: std::path::PathBuf::from(key_path),
+            };
+            let pem_bundle = std::fs::read_to_string(&ca_config.cert_path).ok().map(|p| {
+                p.lines()
+                    .skip(1)
+                    .take_while(|l| !l.starts_with("-----"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+            api::CaState {
+                config: Some(ca_config),
+                interception_enabled: true,
+                pem_bundle,
+            }
         }
-    } else {
-        api::CaState::default()
+        (None, None) => api::CaState::default(),
+        _ => anyhow::bail!("--ca-cert and --ca-key must be provided together"),
     };
 
     // Initialize rule engine (validates intercept rules against CA state at load time)
-    let intercept_enabled = args.ca_cert.is_some() && args.ca_key.is_some();
+    let intercept_enabled = ca_state.interception_enabled;
     let rule_engine = Arc::new(rules::RuleEngine::load(&args.rules_dir, intercept_enabled)?);
     info!(rules_dir = %args.rules_dir, "rule engine loaded");
 
@@ -278,8 +263,12 @@ async fn linux_main(args: Args) -> Result<()> {
     }
 
     // Initialize Network Manager (S002).
-    let network_mgr =
-        network::NetworkManager::new(bridge.clone(), &args.bridge, &args.subnet_block)?;
+    let network_mgr = network::NetworkManager::new(
+        bridge.clone(),
+        &args.bridge,
+        &args.subnet_block,
+        docker_manager.as_ref(),
+    )?;
     info!(subnet_block = %args.subnet_block, "Network Manager initialized");
 
     // Capture daemon effective UID here (binary crate — `unsafe` allowed)
@@ -301,18 +290,20 @@ async fn linux_main(args: Args) -> Result<()> {
     let rule_mgr = agent_api::RuleRequestManager::new(rule_state_path);
 
     let app = api::router(
-        bridge.clone(),
-        rule_engine.clone(),
-        dns_server.clone(),
-        proxy_server.clone(),
-        docker_manager.clone(),
-        dynamic_mgr,
-        network_mgr,
-        ca_state,
+        api::AppState {
+            bridge: bridge.clone(),
+            rules: rule_engine.clone(),
+            dns: dns_server.clone(),
+            proxy: proxy_server.clone(),
+            docker: docker_manager.clone(),
+            dynamic: dynamic_mgr,
+            network: network_mgr,
+            ca: Arc::new(ca_state),
+            rule_requests: rule_mgr.clone(),
+            rules_dir: args.rules_dir.clone(),
+        },
         daemon_uid,
         args.operator_uid,
-        rule_mgr.clone(),
-        args.rules_dir.clone(),
     );
 
     // Prepare host socket.
@@ -349,7 +340,7 @@ async fn linux_main(args: Args) -> Result<()> {
     unsafe {
         let socket_path = std::ffi::CString::new(args.socket.as_str())?;
         if libc::chown(socket_path.as_ptr(), args.operator_uid, args.operator_gid) != 0 {
-            return Err(std::io::Error::last_os_error()).map_err(Into::into);
+            return Err(std::io::Error::last_os_error().into());
         }
     }
     info!(
@@ -370,11 +361,17 @@ async fn linux_main(args: Args) -> Result<()> {
     let agent_app = agent_api::router(
         docker_manager.clone(),
         rule_engine.clone(),
-        std::time::Duration::from_secs(args.agent_timeout_secs),
-        perm_count,
-        perm_window,
-        rule_count,
-        rule_window,
+        agent_api::AgentApiConfig {
+            eval_timeout: std::time::Duration::from_secs(args.agent_timeout_secs),
+            permission_rate: agent_api::RateLimitConfig {
+                limit: perm_count,
+                window: perm_window,
+            },
+            rule_rate: agent_api::RateLimitConfig {
+                limit: rule_count,
+                window: rule_window,
+            },
+        },
         rule_mgr.clone(),
     );
 

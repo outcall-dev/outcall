@@ -200,16 +200,24 @@ pub struct AgentState {
 
 // ── Router ─────────────────────────────────────────────────────────────────────
 
-/// Build the agent API router and return it together with the shared
-/// `RuleRequestManager` so the host API can list/approve/reject requests.
+#[derive(Clone, Copy)]
+pub struct RateLimitConfig {
+    pub limit: usize,
+    pub window: Duration,
+}
+
+#[derive(Clone, Copy)]
+pub struct AgentApiConfig {
+    pub eval_timeout: Duration,
+    pub permission_rate: RateLimitConfig,
+    pub rule_rate: RateLimitConfig,
+}
+
+/// Build the agent API router from its runtime dependencies and limits.
 pub fn router(
     docker: Arc<DockerManager>,
     rules: Arc<RuleEngine>,
-    eval_timeout: Duration,
-    perm_count: usize,
-    perm_window: Duration,
-    rule_count: usize,
-    rule_window: Duration,
+    config: AgentApiConfig,
     rule_mgr: RuleRequestManager,
 ) -> Router {
     let state = AgentState {
@@ -220,11 +228,11 @@ pub fn router(
         perm_rate: Default::default(),
         rule_rate: Default::default(),
         rule_mgr,
-        eval_timeout,
-        perm_limit: perm_count,
-        perm_window,
-        rule_limit: rule_count,
-        rule_window,
+        eval_timeout: config.eval_timeout,
+        perm_limit: config.permission_rate.limit,
+        perm_window: config.permission_rate.window,
+        rule_limit: config.rule_rate.limit,
+        rule_window: config.rule_rate.window,
     };
 
     Router::new()

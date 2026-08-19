@@ -11,8 +11,8 @@
 #![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -20,8 +20,7 @@ use anyhow::{Context, Result};
 use tempfile::TempDir;
 
 use outcall_api::{
-    ActionType, AgentRuleSubmitRequest, ApiResponse, CheckinData, Decision, EvalContext,
-    NetworkContext, PermissionRequest, RuleRequestResponse, Verdict,
+    ActionType, AgentRuleSubmitRequest, ApiResponse, CheckinData, PermissionRequest,
 };
 
 // ── Raw HTTP helper ────────────────────────────────────────────────────────────
@@ -55,19 +54,14 @@ fn http_get(path: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
 }
 
-/// Parse a JSON `ApiResponse<T>` from a raw HTTP response body.
-fn parse_api_response<T: serde::de::DeserializeOwned>(body: &str) -> Option<ApiResponse<T>> {
-    serde_json::from_str(body).ok()
-}
-
 // ── Daemon spawn helper ───────────────────────────────────────────────────────
 
 /// Start `outcalld` with ephemeral socket paths and a temp rules directory.
 /// Returns the daemon Child, host socket path, and agent socket path.
 async fn spawn_daemon(
-    host_socket: &PathBuf,
-    agent_socket: &PathBuf,
-    rules_dir: &PathBuf,
+    host_socket: &Path,
+    agent_socket: &Path,
+    rules_dir: &Path,
 ) -> Result<(Child, String, String)> {
     // Capture stderr so the readiness probe can surface the daemon's
     // exit reason if it dies before binding. Silent failure here
@@ -129,7 +123,7 @@ async fn spawn_daemon(
 }
 
 /// Write a minimal allow-all rule YAML.
-fn make_allow_all_rules(dir: &PathBuf) -> Result<()> {
+fn make_allow_all_rules(dir: &Path) -> Result<()> {
     let yaml = r#"version: "1"
 rules:
   - id: allow-all
@@ -141,7 +135,7 @@ rules:
 }
 
 /// Write a rules file with a specific block rule.
-fn make_block_rules(dir: &PathBuf, hostname: &str) -> Result<()> {
+fn make_block_rules(dir: &Path, hostname: &str) -> Result<()> {
     let yaml = format!(
         r#"version: "1"
 rules:
@@ -159,31 +153,6 @@ rules:
 
 // ── Agent client helpers ──────────────────────────────────────────────────────
 
-/// Connect to the agent socket, send an HTTP POST, return the parsed response.
-fn agent_post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(
-    agent_sock: &str,
-    path: &str,
-    body: &T,
-) -> Option<ApiResponse<R>> {
-    let json = serde_json::to_string(body).ok()?;
-    let mut sock = UnixStream::connect(agent_sock).ok()?;
-    let request = http_json_post(path, &json);
-    sock.write_all(request.as_bytes()).ok()?;
-    let response = read_http_response(&mut sock);
-    parse_api_response(http_body(&response))
-}
-
-fn agent_get<R: serde::de::DeserializeOwned>(
-    agent_sock: &str,
-    path: &str,
-) -> Option<ApiResponse<R>> {
-    let mut sock = UnixStream::connect(agent_sock).ok()?;
-    let request = http_get(path);
-    sock.write_all(request.as_bytes()).ok()?;
-    let response = read_http_response(&mut sock);
-    parse_api_response(http_body(&response))
-}
-
 // ── Test 1: Check-in unknown PID → 403 ──────────────────────────────────────
 
 /// An agent with an unknown (non-container) PID is rejected at check-in.
@@ -200,9 +169,6 @@ async fn agent_checkin_unknown_pid_returns_403() {
         .await
         .expect("daemon spawned");
 
-    // Check in using PID of the current test process (not a container PID).
-    // DockerManager in degraded mode knows no containers → 403.
-    let pid = std::process::id();
     // POST with no body — daemon extracts PID from SO_PEERCR
     let mut sock = UnixStream::connect(&agent).expect("connect");
     let request =

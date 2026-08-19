@@ -140,32 +140,7 @@ pub struct CaState {
     pub pem_bundle: Option<String>,
 }
 
-pub fn router(
-    bridge: SharedBridge,
-    rules: SharedRules,
-    dns: SharedDns,
-    proxy: SharedProxy,
-    docker: SharedDocker,
-    dynamic: SharedDynamic,
-    network: SharedNetwork,
-    ca: CaState,
-    daemon_uid: u32,
-    operator_uid: u32,
-    rule_requests: RuleRequestManager,
-    rules_dir: String,
-) -> Router {
-    let state = AppState {
-        bridge,
-        rules,
-        dns,
-        proxy,
-        docker,
-        dynamic,
-        network,
-        ca: Arc::new(ca),
-        rule_requests,
-        rules_dir,
-    };
+pub fn router(state: AppState, daemon_uid: u32, operator_uid: u32) -> Router {
     Router::new()
         // Bridge endpoints
         .route("/api/v1/bridge", get(bridge_status))
