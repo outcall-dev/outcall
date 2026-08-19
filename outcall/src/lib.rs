@@ -6,6 +6,7 @@ pub mod agent_config;
 pub mod host_resources;
 pub mod policy;
 pub mod recipes;
+pub mod request_target;
 
 use anyhow::Context;
 
@@ -25,9 +26,4 @@ pub fn parse_memory_arg(s: &str) -> anyhow::Result<i64> {
         .parse()
         .with_context(|| format!("invalid memory value: {s}"))?;
     Ok(bytes * mult)
-}
-
-/// Percent-encode a string for use in query parameters (minimal — only encodes spaces).
-pub fn urlencoded(s: &str) -> String {
-    s.replace(' ', "%20")
 }

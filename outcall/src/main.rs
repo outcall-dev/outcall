@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use outcall::{parse_memory_arg, urlencoded};
+use outcall::{parse_memory_arg, request_target};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
@@ -4461,7 +4461,10 @@ fn cmd_requests_list(socket: &str) -> Result<()> {
 }
 
 fn cmd_requests_approve(socket: &str, id: &str) -> Result<()> {
-    let path = format!("/api/v1/requests/rules/{}/approve", urlencoded(id));
+    let path = format!(
+        "/api/v1/requests/rules/{}/approve",
+        request_target::path_segment(id)
+    );
     let body = http_post(socket, &path)?;
     let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
 
@@ -4478,7 +4481,10 @@ fn cmd_requests_approve(socket: &str, id: &str) -> Result<()> {
 }
 
 fn cmd_requests_reject(socket: &str, id: &str, reason: Option<String>) -> Result<()> {
-    let path = format!("/api/v1/requests/rules/{}/reject", urlencoded(id));
+    let path = format!(
+        "/api/v1/requests/rules/{}/reject",
+        request_target::path_segment(id)
+    );
     let req = RejectRuleRequest { reason };
     let body = http_post_json(socket, &path, &req)?;
     let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
@@ -5067,7 +5073,10 @@ fn cmd_container_list(socket: &str) -> Result<()> {
 }
 
 fn cmd_container_inspect(socket: &str, name: &str) -> Result<()> {
-    let path = format!("/api/v1/container?name={}", urlencoded(name));
+    let path = format!(
+        "/api/v1/container?name={}",
+        request_target::query_value(name)
+    );
     let body = http_get(socket, &path)?;
     let resp: Response = serde_json::from_str(&body).context("failed to parse response")?;
 
@@ -5362,7 +5371,7 @@ fn cmd_network_create(
 
 fn cmd_network_status(socket: &str, name: Option<&str>) -> Result<()> {
     let path = match name {
-        Some(n) => format!("/api/v1/network?name={}", urlencoded(n)),
+        Some(n) => format!("/api/v1/network?name={}", request_target::query_value(n)),
         None => "/api/v1/network".to_string(),
     };
     let body = http_get(socket, &path)?;
