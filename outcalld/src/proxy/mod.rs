@@ -52,6 +52,12 @@ enum HeaderReadError {
     Io,
 }
 
+struct ParsedRequest {
+    method: String,
+    uri: String,
+    headers: Vec<(String, String)>,
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 
 pub struct ProxyServer {
@@ -232,7 +238,7 @@ async fn handle_connection(
         Err(HeaderReadError::Io) => return,
     };
 
-    let (method, raw_uri, headers) = match parse_request_line_headers(&buf[..header_end]) {
+    let request = match parse_request_line_headers(&buf[..header_end]) {
         Some(r) => r,
         None => {
             let _ = write_error(stream, 400, "Bad Request", "Malformed request line").await;
@@ -241,20 +247,18 @@ async fn handle_connection(
     };
 
     // Health check — not forwarded upstream.
-    if method.eq_ignore_ascii_case("GET") && raw_uri == "/outcall-health" {
+    if request.method.eq_ignore_ascii_case("GET") && request.uri == "/outcall-health" {
         handle_health(stream).await;
         return;
     }
 
-    if method.eq_ignore_ascii_case("CONNECT") {
-        handle_connect(stream, &raw_uri, rule_engine, total_blocked, agent_name).await;
+    if request.method.eq_ignore_ascii_case("CONNECT") {
+        handle_connect(stream, &request.uri, rule_engine, total_blocked, agent_name).await;
     } else {
         let body_prefix = buf[header_end..].to_vec();
         handle_http(
             stream,
-            &method,
-            &raw_uri,
-            headers,
+            request,
             body_prefix,
             rule_engine,
             total_blocked,
@@ -408,15 +412,18 @@ async fn handle_connect(
 
 async fn handle_http(
     mut client: TcpStream,
-    method: &str,
-    raw_uri: &str,
-    headers: Vec<(String, String)>,
+    request: ParsedRequest,
     body_prefix: Vec<u8>,
     rule_engine: Arc<RuleEngine>,
     total_blocked: &AtomicU64,
     agent_name: Option<String>,
 ) {
-    let (host, port, path) = match parse_absolute_uri(raw_uri) {
+    let ParsedRequest {
+        method,
+        uri,
+        headers,
+    } = request;
+    let (host, port, path) = match parse_absolute_uri(&uri) {
         Some(r) => r,
         None => {
             let _ = write_error(client, 400, "Bad Request", "Invalid absolute-form URI").await;
@@ -448,7 +455,7 @@ async fn handle_http(
 
     let result = rule_engine
         .evaluate(&build_http_ctx(
-            method,
+            &method,
             &host,
             &path,
             &header_map,
@@ -608,7 +615,7 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
 }
 
 /// Parse "METHOD URI HTTP/1.x\r\nHeader: Value\r\n…\r\n" from raw bytes.
-fn parse_request_line_headers(bytes: &[u8]) -> Option<(String, String, Vec<(String, String)>)> {
+fn parse_request_line_headers(bytes: &[u8]) -> Option<ParsedRequest> {
     let text = std::str::from_utf8(bytes).ok()?;
     let mut lines = text.split("\r\n");
     let request_line = lines.next()?;
@@ -626,7 +633,11 @@ fn parse_request_line_headers(bytes: &[u8]) -> Option<(String, String, Vec<(Stri
         }
     }
 
-    Some((method, uri, headers))
+    Some(ParsedRequest {
+        method,
+        uri,
+        headers,
+    })
 }
 
 /// Parse "host:port" → (host, port). Defaults to port 443 if absent.
@@ -641,10 +652,8 @@ fn parse_host_port(s: &str) -> Option<(String, u16)> {
 fn parse_absolute_uri(uri: &str) -> Option<(String, u16, String)> {
     let (default_port, after_scheme) = if let Some(r) = uri.strip_prefix("https://") {
         (443u16, r)
-    } else if let Some(r) = uri.strip_prefix("http://") {
-        (80u16, r)
     } else {
-        return None;
+        (80u16, uri.strip_prefix("http://")?)
     };
 
     let (authority, path) = match after_scheme.find('/') {
@@ -900,10 +909,10 @@ mod tests {
             b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\n\r\n";
         let r = parse_request_line_headers(raw);
         assert!(r.is_some());
-        let (method, uri, hdrs) = r.unwrap();
-        assert_eq!(method, "GET");
-        assert_eq!(uri, "http://example.com/path");
-        assert_eq!(hdrs.len(), 2);
+        let request = r.unwrap();
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.uri, "http://example.com/path");
+        assert_eq!(request.headers.len(), 2);
     }
 
     #[test]
@@ -911,9 +920,9 @@ mod tests {
         let raw = b"CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com\r\n\r\n";
         let r = parse_request_line_headers(raw);
         assert!(r.is_some());
-        let (method, uri, _) = r.unwrap();
-        assert_eq!(method, "CONNECT");
-        assert_eq!(uri, "api.github.com:443");
+        let request = r.unwrap();
+        assert_eq!(request.method, "CONNECT");
+        assert_eq!(request.uri, "api.github.com:443");
     }
 
     // ─── negative paths ────────────────────────────────────────────────────
@@ -942,8 +951,9 @@ mod tests {
         // `X-Empty:` with no value is still a valid header line — should appear
         // in the output with an empty value, not be dropped.
         let raw = b"GET / HTTP/1.1\r\nX-Empty:\r\nHost: x\r\n\r\n";
-        let (_, _, hdrs) = parse_request_line_headers(raw).expect("parse");
-        let empty = hdrs
+        let request = parse_request_line_headers(raw).expect("parse");
+        let empty = request
+            .headers
             .iter()
             .find(|(k, _)| k == "X-Empty")
             .expect("X-Empty header preserved");
@@ -956,9 +966,9 @@ mod tests {
         // that behaviour — surfacing it as an error would be a breaking change
         // that we'd want to make deliberately.
         let raw = b"GET / HTTP/1.1\r\nNoColonHere\r\nHost: x\r\n\r\n";
-        let (_, _, hdrs) = parse_request_line_headers(raw).expect("parse");
-        assert_eq!(hdrs.len(), 1);
-        assert_eq!(hdrs[0].0, "Host");
+        let request = parse_request_line_headers(raw).expect("parse");
+        assert_eq!(request.headers.len(), 1);
+        assert_eq!(request.headers[0].0, "Host");
     }
 
     // ── Agent context enrichment (S013 proxy path) ────────────────────────

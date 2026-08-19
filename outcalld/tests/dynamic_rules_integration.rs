@@ -11,7 +11,7 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -67,7 +67,7 @@ fn http_get<R: serde::de::DeserializeOwned>(
     parse_api_response(http_body(&response))
 }
 
-async fn spawn_daemon(socket: &PathBuf, rules_dir: &PathBuf) -> Result<(Child, String)> {
+async fn spawn_daemon(socket: &Path, rules_dir: &Path) -> Result<(Child, String)> {
     let mut cmd = Command::new("outcalld");
     cmd.env("RUST_LOG", "outcalld=warn")
         .arg("--socket")
@@ -117,7 +117,7 @@ async fn spawn_daemon(socket: &PathBuf, rules_dir: &PathBuf) -> Result<(Child, S
     Ok((daemon, socket.to_string_lossy().to_string()))
 }
 
-fn make_allow_all_rules(dir: &PathBuf) -> Result<()> {
+fn make_allow_all_rules(dir: &Path) -> Result<()> {
     let yaml = r#"version: "1"
 rules:
   - id: allow-all

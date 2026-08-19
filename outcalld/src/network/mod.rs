@@ -6,6 +6,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use bollard::errors::Error as DockerError;
 use bollard::models::{Ipam, IpamConfig};
 use bollard::network::{CreateNetworkOptions, InspectNetworkOptions, ListNetworksOptions};
 use bollard::Docker;
@@ -16,11 +17,11 @@ use outcall_api::{
     NetworkStatus, DEFAULT_GATEWAY, DEFAULT_NETWORK_NAME, DEFAULT_SUBNET, NETWORK_PREFIX,
 };
 
-use crate::bridge::BridgeManager;
+use crate::{bridge::BridgeManager, docker::DockerManager};
 
 /// Manages outcall Docker networks via the Docker Engine API (FR-001, FR-022).
 pub struct NetworkManager {
-    docker: Docker,
+    docker: Option<Docker>,
     bridge_name: String,
     /// CIDR block to allocate /24 subnets from (default: `10.200.0.0/16`).
     subnet_block: SubnetBlock,
@@ -88,6 +89,7 @@ impl NetworkManager {
         bridge: Arc<tokio::sync::Mutex<BridgeManager>>,
         bridge_name: impl Into<String>,
         subnet_block_cidr: &str,
+        docker_manager: &DockerManager,
     ) -> Result<Arc<Self>> {
         let block = SubnetBlock::parse(subnet_block_cidr)?;
         if !is_rfc1918(block.base) {
@@ -96,14 +98,10 @@ impl NetworkManager {
             ));
         }
 
-        let docker = match Docker::connect_with_local_defaults() {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("Docker client init failed: {e} — network endpoints will return errors");
-                // Still create a client object so endpoint calls return a proper error.
-                Docker::connect_with_local_defaults().map_err(|e| anyhow!("{e}"))?
-            }
-        };
+        let docker = docker_manager.client();
+        if docker.is_none() {
+            warn!("Docker unavailable — network management endpoints are disabled");
+        }
 
         Ok(Arc::new(Self {
             docker,
@@ -145,6 +143,8 @@ impl NetworkManager {
 
     /// FR-001-005: create a network. Idempotent.
     pub async fn create_network(&self, req: NetworkCreateRequest) -> Result<NetworkCreateResult> {
+        let docker = self.docker()?;
+
         // FR-004: bridge must be up.
         if !self.bridge.lock().await.status().await.up {
             return Err(anyhow!("cannot create network: bridge is not up"));
@@ -153,7 +153,7 @@ impl NetworkManager {
         let full_name = Self::full_name(req.name.as_deref())?;
 
         // FR-003: idempotent create.
-        if let Some(existing) = self.try_inspect(&full_name).await {
+        if let Some(existing) = self.try_inspect(docker, &full_name).await? {
             let subnet = first_subnet(&existing);
             info!(name = %full_name, "network already exists — idempotent");
             return Ok(NetworkCreateResult {
@@ -167,21 +167,21 @@ impl NetworkManager {
         // Resolve subnet: explicit > default-network → DEFAULT_SUBNET > auto.
         let (subnet, gateway) = if let Some(s) = req.subnet.as_deref() {
             // FR-015: explicit subnet still checked for collisions.
-            self.check_subnet_collision(s).await?;
+            self.check_subnet_collision(docker, s).await?;
             let g = req.gateway.clone().unwrap_or_else(|| {
                 derive_gateway(s).unwrap_or_else(|| DEFAULT_GATEWAY.to_string())
             });
             (s.to_string(), g)
         } else if full_name == DEFAULT_NETWORK_NAME {
             // FR-006: default network uses default subnet (still verify free).
-            if self.is_subnet_in_use(DEFAULT_SUBNET).await {
+            if self.is_subnet_in_use(docker, DEFAULT_SUBNET).await? {
                 return Err(anyhow!(
                     "default subnet {DEFAULT_SUBNET} is already in use by another Docker network"
                 ));
             }
             (DEFAULT_SUBNET.to_string(), DEFAULT_GATEWAY.to_string())
         } else {
-            let (net, gw) = self.allocate_subnet().await?;
+            let (net, gw) = self.allocate_subnet(docker).await?;
             (format!("{net}/24"), gw.to_string())
         };
 
@@ -215,8 +215,7 @@ impl NetworkManager {
             ..Default::default()
         };
 
-        let resp = self
-            .docker
+        let resp = docker
             .create_network(opts)
             .await
             .with_context(|| format!("failed to create network \"{full_name}\""))?;
@@ -233,8 +232,9 @@ impl NetworkManager {
 
     /// FR-016, FR-017: status query — never cached.
     pub async fn inspect_network(&self, name: Option<&str>) -> Result<NetworkStatus> {
+        let docker = self.docker()?;
         let full_name = Self::full_name(name)?;
-        match self.try_inspect(&full_name).await {
+        match self.try_inspect(docker, &full_name).await? {
             Some(n) => Ok(network_to_status(&full_name, n)),
             None => Ok(NetworkStatus {
                 exists: false,
@@ -249,8 +249,8 @@ impl NetworkManager {
 
     /// FR-018: list all outcall-managed networks.
     pub async fn list_networks(&self) -> Result<Vec<NetworkStatus>> {
-        let nets = self
-            .docker
+        let docker = self.docker()?;
+        let nets = docker
             .list_networks(None::<ListNetworksOptions<&str>>)
             .await
             .context("failed to list Docker networks")?;
@@ -262,7 +262,7 @@ impl NetworkManager {
                 continue;
             }
             // Re-inspect for the connected-containers map.
-            if let Some(detail) = self.try_inspect(&name).await {
+            if let Some(detail) = self.try_inspect(docker, &name).await? {
                 out.push(network_to_status(&name, detail));
             }
         }
@@ -272,8 +272,9 @@ impl NetworkManager {
 
     /// FR-019: refuse if containers connected. FR-020: idempotent on missing.
     pub async fn destroy_network(&self, name: Option<&str>) -> Result<NetworkDestroyResult> {
+        let docker = self.docker()?;
         let full_name = Self::full_name(name)?;
-        let existing = match self.try_inspect(&full_name).await {
+        let existing = match self.try_inspect(docker, &full_name).await? {
             Some(n) => n,
             None => {
                 info!(name = %full_name, "destroy: network does not exist (idempotent)");
@@ -295,7 +296,7 @@ impl NetworkManager {
             ));
         }
 
-        self.docker
+        docker
             .remove_network(&full_name)
             .await
             .with_context(|| format!("failed to remove network \"{full_name}\""))?;
@@ -312,18 +313,41 @@ impl NetworkManager {
         format!("{}/{}", self.subnet_block.base, self.subnet_block.prefix)
     }
 
+    /// Returns `true` when Docker-backed network management is unavailable.
+    pub fn is_unavailable(&self) -> bool {
+        self.docker.is_none()
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────
 
-    async fn try_inspect(&self, name: &str) -> Option<bollard::models::Network> {
-        self.docker
+    fn docker(&self) -> Result<&Docker> {
+        self.docker.as_ref().context(
+            "Docker manager unavailable: network management requires a reachable Docker Engine",
+        )
+    }
+
+    async fn try_inspect(
+        &self,
+        docker: &Docker,
+        name: &str,
+    ) -> Result<Option<bollard::models::Network>> {
+        match docker
             .inspect_network(name, None::<InspectNetworkOptions<&str>>)
             .await
-            .ok()
+        {
+            Ok(network) => Ok(Some(network)),
+            Err(DockerError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(None),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to inspect Docker network \"{name}\""))
+            }
+        }
     }
 
     /// FR-012, FR-013: find the next free /24 in the subnet block.
-    async fn allocate_subnet(&self) -> Result<(Ipv4Addr, Ipv4Addr)> {
-        let used = self.collect_used_subnets().await;
+    async fn allocate_subnet(&self, docker: &Docker) -> Result<(Ipv4Addr, Ipv4Addr)> {
+        let used = self.collect_used_subnets(docker).await?;
 
         for (net, gw) in self.subnet_block.iter_24() {
             let cidr = format!("{net}/24");
@@ -337,8 +361,8 @@ impl NetworkManager {
         ))
     }
 
-    async fn check_subnet_collision(&self, subnet: &str) -> Result<()> {
-        if self.is_subnet_in_use(subnet).await {
+    async fn check_subnet_collision(&self, docker: &Docker, subnet: &str) -> Result<()> {
+        if self.is_subnet_in_use(docker, subnet).await? {
             return Err(anyhow!(
                 "subnet {subnet} is already in use by another Docker network"
             ));
@@ -346,24 +370,17 @@ impl NetworkManager {
         Ok(())
     }
 
-    async fn is_subnet_in_use(&self, subnet: &str) -> bool {
-        let used = self.collect_used_subnets().await;
-        used.contains(subnet)
+    async fn is_subnet_in_use(&self, docker: &Docker, subnet: &str) -> Result<bool> {
+        let used = self.collect_used_subnets(docker).await?;
+        Ok(used.contains(subnet))
     }
 
-    async fn collect_used_subnets(&self) -> HashSet<String> {
+    async fn collect_used_subnets(&self, docker: &Docker) -> Result<HashSet<String>> {
         let mut used = HashSet::new();
-        let nets = match self
-            .docker
+        let nets = docker
             .list_networks(None::<ListNetworksOptions<&str>>)
             .await
-        {
-            Ok(n) => n,
-            Err(e) => {
-                warn!("failed to list Docker networks for collision check: {e}");
-                return used;
-            }
-        };
+            .context("failed to list Docker networks for collision check")?;
         for n in nets {
             if let Some(ipam) = n.ipam {
                 if let Some(configs) = ipam.config {
@@ -375,7 +392,7 @@ impl NetworkManager {
                 }
             }
         }
-        used
+        Ok(used)
     }
 }
 
@@ -403,8 +420,8 @@ fn connected_containers(n: &bollard::models::Network) -> Vec<NetworkContainer> {
         None => return vec![],
     };
     let mut out: Vec<NetworkContainer> = containers
-        .iter()
-        .map(|(_id, ep)| NetworkContainer {
+        .values()
+        .map(|ep| NetworkContainer {
             name: ep.name.clone().unwrap_or_default(),
             ipv4_address: ep
                 .ipv4_address
@@ -476,7 +493,7 @@ mod tests {
 
     #[test]
     fn full_name_length_limit() {
-        let s: String = std::iter::repeat('a').take(65).collect();
+        let s = "a".repeat(65);
         assert!(NetworkManager::full_name(Some(&s)).is_err());
     }
 
@@ -523,5 +540,24 @@ mod tests {
             derive_gateway("10.200.5.0/24"),
             Some("10.200.5.1".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_docker_does_not_block_manager_initialization() {
+        let bridge = BridgeManager::new(Some("outcall0"), "10.200.0.1".parse().unwrap(), 16)
+            .await
+            .unwrap();
+        let docker = DockerManager::new_unavailable();
+        let manager = NetworkManager::new(
+            Arc::new(tokio::sync::Mutex::new(bridge)),
+            "outcall0",
+            "10.200.0.0/16",
+            &docker,
+        )
+        .unwrap();
+
+        assert!(manager.is_unavailable());
+        let error = manager.list_networks().await.unwrap_err();
+        assert!(error.to_string().contains("Docker manager unavailable"));
     }
 }

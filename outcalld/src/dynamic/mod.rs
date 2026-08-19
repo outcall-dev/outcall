@@ -356,7 +356,7 @@ async fn nft_delete(handle: u64) -> Result<()> {
 /// `nft --handle --echo insert ...` echoes the inserted rule followed by
 /// `# handle N` on the same line, e.g.:
 /// ```text
-/// 	ip saddr 10.0.0.1 ip daddr 1.2.3.4 tcp dport 443 accept # handle 42
+///     ip saddr 10.0.0.1 ip daddr 1.2.3.4 tcp dport 443 accept # handle 42
 /// ```
 fn parse_nft_handle(output: &str) -> Option<u64> {
     for line in output.lines() {

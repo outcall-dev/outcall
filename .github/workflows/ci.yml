@@ -130,13 +130,15 @@ jobs:
             -w /workspace \
             -e OUTCALL_PROXY_ADDR=172.30.0.1:8080 \
             rust:latest \
-            bash -c 'apt-get update && apt-get install -y nftables iproute2 && \
-                     ip link del outcall0 2>/dev/null || true && \
-                     ip link add outcall0 type bridge && \
-                     ip addr add 172.30.0.1/24 dev outcall0 && \
-                     ip link set outcall0 up && \
-                     export PATH="$PWD/target/debug:$PATH" && \
-                     cargo build --workspace --locked && \
+            bash -c 'set -eu
+                     apt-get update
+                     apt-get install -y nftables iproute2
+                     ip link del outcall0 2>/dev/null || true
+                     ip link add outcall0 type bridge
+                     ip addr add 172.30.0.1/24 dev outcall0
+                     ip link set outcall0 up
+                     export PATH="$PWD/target/debug:$PATH"
+                     cargo build --workspace --locked
                      cargo test --workspace --tests -- --ignored --test-threads=1'
 
   installer-smoke:
@@ -494,7 +496,7 @@ jobs:
           cache-on-failure: false
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked -- -A warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   audit:
     name: cargo audit

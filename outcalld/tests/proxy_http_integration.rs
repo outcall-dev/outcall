@@ -120,15 +120,13 @@ async fn http_request_to_allowed_host_is_forwarded() {
     let upstream = spawn_upstream().await;
 
     // Allow anything to 127.0.0.1 — covers both http.host and dns.query.
-    let yaml = format!(
-        r#"version: "1"
+    let yaml = r#"version: "1"
 rules:
   - id: allow-loopback
     condition: 'http.host == "127.0.0.1" || http.host.startsWith("127.0.0.1")'
     action: allow
-"#,
-    );
-    let (_keep_dir, rules) = rule_engine_from_yaml(&yaml);
+"#;
+    let (_keep_dir, rules) = rule_engine_from_yaml(yaml);
     let (proxy, proxy_addr) = spawn_proxy(rules).await;
 
     let req = format!(
