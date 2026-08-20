@@ -163,10 +163,18 @@ verify:
 const CLAUDE_DOCKERFILE: &str = r#"FROM node:22-bookworm-slim
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates git openssh-client bash curl \
-  && rm -rf /var/lib/apt/lists/*
-
-RUN npm install -g @anthropic-ai/claude-code \
+  && apt-get install -y --no-install-recommends ca-certificates git openssh-client bash curl gnupg \
+  && install -d -m 0755 /etc/apt/keyrings \
+  && curl -fsSL https://downloads.claude.ai/keys/claude-code.asc \
+    -o /etc/apt/keyrings/claude-code.asc \
+  && gpg --batch --show-keys --with-colons /etc/apt/keyrings/claude-code.asc \
+    | grep -q ':31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE:' \
+  && printf '%s\n' \
+    'deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/stable stable main' \
+    > /etc/apt/sources.list.d/claude-code.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends claude-code \
+  && rm -rf /var/lib/apt/lists/* /root/.gnupg \
   && claude --version
 
 WORKDIR /workspace
@@ -825,6 +833,16 @@ mod tests {
                 .dockerfile
                 .contains("&& codex --version")
         );
+    }
+
+    #[test]
+    fn claude_image_uses_anthropic_signed_stable_repository() {
+        let dockerfile = get_recipe("claude").unwrap().dockerfile;
+        assert!(dockerfile.contains("https://downloads.claude.ai/claude-code/apt/stable"));
+        assert!(dockerfile.contains("signed-by=/etc/apt/keyrings/claude-code.asc"));
+        assert!(dockerfile.contains("31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"));
+        assert!(dockerfile.contains("apt-get install -y --no-install-recommends claude-code"));
+        assert!(!dockerfile.contains("@anthropic-ai/claude-code"));
     }
 
     #[test]
