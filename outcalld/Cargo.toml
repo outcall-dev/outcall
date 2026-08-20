@@ -5,6 +5,9 @@ edition = "2021"
 description = "Host-level firewall daemon for Outcall"
 license = "Apache-2.0"
 
+[lints]
+workspace = true
+
 [lib]
 name = "outcalld"
 path = "src/lib.rs"
@@ -31,7 +34,7 @@ walkdir = "2"
 regex = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
+rustix = { version = "1", features = ["fs", "process"] }
 rtnetlink = "0.21"
 futures = "0.3"
 hickory-server = { version = "=0.26.1", features = ["resolver"] }

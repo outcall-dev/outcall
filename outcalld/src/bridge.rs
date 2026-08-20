@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
@@ -9,18 +9,80 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{info, warn};
 
+const BRIDGE_NF_IPV4: &str = "/proc/sys/net/bridge/bridge-nf-call-iptables";
+const BRIDGE_NF_IPV6: &str = "/proc/sys/net/bridge/bridge-nf-call-ip6tables";
+
 use outcall_api::BridgeStatus;
 
 #[derive(Debug, Error)]
 pub enum BridgeError {
-    #[error("netlink connection failed")]
+    #[error("netlink connection failed: {0}")]
     Connection(#[source] std::io::Error),
 
-    #[error("bridge operation failed")]
+    #[error("bridge operation failed: {0:#}")]
     Operation(#[source] anyhow::Error),
 
     #[error("nftables operation failed: {0}")]
     Nftables(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostServiceEndpoint {
+    pub address: Ipv4Addr,
+    pub port: u16,
+}
+
+impl HostServiceEndpoint {
+    fn from_listener(listener: SocketAddr, gateway_ip: Ipv4Addr, label: &str) -> Result<Self> {
+        if listener.port() == 0 {
+            anyhow::bail!("{label} listener must use a fixed, non-zero port");
+        }
+        let address = match listener.ip() {
+            IpAddr::V4(address) if address.is_unspecified() => gateway_ip,
+            IpAddr::V4(address) => address,
+            IpAddr::V6(_) => anyhow::bail!(
+                "{label} listener {listener} is IPv6, but the managed bridge only permits IPv4 host services"
+            ),
+        };
+        Ok(Self {
+            address,
+            port: listener.port(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostServiceAccess {
+    pub dns: HostServiceEndpoint,
+    pub proxy: Option<HostServiceEndpoint>,
+}
+
+impl HostServiceAccess {
+    pub fn from_listeners(
+        gateway_ip: Ipv4Addr,
+        dns_listener: SocketAddr,
+        proxy_listener: Option<SocketAddr>,
+    ) -> Result<Self> {
+        Ok(Self {
+            dns: HostServiceEndpoint::from_listener(dns_listener, gateway_ip, "DNS")?,
+            proxy: proxy_listener
+                .map(|listener| HostServiceEndpoint::from_listener(listener, gateway_ip, "proxy"))
+                .transpose()?,
+        })
+    }
+
+    pub fn default_for_gateway(gateway_ip: Ipv4Addr) -> Self {
+        Self {
+            dns: HostServiceEndpoint {
+                address: gateway_ip,
+                port: 53,
+            },
+            proxy: Some(HostServiceEndpoint {
+                address: gateway_ip,
+                port: 8080,
+            }),
+        }
+    }
 }
 
 /// Manages the outcall network bridge and its associated nftables rules.
@@ -32,6 +94,7 @@ pub struct BridgeManager {
     name: String,
     gateway_ip: Ipv4Addr,
     gateway_prefix_len: u8,
+    host_services: HostServiceAccess,
     handle: Handle,
     index: Option<u32>,
 }
@@ -42,6 +105,7 @@ impl BridgeManager {
         name: Option<&str>,
         gateway_ip: Ipv4Addr,
         gateway_prefix_len: u8,
+        host_services: HostServiceAccess,
     ) -> Result<Self, BridgeError> {
         let (conn, handle, _) = rtnetlink::new_connection().map_err(BridgeError::Connection)?;
         tokio::spawn(conn);
@@ -50,6 +114,7 @@ impl BridgeManager {
             name: name.unwrap_or(outcall_api::DEFAULT_BRIDGE_NAME).to_string(),
             gateway_ip,
             gateway_prefix_len,
+            host_services,
             handle,
             index: None,
         })
@@ -78,41 +143,54 @@ impl BridgeManager {
     /// Steps:
     ///   1. `modprobe br_netfilter` — the `bridge-nf-*` sysctls only exist
     ///      when this module is loaded (or built into the kernel).
-    ///   2. Write `1` to `/proc/sys/net/bridge/bridge-nf-call-iptables`.
+    ///   2. Write `1` to both bridge IPv4 and IPv6 netfilter sysctls.
     ///
     /// Both steps are best-effort: we warn but don't fail. The reasoning
     /// is operational — if the module can't load or the sysctl can't be
     /// written, the daemon is still useful for proxy-mediated egress
     /// rules; only L2-bridged container-to-container enforcement degrades.
-    /// A loud `warn!` makes the gap discoverable instead of silent.
+    /// A loud `warn!` makes the gap discoverable instead of silent. Managed
+    /// container creation separately calls `require_netfilter_enforceable`, so
+    /// this best-effort setup cannot turn into a fail-open runtime.
     async fn enable_bridge_netfilter(&self) {
         // 1) Module load. Ignore output; if it's already loaded or built
         // in, modprobe returns 0 anyway. If we lack CAP_SYS_MODULE, this
         // fails and we just check the sysctl below.
         let _ = Command::new("modprobe").arg("br_netfilter").output().await;
 
-        // 2) Sysctl write via direct procfs path — sysctl(1) isn't always
-        // installed in minimal containers, procfs always is. Docker Desktop
-        // exposes this as read-only when it has already enabled the setting,
-        // so avoid reporting a false security degradation in that case.
-        const PATH: &str = "/proc/sys/net/bridge/bridge-nf-call-iptables";
-        if matches!(tokio::fs::read_to_string(PATH).await, Ok(value) if value.trim() == "1") {
-            info!(
-                sysctl = PATH,
-                "bridge netfilter already enabled (T-2 enforceable)"
-            );
-            return;
+        // 2) Sysctl writes via direct procfs paths — sysctl(1) isn't always
+        // installed in minimal containers, while procfs is. Docker Desktop
+        // exposes these as read-only when already enabled, so read first.
+        for path in [BRIDGE_NF_IPV4, BRIDGE_NF_IPV6] {
+            if matches!(tokio::fs::read_to_string(path).await, Ok(value) if value.trim() == "1") {
+                info!(sysctl = path, "bridge netfilter already enabled");
+                continue;
+            }
+            match tokio::fs::write(path, b"1").await {
+                Ok(()) => info!(sysctl = path, "bridge netfilter enabled"),
+                Err(error) => warn!(
+                    sysctl = path,
+                    error = %error,
+                    "could not enable bridge netfilter; managed container creation will be refused"
+                ),
+            }
         }
-        match tokio::fs::write(PATH, b"1").await {
-            Ok(()) => info!(sysctl = PATH, "bridge netfilter enabled (T-2 enforceable)"),
-            Err(e) => warn!(
-                sysctl = PATH,
-                error = %e,
-                "could not enable bridge-nf-call-iptables; container-to-container traffic on \
-                 the same bridge will bypass nftables hooks (T-2 silently unenforced). \
-                 Load the br_netfilter module on the host or set this sysctl manually."
-            ),
+    }
+
+    /// Refuse managed workloads unless both bridge netfilter hooks are active.
+    /// This check lives in the daemon so callers cannot bypass it by invoking
+    /// the container API directly instead of using the host CLI preflight.
+    pub async fn require_netfilter_enforceable(&self) -> Result<(), BridgeError> {
+        let ipv4 = read_netfilter_setting(BRIDGE_NF_IPV4).await;
+        let ipv6 = read_netfilter_setting(BRIDGE_NF_IPV6).await;
+        if netfilter_settings_enforceable(&ipv4, &ipv6) {
+            return Ok(());
         }
+
+        Err(BridgeError::Operation(anyhow::anyhow!(
+            "Secure unattended mode requires bridge netfilter enforcement; \
+             bridge-nf-call-iptables={ipv4}, bridge-nf-call-ip6tables={ipv6} (expected both to be 1)"
+        )))
     }
 
     /// Idempotent bridge setup: create if missing, then bring up.
@@ -204,91 +282,18 @@ impl BridgeManager {
     /// Apply the base nftables ruleset: drop all forwarded traffic on the
     /// bridge except established/related connections.
     async fn apply_base_rules(&self) -> Result<(), BridgeError> {
-        // Clean slate — remove table if it already exists (ignore errors)
-        let _ = Command::new("nft")
-            .args(["delete", "table", "inet", "outcall"])
+        // Keep replacement in one nft transaction. If parsing or applying the
+        // new policy fails, nft retains the previous fail-closed table.
+        let table_exists = Command::new("nft")
+            .args(["list", "table", "inet", "outcall"])
             .output()
-            .await;
-
-        let ruleset = self.base_ruleset();
+            .await
+            .is_ok_and(|output| output.status.success());
+        let ruleset = render_ruleset_transaction(&self.name, self.host_services, table_exists);
         self.run_nft(&ruleset).await?;
 
         info!("base nftables rules applied");
         Ok(())
-    }
-
-    /// Generate the base nftables ruleset.
-    ///
-    /// Policy: the chain default is `drop` — the deepest enforcement layer
-    /// must fail closed. We allow all forwarded traffic that does NOT
-    /// transit our bridge so we don't break unrelated networking on the
-    /// host. Anything that does transit the bridge must be either
-    /// established/related (handled here) or explicitly allowed by a
-    /// dynamic rule inserted at higher priority. Audit C-3.
-    ///
-    /// IPv6 defence-in-depth (BYPASS-11):
-    ///
-    /// The `inet` family covers both IPv4 and IPv6, so the FORWARD chain
-    /// policy drop applies to both. However, certain IPv6 traffic — notably
-    /// link-local multicast (ff02::/16) and packets that exit via a directly-
-    /// connected route on the agent veth rather than being forwarded through
-    /// the bridge — can bypass the FORWARD hook entirely. To close this:
-    ///
-    ///   1. In the `forward` chain we add an explicit `meta nfproto ipv6 drop`
-    ///      before the established/related rules so any IPv6 packet that *does*
-    ///      reach FORWARD with established state is also dropped (defence against
-    ///      IPv6 sessions opened before a rule was revoked).  Dynamic allow rules
-    ///      are inserted at the chain head (position 0, higher priority) and use
-    ///      `ip6 saddr … ip6 daddr … accept`, so legitimately allowed IPv6 flows
-    ///      are still accepted before they hit this explicit drop.
-    ///
-    ///   2. An `output` chain (type filter hook output) drops all IPv6 packets
-    ///      exiting a non-loopback interface *from* the agent — this catches
-    ///      link-local/multicast packets that never traverse the FORWARD hook.
-    ///
-    ///   3. An `input` chain drops all unsolicited IPv6 arriving *on* the bridge
-    ///      interface that weren't established by the host (RA, NS, multicast
-    ///      listener queries etc.) that could otherwise be used to inject routes.
-    fn base_ruleset(&self) -> String {
-        format!(
-            r#"table inet outcall {{
-    chain forward {{
-        type filter hook forward priority filter; policy drop;
-        # Allow non-outcall0 traffic through (unrelated interfaces)
-        iifname != "{name}" oifname != "{name}" accept
-        # Drop invalid state packets (prevents inkernel tracking exploits)
-        iifname "{name}" ct state invalid drop
-        oifname "{name}" ct state invalid drop
-        # Explicitly block all IPv6 forwarded through the bridge (BYPASS-11).
-        # Dynamic allow rules for IPv6 destinations are inserted at chain head
-        # (position 0) with higher priority and use `ip6 saddr/daddr accept`,
-        # so they are evaluated before this rule.
-        iifname "{name}" meta nfproto ipv6 drop
-        oifname "{name}" meta nfproto ipv6 drop
-        # Accept established/related IPv4 connections
-        iifname "{name}" ct state established,related accept
-        oifname "{name}" ct state established,related accept
-    }}
-
-    # BYPASS-11: catch link-local / multicast IPv6 that leaves the agent veth
-    # without being forwarded through the bridge (direct on-link delivery).
-    # The output hook fires for every packet leaving any local process OR
-    # forwarded out of the host — matching on oifname scopes this to the bridge.
-    chain output_ipv6_block {{
-        type filter hook output priority filter; policy accept;
-        oifname "{name}" meta nfproto ipv6 drop
-    }}
-
-    # BYPASS-11: drop unsolicited inbound IPv6 arriving on the bridge
-    # (Router Advertisements, Neighbour Solicitations, MLD queries) that
-    # could be used to inject a default IPv6 route into an agent namespace.
-    chain input_ipv6_block {{
-        type filter hook input priority filter; policy accept;
-        iifname "{name}" meta nfproto ipv6 ct state new drop
-    }}
-}}"#,
-            name = self.name
-        )
     }
 
     /// Execute an nftables ruleset via `nft -f -`.
@@ -397,6 +402,82 @@ impl BridgeManager {
     }
 }
 
+fn render_base_ruleset(name: &str, host_services: HostServiceAccess) -> String {
+    let dns = host_services.dns;
+    let proxy_rule = host_services
+        .proxy
+        .map(|proxy| {
+            format!(
+                "        iifname \"{name}\" ip daddr {} tcp dport {} accept\n",
+                proxy.address, proxy.port
+            )
+        })
+        .unwrap_or_default();
+
+    format!(
+        r#"table inet outcall {{
+    chain forward {{
+        type filter hook forward priority filter; policy drop;
+        # Preserve forwarding that does not touch the managed bridge.
+        iifname != "{name}" oifname != "{name}" accept
+        iifname "{name}" ct state invalid drop
+        oifname "{name}" ct state invalid drop
+        # Dynamic allow rules are inserted at the chain head. Everything else
+        # from or to an agent remains denied, including all IPv6 forwarding.
+        iifname "{name}" meta nfproto ipv6 drop
+        oifname "{name}" meta nfproto ipv6 drop
+        iifname "{name}" ct state established,related accept
+        oifname "{name}" ct state established,related accept
+    }}
+
+    # Agents may reach only the daemon-owned DNS and proxy listeners on the
+    # host. Host tools and files must be exposed through the authenticated
+    # broker rather than arbitrary host TCP/UDP services.
+    chain input_from_agents {{
+        type filter hook input priority filter; policy accept;
+        iifname "{name}" ct state invalid drop
+        iifname "{name}" ip daddr {dns_address} udp dport {dns_port} accept
+        iifname "{name}" ip daddr {dns_address} tcp dport {dns_port} accept
+{proxy_rule}        iifname "{name}" meta nfproto ipv4 drop
+        iifname "{name}" meta nfproto ipv6 drop
+    }}
+
+    # Block IPv6 frames that avoid the forward hook through direct on-link
+    # delivery, link-local addressing, or multicast.
+    chain output_ipv6_block {{
+        type filter hook output priority filter; policy accept;
+        oifname "{name}" meta nfproto ipv6 drop
+    }}
+}}"#,
+        dns_address = dns.address,
+        dns_port = dns.port,
+    )
+}
+
+fn render_ruleset_transaction(
+    name: &str,
+    host_services: HostServiceAccess,
+    table_exists: bool,
+) -> String {
+    let replacement = render_base_ruleset(name, host_services);
+    if table_exists {
+        format!("delete table inet outcall\n{replacement}")
+    } else {
+        replacement
+    }
+}
+
+async fn read_netfilter_setting(path: &str) -> String {
+    match tokio::fs::read_to_string(path).await {
+        Ok(value) => value.trim().to_string(),
+        Err(error) => format!("unavailable ({error})"),
+    }
+}
+
+fn netfilter_settings_enforceable(ipv4: &str, ipv6: &str) -> bool {
+    ipv4.trim() == "1" && ipv6.trim() == "1"
+}
+
 pub fn first_gateway_from_subnet_block(cidr: &str) -> Result<(Ipv4Addr, u8)> {
     let (ip_str, prefix_str) = cidr
         .split_once('/')
@@ -420,7 +501,12 @@ pub fn first_gateway_from_subnet_block(cidr: &str) -> Result<(Ipv4Addr, u8)> {
 
 #[cfg(test)]
 mod tests {
-    use super::first_gateway_from_subnet_block;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    use super::{
+        first_gateway_from_subnet_block, netfilter_settings_enforceable, render_base_ruleset,
+        render_ruleset_transaction, BridgeError, HostServiceAccess, HostServiceEndpoint,
+    };
 
     #[test]
     fn derives_first_gateway_for_default_block() {
@@ -436,5 +522,105 @@ mod tests {
             first_gateway_from_subnet_block("172.30.8.0/20").expect("gateway");
         assert_eq!(gateway.to_string(), "172.30.8.1");
         assert_eq!(prefix_len, 24);
+    }
+
+    #[test]
+    fn listener_access_maps_unspecified_addresses_to_the_bridge_gateway() {
+        let gateway = Ipv4Addr::new(10, 200, 0, 1);
+        let access = HostServiceAccess::from_listeners(
+            gateway,
+            "0.0.0.0:5353".parse().unwrap(),
+            Some("0.0.0.0:8181".parse().unwrap()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            access,
+            HostServiceAccess {
+                dns: HostServiceEndpoint {
+                    address: gateway,
+                    port: 5353,
+                },
+                proxy: Some(HostServiceEndpoint {
+                    address: gateway,
+                    port: 8181,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn listener_access_rejects_ipv6_endpoints() {
+        let gateway = Ipv4Addr::new(10, 200, 0, 1);
+        let dns: SocketAddr = "[::1]:53".parse().unwrap();
+        let error = HostServiceAccess::from_listeners(gateway, dns, None).unwrap_err();
+        assert!(error.to_string().contains("DNS listener"));
+    }
+
+    #[test]
+    fn listener_access_rejects_ephemeral_ports() {
+        let gateway = Ipv4Addr::new(10, 200, 0, 1);
+        let dns: SocketAddr = "10.200.0.1:0".parse().unwrap();
+        let error = HostServiceAccess::from_listeners(gateway, dns, None).unwrap_err();
+        assert!(error.to_string().contains("fixed, non-zero port"));
+    }
+
+    #[test]
+    fn base_rules_allow_only_declared_host_services() {
+        let gateway = Ipv4Addr::new(10, 200, 0, 1);
+        let ruleset =
+            render_base_ruleset("outcall0", HostServiceAccess::default_for_gateway(gateway));
+
+        assert!(ruleset.contains("iifname \"outcall0\" ip daddr 10.200.0.1 udp dport 53 accept"));
+        assert!(ruleset.contains("iifname \"outcall0\" ip daddr 10.200.0.1 tcp dport 8080 accept"));
+        assert!(ruleset.contains("iifname \"outcall0\" meta nfproto ipv4 drop"));
+        assert!(ruleset.contains("iifname \"outcall0\" meta nfproto ipv6 drop"));
+        assert!(!ruleset.contains("dport 22 accept"));
+    }
+
+    #[test]
+    fn base_rules_omit_proxy_exception_when_proxy_is_disabled() {
+        let gateway = Ipv4Addr::new(10, 200, 0, 1);
+        let access = HostServiceAccess {
+            dns: HostServiceEndpoint {
+                address: gateway,
+                port: 53,
+            },
+            proxy: None,
+        };
+
+        let ruleset = render_base_ruleset("outcall0", access);
+        assert!(!ruleset.contains("tcp dport 8080 accept"));
+        assert!(ruleset.contains("meta nfproto ipv4 drop"));
+    }
+
+    #[test]
+    fn existing_policy_is_replaced_in_one_nft_transaction() {
+        let gateway = Ipv4Addr::new(10, 200, 0, 1);
+        let ruleset = render_ruleset_transaction(
+            "outcall0",
+            HostServiceAccess::default_for_gateway(gateway),
+            true,
+        );
+
+        assert!(ruleset.starts_with("delete table inet outcall\ntable inet outcall"));
+        assert_eq!(ruleset.matches("table inet outcall").count(), 2);
+    }
+
+    #[test]
+    fn both_bridge_netfilter_hooks_are_required() {
+        assert!(netfilter_settings_enforceable("1\n", "1"));
+        assert!(!netfilter_settings_enforceable("0", "1"));
+        assert!(!netfilter_settings_enforceable("1", "0"));
+        assert!(!netfilter_settings_enforceable("missing", "1"));
+    }
+
+    #[test]
+    fn bridge_operation_errors_preserve_the_source_message() {
+        let error = BridgeError::Operation(anyhow::anyhow!("security preflight failed"));
+        assert_eq!(
+            error.to_string(),
+            "bridge operation failed: security preflight failed"
+        );
     }
 }

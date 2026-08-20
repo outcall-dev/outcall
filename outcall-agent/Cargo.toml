@@ -5,6 +5,9 @@ edition = "2024"
 description = "Agent shim for Outcall (runs inside containers)"
 license = "Apache-2.0"
 
+[lints]
+workspace = true
+
 [dependencies]
 outcall-api = { path = "../outcall-api", version = "0.1.25" }
 serde = { version = "1", features = ["derive"] }

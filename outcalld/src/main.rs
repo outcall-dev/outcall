@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use anyhow::Result;
 use clap::Parser;
 use tracing::info;
@@ -182,13 +184,27 @@ async fn linux_main(args: Args) -> Result<()> {
         );
     }
 
+    let dns_listen: SocketAddr = format!("{}:{}", args.dns_listen, args.dns_port)
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid DNS listen address: {e}"))?;
+    let proxy_addr: SocketAddr = args
+        .proxy_addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --proxy-addr: {e}"))?;
+
     // Initialize bridge (S001) — creates outcall0 + applies base nftables ruleset.
     let (bridge_gateway_ip, bridge_gateway_prefix_len) =
         bridge::first_gateway_from_subnet_block(&args.subnet_block)?;
+    let host_services = bridge::HostServiceAccess::from_listeners(
+        bridge_gateway_ip,
+        dns_listen,
+        (!args.no_proxy).then_some(proxy_addr),
+    )?;
     let mut bridge_mgr = bridge::BridgeManager::new(
         Some(&args.bridge),
         bridge_gateway_ip,
         bridge_gateway_prefix_len,
+        host_services,
     )
     .await?;
     bridge_mgr.init().await?;
@@ -228,28 +244,17 @@ async fn linux_main(args: Args) -> Result<()> {
     );
 
     // Initialize DNS filter (FR-003: Tokio task inside outcalld)
-    let dns_listen: SocketAddr = format!("{}:{}", args.dns_listen, args.dns_port).parse()?;
     let upstreams = dns::parse_upstream_arg(&args.dns_upstream);
     let dns_server = dns::DnsServer::new(dns_listen, upstreams);
-    match dns_server
+    dns_server
         .start(rule_engine.clone(), dynamic_mgr.clone())
         .await
-    {
-        Ok(()) => info!("DNS filter started on {dns_listen}"),
-        Err(e) => {
-            // EC-008: bind failure doesn't stop the daemon
-            tracing::error!("DNS filter failed to start: {e} — continuing without DNS filtering");
-        }
-    }
+        .map_err(|e| anyhow::anyhow!("DNS filter failed to bind {dns_listen}: {e}"))?;
+    info!("DNS filter started on {dns_listen}");
 
     // Initialize HTTP proxy (S006). Pass DockerManager so the proxy can
     // resolve peer-IP → container-name → agent.name for CEL rules (S013).
-    let proxy_server = proxy::ProxyServer::new(
-        args.proxy_addr
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid --proxy-addr: {e}"))?,
-        Some(docker_manager.clone()),
-    );
+    let proxy_server = proxy::ProxyServer::new(proxy_addr, Some(docker_manager.clone()));
     if !args.no_proxy {
         if let Err(e) = proxy_server.start(rule_engine.clone()).await {
             return Err(anyhow::anyhow!(
@@ -271,9 +276,7 @@ async fn linux_main(args: Args) -> Result<()> {
     )?;
     info!(subnet_block = %args.subnet_block, "Network Manager initialized");
 
-    // Capture daemon effective UID here (binary crate — `unsafe` allowed)
-    // so the lib crate (`api.rs`) can remain `#![forbid(unsafe_code)]`.
-    let daemon_uid: u32 = unsafe { libc::geteuid() };
+    let daemon_uid = rustix::process::geteuid().as_raw();
 
     let (perm_count, perm_window) = parse_rate(&args.agent_perm_rate);
     let (rule_count, rule_window) = parse_rate(&args.agent_rule_rate);
@@ -325,10 +328,12 @@ async fn linux_main(args: Args) -> Result<()> {
 
     // Defence-in-depth: restrict umask so the socket node has tight perms from
     // the moment the kernel creates it (before our explicit chmod below).
-    let old_umask = unsafe { libc::umask(0o077) };
-    let listener = tokio::net::UnixListener::bind(&args.socket)?;
-    // Restore umask immediately so the rest of the process is unaffected.
-    unsafe { libc::umask(old_umask) };
+    let old_umask = rustix::process::umask(rustix::fs::Mode::from(0o077));
+    let listener_result = tokio::net::UnixListener::bind(&args.socket);
+    // Restore umask before propagating a bind error so the process is never
+    // left with a caller-visible global setting change.
+    rustix::process::umask(old_umask);
+    let listener = listener_result?;
 
     // Explicitly enforce 0600 regardless of whatever umask was in effect before.
     {
@@ -337,12 +342,11 @@ async fn linux_main(args: Args) -> Result<()> {
         perms.set_mode(0o600);
         std::fs::set_permissions(&args.socket, perms)?;
     }
-    unsafe {
-        let socket_path = std::ffi::CString::new(args.socket.as_str())?;
-        if libc::chown(socket_path.as_ptr(), args.operator_uid, args.operator_gid) != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-    }
+    rustix::fs::chown(
+        &args.socket,
+        Some(rustix::process::Uid::from_raw(args.operator_uid)),
+        Some(rustix::process::Gid::from_raw(args.operator_gid)),
+    )?;
     info!(
         socket = %args.socket,
         owner_uid = args.operator_uid,

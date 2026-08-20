@@ -5,6 +5,9 @@ edition = "2024"
 description = "Dashboard web UI for Outcall"
 license = "Apache-2.0"
 
+[lints]
+workspace = true
+
 [lib]
 name = "outcall_ui"
 path = "src/lib.rs"

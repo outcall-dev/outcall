@@ -129,7 +129,7 @@ jobs:
             -v "$PWD:/workspace" \
             -w /workspace \
             -e OUTCALL_PROXY_ADDR=172.30.0.1:8080 \
-            rust:latest \
+            rust:1.88-bookworm \
             bash -c 'set -eu
                      apt-get update
                      apt-get install -y nftables iproute2
@@ -139,7 +139,10 @@ jobs:
                      ip link set outcall0 up
                      export PATH="$PWD/target/debug:$PATH"
                      cargo build --workspace --locked
-                     cargo test --workspace --tests -- --ignored --test-threads=1'
+                     cargo test --workspace --tests -- --ignored --test-threads=1
+                     OUTCALL_REQUIRE_PRIVILEGED_TESTS=1 \
+                       cargo test -p outcalld --test bridge_integration -- \
+                         --nocapture --test-threads=1'
 
   installer-smoke:
     name: installer smoke (linux)
@@ -275,6 +278,7 @@ jobs:
     name: secure install + runtime + security validation
     # Keep host-built binaries compatible with the Debian Bookworm runtime image.
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
@@ -282,9 +286,19 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install runtime dependencies
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl tar gzip iproute2 nftables iptables make
+          sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            install -y --no-install-recommends \
+            curl tar gzip iproute2 nftables iptables make
 
       - name: Build release binaries
         run: cargo build --release --workspace --locked
@@ -399,70 +413,20 @@ jobs:
           test -f .outcall/agent.yaml
           docker inspect "$AGENT_NAME" >/dev/null
 
-      - name: Security integration (bridge state + leak checks)
-        run: |
-          ROOT_DIR="$(git rev-parse --show-toplevel)"
-          CARGO_BIN="$(rustup which --toolchain "${RUSTUP_TOOLCHAIN:-stable}" cargo 2>/dev/null || true)"
-          if [ -z "$CARGO_BIN" ] && command -v cargo >/dev/null 2>&1; then
-            CARGO_BIN="$(command -v cargo)"
-          fi
-          CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
-          if [ -f "$ROOT_DIR/scripts/test-bridge.sh" ] && [ -d "$ROOT_DIR/application" ]; then
-            sudo bash "$ROOT_DIR/scripts/test-bridge.sh"
-          else
-            sudo env \
-              PATH="$CARGO_BIN_DIR:$PATH" \
-              RUSTC="$CARGO_BIN_DIR/rustc" \
-              "$CARGO_BIN" test -p outcalld --test bridge_integration -- --nocapture
-          fi
-
       - name: Security integration (container isolation)
+        run: scripts/test-container-isolation.sh
+
+      - name: Security integration (managed container profile)
         run: |
-          ROOT_DIR="$(git rev-parse --show-toplevel)"
-          CARGO_BIN="$(rustup which --toolchain "${RUSTUP_TOOLCHAIN:-stable}" cargo 2>/dev/null || true)"
-          if [ -z "$CARGO_BIN" ] && command -v cargo >/dev/null 2>&1; then
-            CARGO_BIN="$(command -v cargo)"
-          fi
-          CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
-          if [ -f "$ROOT_DIR/Makefile" ]; then
-            make build
-            make stop >/dev/null 2>&1 || true
-            if [ -f "$ROOT_DIR/scripts/test-isolation.sh" ] && [ -d "$ROOT_DIR/application" ]; then
-              bash "$ROOT_DIR/scripts/test-isolation.sh" --skip-build
-            else
-              sudo env \
-                PATH="$CARGO_BIN_DIR:$PATH" \
-                RUSTC="$CARGO_BIN_DIR/rustc" \
-                "$CARGO_BIN" test -p outcalld --test bridge_integration -- --test-threads=1 --nocapture
-            fi
-          else
-            sudo env \
-              PATH="$CARGO_BIN_DIR:$PATH" \
-              RUSTC="$CARGO_BIN_DIR/rustc" \
-              "$CARGO_BIN" test -p outcalld --test bridge_integration -- --test-threads=1 --nocapture
-          fi
+          scripts/test-managed-container-security.sh \
+            outcall-smoke-claude-1 \
+            outcall-smoke-codex-1
 
       - name: Verify preflight hard-fails when netfilter is disabled
         run: |
-          set -eu
-          export PATH="$RUNNER_TEMP/outcall-bin:$PATH"
-          PROJECT_DIR="$RUNNER_TEMP/outcall-smoke-claude"
-          cd "$PROJECT_DIR"
-          sudo sysctl -w net.bridge.bridge-nf-call-iptables=0
-          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=0
-          set +e
-          outcall recipe test claude --no-build > /tmp/outcall-preflight.log 2>&1
-          status=$?
-          set -e
-          if [ "$status" -eq 0 ]; then
-            echo "preflight unexpectedly passed when bridge netfilter was disabled"
-            echo "--- preflight output ---"
-            cat /tmp/outcall-preflight.log
-            exit 1
-          fi
-          grep -q "Secure unattended mode requires bridge netfilter enforcement" /tmp/outcall-preflight.log
-          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
-          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+          OUTCALL_BIN="$RUNNER_TEMP/outcall-bin/outcall" \
+            scripts/test-netfilter-preflight.sh \
+              "$RUNNER_TEMP/outcall-smoke-codex" codex
 
   fmt:
     name: cargo fmt
@@ -519,16 +483,14 @@ jobs:
       - name: cargo audit
         run: cargo audit
 
-  geiger:
-    name: cargo geiger (unsafe check)
+  unsafe-policy:
+    name: first-party unsafe policy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -536,37 +498,8 @@ jobs:
           shared-key: "outcall"
           cache-on-failure: false
 
-      - name: Install cargo-geiger
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-geiger
-
-      - name: cargo geiger (outcalld)
-        run: cd outcalld && cargo geiger --all-targets || true
-
-      - name: cargo geiger (outcall)
-        run: cd outcall && cargo geiger --all-targets || true
-
-      - name: cargo geiger (outcall-agent)
-        run: cd outcall-agent && cargo geiger --all-targets || true
-
-      - name: cargo geiger (outcall-api)
-        run: cd outcall-api && cargo geiger --all-targets || true
-
-      - name: cargo geiger (outcall-ui)
-        run: cd outcall-ui && cargo geiger --all-targets || true
-
-      - name: Check no unsafe code
-        run: |
-          if grep -r '#\[unsafe\]' outcalld/src/ --include='*.rs' 2>/dev/null; then
-            echo 'Unsafe code found!'
-            exit 1
-          fi
-          if grep -rn 'allow(unsafe' outcalld/src/ --include='*.rs' 2>/dev/null; then
-            echo 'Unsafe allow annotations found!'
-            exit 1
-          fi
-          echo "No unsafe code found — geiger check passed"
+      - name: Compile every first-party target with unsafe code forbidden
+        run: cargo check --workspace --all-targets --locked
 
   deny:
     name: cargo deny (licenses + bans)
