@@ -7,3 +7,6 @@ members = [
     "outcall-api",
     "outcall-ui",
 ]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

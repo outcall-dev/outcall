@@ -544,9 +544,15 @@ mod tests {
 
     #[tokio::test]
     async fn unavailable_docker_does_not_block_manager_initialization() {
-        let bridge = BridgeManager::new(Some("outcall0"), "10.200.0.1".parse().unwrap(), 16)
-            .await
-            .unwrap();
+        let gateway = "10.200.0.1".parse().unwrap();
+        let bridge = BridgeManager::new(
+            Some("outcall0"),
+            gateway,
+            16,
+            crate::bridge::HostServiceAccess::default_for_gateway(gateway),
+        )
+        .await
+        .unwrap();
         let docker = DockerManager::new_unavailable();
         let manager = NetworkManager::new(
             Arc::new(tokio::sync::Mutex::new(bridge)),

@@ -224,18 +224,7 @@ impl DockerManager {
             networking_config: Some(NetworkingConfig {
                 endpoints_config: endpoints,
             }),
-            host_config: Some(HostConfig {
-                binds: Some(binds),
-                memory: Some(memory),
-                cpu_shares: Some(cpu_shares),
-                pids_limit: Some(DEFAULT_PID_LIMIT),
-                readonly_rootfs: Some(true), // bollard field name (no underscore split)
-                privileged: Some(false),
-                cap_drop: Some(vec!["ALL".to_string()]),
-                dns: Some(vec![dns_addr.to_string()]),
-                tmpfs: Some(HashMap::from([("/tmp".to_string(), "".to_string())])),
-                ..Default::default()
-            }),
+            host_config: Some(managed_host_config(binds, memory, cpu_shares, dns_addr)),
             ..Default::default()
         };
 
@@ -664,6 +653,27 @@ async fn event_watch_loop(docker: Docker, tx: broadcast::Sender<ContainerEvent>)
 
 // ── Utility functions ─────────────────────────────────────────────────────────
 
+fn managed_host_config(
+    binds: Vec<String>,
+    memory: i64,
+    cpu_shares: i64,
+    dns_addr: &str,
+) -> HostConfig {
+    HostConfig {
+        binds: Some(binds),
+        memory: Some(memory),
+        cpu_shares: Some(cpu_shares),
+        pids_limit: Some(DEFAULT_PID_LIMIT),
+        readonly_rootfs: Some(true),
+        privileged: Some(false),
+        cap_drop: Some(vec!["ALL".to_string()]),
+        security_opt: Some(vec!["no-new-privileges:true".to_string()]),
+        dns: Some(vec![dns_addr.to_string()]),
+        tmpfs: Some(HashMap::from([("/tmp".to_string(), "".to_string())])),
+        ..Default::default()
+    }
+}
+
 /// Generate 8 random lowercase hex characters via the OS RNG.
 fn random_hex_suffix() -> String {
     let mut buf = [0u8; 4];
@@ -771,5 +781,31 @@ mod tests {
         let name = format!("outcall-{}", random_hex_suffix());
         assert!(name.starts_with("outcall-"), "auto name: {name}");
         assert_eq!(name.len(), "outcall-".len() + 8);
+    }
+
+    #[test]
+    fn managed_containers_have_a_fail_closed_host_config() {
+        let config = managed_host_config(
+            vec!["/host:/workspace".to_string()],
+            DEFAULT_MEMORY_LIMIT,
+            DEFAULT_CPU_SHARES,
+            "10.200.0.1",
+        );
+
+        assert_eq!(config.privileged, Some(false));
+        assert_eq!(config.readonly_rootfs, Some(true));
+        assert_eq!(config.cap_drop, Some(vec!["ALL".to_string()]));
+        assert_eq!(
+            config.security_opt,
+            Some(vec!["no-new-privileges:true".to_string()])
+        );
+        assert_eq!(config.pids_limit, Some(DEFAULT_PID_LIMIT));
+        assert_eq!(config.memory, Some(DEFAULT_MEMORY_LIMIT));
+        assert_eq!(config.cpu_shares, Some(DEFAULT_CPU_SHARES));
+        assert_eq!(config.dns, Some(vec!["10.200.0.1".to_string()]));
+        assert_eq!(
+            config.tmpfs,
+            Some(HashMap::from([("/tmp".to_string(), "".to_string())]))
+        );
     }
 }

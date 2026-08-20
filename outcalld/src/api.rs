@@ -72,9 +72,8 @@ impl
 /// receives 403 Forbidden. If peer credentials are unavailable the connection
 /// is also rejected.
 ///
-/// `daemon_uid` is captured once at startup so this module avoids any `unsafe`
-/// libc calls (the lib crate enforces `#![forbid(unsafe_code)]`); main.rs is
-/// the binary crate where the libc call lives.
+/// `daemon_uid` is captured once at startup through the safe `rustix` process
+/// API and passed into the router explicitly.
 pub fn require_operator_uid(
     daemon_uid: u32,
     operator_uid: u32,
@@ -368,6 +367,15 @@ async fn container_create(
 ) -> Json<ApiResponse<ContainerCreateResult>> {
     if state.docker.is_unavailable() {
         return Json(ApiResponse::err("Docker manager unavailable"));
+    }
+    if let Err(error) = state
+        .bridge
+        .lock()
+        .await
+        .require_netfilter_enforceable()
+        .await
+    {
+        return Json(ApiResponse::err(error.to_string()));
     }
     // Derive proxy and DNS addresses from the running subsystems.
     let proxy_addr = state.proxy.listen_addr.to_string();

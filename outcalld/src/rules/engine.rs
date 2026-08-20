@@ -429,8 +429,7 @@ fn expand_recursive(
 
 /// Build a CEL evaluation context from the API EvalContext.
 /// Absent namespaces are injected with zero values (FR-005.f).
-#[allow(dead_code, mismatched_lifetime_syntaxes)]
-fn build_cel_context(ctx: &EvalContext) -> CelCtx {
+fn build_cel_context(ctx: &EvalContext) -> CelCtx<'static> {
     let mut cel = CelCtx::default();
 
     let net = ctx.network.as_ref().cloned().unwrap_or_default();

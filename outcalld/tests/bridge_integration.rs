@@ -28,6 +28,23 @@ fn is_root() -> bool {
         .unwrap_or(false)
 }
 
+fn has_cap_net_admin() -> bool {
+    const CAP_NET_ADMIN_BIT: u64 = 1 << 12;
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("CapEff:\t"))
+                .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
+        })
+        .is_some_and(|capabilities| capabilities & CAP_NET_ADMIN_BIT != 0)
+}
+
+fn require_privileged_tests() -> bool {
+    std::env::var_os("OUTCALL_REQUIRE_PRIVILEGED_TESTS").is_some()
+}
+
 fn ip_link_exists(name: &str) -> bool {
     Command::new("ip")
         .args(["link", "show", name])
@@ -55,11 +72,19 @@ fn ip_addr_exists(name: &str, cidr: &str) -> bool {
 #[tokio::test]
 async fn bridge_lifecycle() {
     if !is_linux() {
+        assert!(
+            !require_privileged_tests(),
+            "privileged bridge test was required on a non-Linux host"
+        );
         eprintln!("SKIP: bridge tests require Linux (netlink + nftables)");
         return;
     }
-    if !is_root() {
-        eprintln!("SKIP: bridge tests require root (run with sudo)");
+    if !is_root() || !has_cap_net_admin() {
+        assert!(
+            !require_privileged_tests(),
+            "privileged bridge test requires root with CAP_NET_ADMIN"
+        );
+        eprintln!("SKIP: bridge tests require root with CAP_NET_ADMIN (run with sudo)");
         return;
     }
 
@@ -75,10 +100,15 @@ async fn bridge_lifecycle() {
 
     // -- Create and initialize --
     let (gateway_ip, gateway_prefix_len) = default_gateway();
-    let mut mgr =
-        outcalld::bridge::BridgeManager::new(Some(bridge_name), gateway_ip, gateway_prefix_len)
-            .await
-            .expect("BridgeManager::new");
+    let host_services = outcalld::bridge::HostServiceAccess::default_for_gateway(gateway_ip);
+    let mut mgr = outcalld::bridge::BridgeManager::new(
+        Some(bridge_name),
+        gateway_ip,
+        gateway_prefix_len,
+        host_services,
+    )
+    .await
+    .expect("BridgeManager::new");
 
     mgr.init().await.expect("bridge init");
 
@@ -116,12 +146,28 @@ async fn bridge_lifecycle() {
         ruleset.contains("established"),
         "ruleset should allow established connections:\n{ruleset}"
     );
+    assert!(
+        ruleset.contains("chain input_from_agents"),
+        "ruleset should restrict agent-to-host traffic:\n{ruleset}"
+    );
+    assert!(
+        ruleset.contains("udp dport 53 accept") && ruleset.contains("tcp dport 8080 accept"),
+        "ruleset should allow daemon DNS and proxy listeners:\n{ruleset}"
+    );
+    assert!(
+        ruleset.contains("meta nfproto ipv4 drop"),
+        "ruleset should deny all other agent-to-host IPv4 traffic:\n{ruleset}"
+    );
 
     // -- Idempotence: init again should not fail --
-    let mut mgr2 =
-        outcalld::bridge::BridgeManager::new(Some(bridge_name), gateway_ip, gateway_prefix_len)
-            .await
-            .expect("BridgeManager::new (second)");
+    let mut mgr2 = outcalld::bridge::BridgeManager::new(
+        Some(bridge_name),
+        gateway_ip,
+        gateway_prefix_len,
+        host_services,
+    )
+    .await
+    .expect("BridgeManager::new (second)");
     mgr2.init().await.expect("bridge init (idempotent)");
 
     // -- Teardown --
