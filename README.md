@@ -26,6 +26,18 @@ Five Cargo crates:
 cargo build --workspace
 ```
 
+Run the review gates locally with:
+
+```sh
+cargo test --workspace --all-targets --locked
+make spec-check
+make coverage
+```
+
+`make coverage` writes `target/coverage/lcov.info` and enforces the current
+workspace regression floor. Privileged tests remain separate because they
+require a Linux runtime with network administration capabilities.
+
 Linux is still the native daemon runtime, but macOS is supported for the
 first-run Claude/Codex recipe flow by running `outcalld` and the agent
 containers inside Docker Desktop's Linux VM.
@@ -90,6 +102,11 @@ daemon and managed network exist, and then starts the isolated agent container.
 It persists the selected recipe for policy and setup commands, but every launch
 remains explicit.
 
+Managed agent processes run as the invoking user's numeric non-root UID/GID so
+project and staged-auth bind mounts remain usable on Linux and macOS. The
+daemon rejects root identities and uses `65532:65532` for older clients that do
+not send an identity.
+
 If the first run stops on a prerequisite, inspect the host and recipe checks
 directly:
 
@@ -120,12 +137,29 @@ outcall run claude --detach
 outcall run codex --detach
 ```
 
-Recipes do not mount your whole home directory. Auto auth first uses recognized
-provider environment credentials. Without those, it copies only the selected
-provider auth/config paths into `.outcall/auth/<id>/home`; on macOS, Claude
-instead mounts the selected `~/.claude` paths to preserve their home layout.
-macOS Keychain-backed login state is not portable into the Linux container and
-may still require interactive `/login`.
+Detached interactive launches allocate a container TTY and remain available
+through `outcall attach <name>`. Detach without stopping the agent with
+Ctrl+P, then Ctrl+Q; use `outcall logs <name> --follow` and
+`outcall inspect <name>` / `outcall stop <name>` for the rest of its lifecycle.
+Top-level `stop` removes the stopped agent so its numeric name can be reused;
+pass `--keep` to retain it for postmortem logs or inspection.
+
+Recipes do not mount your whole home directory. Auto auth uses non-empty
+provider environment credentials when present. Otherwise it copies only the
+portable credential into ignored `.outcall/home/<id>` state. Pass
+`--include-global-config` to additionally copy the recipe's bounded allowlist of
+global settings, instructions, and hooks after reviewing host-only MCP and hook
+commands. Symlinks are skipped; files over 16 MiB, more than 10,000 entries, or
+more than 100 MiB total are rejected. The project-local home is mounted at the
+validated Linux home (`/home/node`) inside the container. Provider CLIs resolve
+`~` there; Outcall does not rewrite host-absolute executable paths, which
+generally do not work in the Linux runtime.
+
+`--auth mount` is a read-write opt-in for the complete provider directory, not
+the complete host home. macOS Keychain-backed Claude login state is not portable
+into Linux. Run `outcall run claude` once and complete `/login` in the container,
+or use a setup token for unattended work. Batch and detached inference commands
+fail before image build when no portable credential is available.
 
 For unattended Claude subscription runs, generate a long-lived token on the
 host and export it only in the launch environment:
@@ -145,12 +179,10 @@ Each project scaffold also includes `.outcall/host-resources.yaml` as the
 explicit registry for host tools, host file roots, and auth/session handoff
 notes that sit outside `/workspace`.
 
-For host-native tools or host files outside `/workspace`, run the manual broker
-on the host:
-
-```sh
-outcall host-broker serve
-```
+When the registry contains a tool or file declaration, `outcall run` starts the
+project broker automatically and injects its authenticated endpoint into the
+container. `outcall host-broker serve` remains available for low-level broker
+development and diagnostics.
 
 The broker is deny-by-default:
 
@@ -158,37 +190,47 @@ The broker is deny-by-default:
 - every request is still evaluated against the active daemon rules before the
   host action runs
 
+The v1 broker executes bounded, one-shot tool commands and returns their
+captured output. It does not transparently forward long-lived stdio, SSE, or
+Streamable HTTP MCP sessions. Install an MCP server in the Linux recipe image
+when possible so normal Outcall egress rules govern it, or expose a narrow host
+wrapper that completes one operation per broker request.
+
 ## Running `outcalld`
 
-`outcalld` requires several capabilities and a Docker socket bind-mount.
+`outcalld` requires a Docker socket bind-mount. Its managed container receives
+only the capabilities needed by the selected transport.
 
 ### Required runtime flags
 
 | Flag | Why |
 |---|---|
+| `--cap-drop ALL` | Remove Docker's default Linux capability set |
 | `--cap-add NET_ADMIN` | Create bridges, configure interfaces, apply nftables |
+| `--cap-add NET_BIND_SERVICE` | Bind the managed DNS listener on port 53 |
+| `--security-opt no-new-privileges` | Prevent privilege gains through image executables |
+| `--pids-limit 512` | Bound daemon process creation |
 | `--network host` | Daemon must see the host network namespace |
+| `--pid host` | Resolve host network PIDs to their Docker container identities |
 | `-v /var/run/docker.sock:/var/run/docker.sock` | Manage Docker networks and look up containers by PID |
 
-`SYS_ADMIN` is **not** required by the daemon's current code paths
-(verified against `outcalld/src/bridge.rs`); some kernels are stricter
-about netlink and may surface `EPERM` on bridge bringup. Add
-`--cap-add SYS_ADMIN` only if that happens.
+Native Unix-socket transport on Linux additionally receives `CHOWN` and
+`DAC_OVERRIDE` so the daemon can create operator-owned sockets in the mounted
+runtime directory. Docker-exec transport on macOS does not receive those two
+capabilities. `SYS_ADMIN` is **not** required; do not broaden the capability set
+to work around a failed preflight.
 
 ### Example
 
 ```sh
-docker run -d --rm \
-    --name outcall-daemon \
-    --network host \
-    --cap-add NET_ADMIN \
-    --cap-add SYS_ADMIN \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v /tmp/outcall:/tmp/outcall \
-    -v /etc/outcall:/etc/outcall \
-    ghcr.io/outcall-dev/outcalld:latest \
-    --bridge outcall0
+outcall daemon start
+outcall daemon status
 ```
+
+The CLI also applies a read-only root filesystem, bounded `/tmp` tmpfs,
+`unless-stopped` restart policy, persistent state volume, identity labels, and
+the correct rules/socket mounts. Prefer it to maintaining a raw `docker run`
+invocation by hand.
 
 `Dockerfile.test` remains available for local debug builds. Release images are
 published from `Dockerfile`.
@@ -214,7 +256,9 @@ published from `Dockerfile`.
 
 If port `8080` is already bound on the host, pass `--no-proxy` (or change `--proxy-addr`) to avoid the bind error.
 
-For the TLS-interception flags (`--ca-cert`, `--ca-key`, `--intercept-leaf-ttl-secs`, `--intercept-body-cap-bytes`) — accepted today but no-op until S011 ships — see the [Configuration guide](https://outcall.dev/docs/guides/configuration).
+TLS interception is not available yet. `egress.mode: intercept` and the draft
+S011 daemon flags are rejected rather than accepted as inert security settings.
+Use `egress.mode: proxy` for HTTPS hostname policy until S011 ships.
 
 ## Specifications
 

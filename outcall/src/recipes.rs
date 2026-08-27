@@ -3,6 +3,23 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+use crate::secure_fs::{ensure_secure_subdir, write_runtime_file};
+
+mod auth;
+mod catalog;
+
+pub use auth::{
+    AuthMountPlan, AuthStaging, auth_mount_plan, expanded_path, has_credential_file_in_home,
+    has_host_credential_file, stage_auth_copy, stage_global_config_copy,
+};
+#[cfg(test)]
+use auth::{
+    MAX_AUTH_COPY_FILE_BYTES, auth_mount_plan_with_home, stage_auth_copy_with_home,
+    stage_auth_copy_with_home_options, stage_global_config_copy_with_home,
+};
+use catalog::HOST_RESOURCES_TEMPLATE;
+pub use catalog::RECIPES;
+
 #[derive(Debug, Clone)]
 pub struct Recipe {
     pub id: &'static str,
@@ -16,7 +33,10 @@ pub struct Recipe {
     pub agent_config: &'static str,
     pub policy_templates: &'static [PolicyTemplate],
     pub auth_env: &'static [&'static str],
+    pub credential_paths: &'static [&'static str],
     pub user_paths: &'static [&'static str],
+    pub global_config_paths: &'static [&'static str],
+    pub mount_paths: &'static [&'static str],
     pub project_paths: &'static [&'static str],
 }
 
@@ -28,428 +48,6 @@ pub struct PolicyTemplate {
     pub condition: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthStaging {
-    pub home_dir: PathBuf,
-    pub copied: Vec<(PathBuf, PathBuf)>,
-    pub missing: Vec<&'static str>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthMountPlan {
-    pub mounts: Vec<String>,
-    pub home_override: Option<String>,
-}
-
-const CLAUDE_AUTH_ENV: &[&str] = &[
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-];
-const CLAUDE_USER_PATHS: &[&str] = &["~/.claude", "~/.claude.json"];
-const CLAUDE_PROJECT_PATHS: &[&str] = &["CLAUDE.md", ".claude/settings.json"];
-
-const CODEX_AUTH_ENV: &[&str] = &["CODEX_ACCESS_TOKEN", "CODEX_API_KEY"];
-const CODEX_USER_PATHS: &[&str] = &[
-    "~/.codex/auth.json",
-    "~/.codex/config.toml",
-    "~/.codex/AGENTS.md",
-];
-const CODEX_PROJECT_PATHS: &[&str] = &["AGENTS.md", ".codex/config.toml"];
-
-const CLAUDE_GITHUB_POLICY: PolicyTemplate = PolicyTemplate {
-    name: "github",
-    id: "claude-github",
-    description: "Claude Code may access GitHub for repository operations.",
-    condition: "http.host == \"github.com\" || http.host.endsWith(\".github.com\") || dns.query == \"github.com\" || dns.query.endsWith(\".github.com\")",
-};
-
-const CODEX_GITHUB_POLICY: PolicyTemplate = PolicyTemplate {
-    name: "github",
-    id: "codex-github",
-    description: "Codex may access GitHub for repository operations.",
-    condition: "http.host == \"github.com\" || http.host.endsWith(\".github.com\") || dns.query == \"github.com\" || dns.query.endsWith(\".github.com\")",
-};
-
-const CLAUDE_API_POLICY: PolicyTemplate = PolicyTemplate {
-    name: "anthropic",
-    id: "claude-anthropic-api",
-    description: "Claude Code may call Anthropic APIs over HTTPS.",
-    condition: "http.host == \"api.anthropic.com\" || dns.query == \"api.anthropic.com\"",
-};
-
-const CODEX_API_POLICY: PolicyTemplate = PolicyTemplate {
-    name: "openai",
-    id: "codex-openai-api",
-    description: "Codex may call OpenAI and ChatGPT endpoints over HTTPS.",
-    condition: "http.host == \"api.openai.com\" || http.host == \"chatgpt.com\" || dns.query == \"api.openai.com\" || dns.query == \"chatgpt.com\"",
-};
-
-const CLAUDE_POLICY_TEMPLATES: &[PolicyTemplate] = &[CLAUDE_API_POLICY, CLAUDE_GITHUB_POLICY];
-const CODEX_POLICY_TEMPLATES: &[PolicyTemplate] = &[CODEX_API_POLICY, CODEX_GITHUB_POLICY];
-
-const CLAUDE_MANIFEST: &str = r#"schema: outcall.recipe/v1
-id: claude
-name: Claude Code
-version: 0.1.0
-description: Run Claude Code inside an Outcall-managed project container.
-image:
-  local_name: outcall-recipe-claude:local
-  dockerfile: .outcall/recipes/claude/Dockerfile
-agent:
-  entrypoint: claude
-workspace:
-  host: .
-  container: /workspace
-  mode: rw
-auth:
-  default_mode: auto
-  env:
-    - CLAUDE_CODE_OAUTH_TOKEN
-    - ANTHROPIC_API_KEY
-    - ANTHROPIC_AUTH_TOKEN
-  user_paths:
-    - ~/.claude
-    - ~/.claude.json
-context:
-  project_paths:
-    - CLAUDE.md
-    - .claude/settings.json
-egress:
-  rules: .outcall/rules/claude.yaml
-verify:
-  checks:
-    - claude --version
-    - auth material present
-    - project context present
-"#;
-
-const CODEX_MANIFEST: &str = r#"schema: outcall.recipe/v1
-id: codex
-name: Codex CLI
-version: 0.1.0
-description: Run Codex CLI inside an Outcall-managed project container.
-image:
-  local_name: outcall-recipe-codex:local
-  dockerfile: .outcall/recipes/codex/Dockerfile
-agent:
-  entrypoint: codex
-workspace:
-  host: .
-  container: /workspace
-  mode: rw
-auth:
-  default_mode: copy
-  env:
-    - CODEX_ACCESS_TOKEN
-    - CODEX_API_KEY
-  user_paths:
-    - ~/.codex/auth.json
-    - ~/.codex/config.toml
-    - ~/.codex/AGENTS.md
-context:
-  project_paths:
-    - AGENTS.md
-    - .codex/config.toml
-egress:
-  rules: .outcall/rules/codex.yaml
-verify:
-  checks:
-    - codex --version
-    - auth material present
-    - project instructions present
-"#;
-
-const CLAUDE_DOCKERFILE: &str = r#"FROM node:22-bookworm-slim
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates git openssh-client bash curl gnupg \
-  && install -d -m 0755 /etc/apt/keyrings \
-  && curl -fsSL https://downloads.claude.ai/keys/claude-code.asc \
-    -o /etc/apt/keyrings/claude-code.asc \
-  && gpg --batch --show-keys --with-colons /etc/apt/keyrings/claude-code.asc \
-    | grep -q ':31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE:' \
-  && printf '%s\n' \
-    'deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/stable stable main' \
-    > /etc/apt/sources.list.d/claude-code.list \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends claude-code \
-  && rm -rf /var/lib/apt/lists/* /root/.gnupg \
-  && claude --version
-
-WORKDIR /workspace
-ENTRYPOINT ["claude"]
-"#;
-
-const CODEX_DOCKERFILE: &str = r#"FROM node:22-bookworm-slim
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates git openssh-client bash curl \
-  && rm -rf /var/lib/apt/lists/*
-
-RUN npm install -g @openai/codex \
-  && codex --version
-
-WORKDIR /workspace
-ENTRYPOINT ["codex"]
-"#;
-
-const CLAUDE_RULES: &str = r#"version: "1"
-rules:
-  - id: claude-anthropic-api
-    description: Claude Code may call Anthropic APIs over HTTPS.
-    condition: 'http.host == "api.anthropic.com" || dns.query == "api.anthropic.com"'
-    action: allow
-    egress:
-      mode: proxy
-
-  - id: claude-github
-    description: Claude Code may access GitHub for repository operations.
-    condition: 'http.host == "github.com" || http.host.endsWith(".github.com") || dns.query == "github.com" || dns.query.endsWith(".github.com")'
-    action: allow
-    egress:
-      mode: proxy
-"#;
-
-const CODEX_RULES: &str = r#"version: "1"
-rules:
-  - id: codex-openai-api
-    description: Codex may call OpenAI and ChatGPT endpoints over HTTPS.
-    condition: 'http.host == "api.openai.com" || http.host == "chatgpt.com" || dns.query == "api.openai.com" || dns.query == "chatgpt.com"'
-    action: allow
-    egress:
-      mode: proxy
-
-  - id: codex-github
-    description: Codex may access GitHub for repository operations.
-    condition: 'http.host == "github.com" || http.host.endsWith(".github.com") || dns.query == "github.com" || dns.query.endsWith(".github.com")'
-    action: allow
-    egress:
-      mode: proxy
-"#;
-
-const CLAUDE_README: &str = r#"# Outcall Claude Code Recipe
-
-This recipe prepares a project-local Outcall profile for Claude Code.
-
-Generated files:
-
-- `.outcall/recipes/claude/recipe.yaml`
-- `.outcall/recipes/claude/Dockerfile`
-- `.outcall/recipes/claude/context.md`
-- `.outcall/rules/claude.yaml`
-- `.outcall/agent.yaml`
-- `.outcall/host-resources.yaml`
-
-Context and auth candidates:
-
-- Project context: `CLAUDE.md`, `.claude/settings.json`
-- User config/auth: `~/.claude`, `~/.claude.json`
-- Subscription auth: `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`
-- API auth: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`
-
-Use `outcall doctor claude` before running the container.
-"#;
-
-const CODEX_README: &str = r#"# Outcall Codex Recipe
-
-This recipe prepares a project-local Outcall profile for Codex CLI.
-
-Generated files:
-
-- `.outcall/recipes/codex/recipe.yaml`
-- `.outcall/recipes/codex/Dockerfile`
-- `.outcall/recipes/codex/context.md`
-- `.outcall/rules/codex.yaml`
-- `.outcall/agent.yaml`
-- `.outcall/host-resources.yaml`
-
-Context and auth candidates:
-
-- Project context: `AGENTS.md`, `.codex/config.toml`
-- User config/auth: `~/.codex/auth.json`, `~/.codex/config.toml`, `~/.codex/AGENTS.md`
-- Environment auth: `CODEX_ACCESS_TOKEN`, `CODEX_API_KEY`
-
-Use `outcall doctor codex` before running the container.
-"#;
-
-const CLAUDE_CONTEXT: &str = r#"# Claude Context Transfer
-
-Recommended default: copy selected user configuration into an isolated Docker
-volume or recipe directory, then mount it into the container. Avoid mounting the
-entire home directory.
-
-Transfer candidates:
-
-- `CLAUDE.md` from the project root for project memory.
-- `.claude/settings.json` for project-scoped settings.
-- `~/.claude` and `~/.claude.json` for user-level Claude Code state.
-- `CLAUDE_CODE_OAUTH_TOKEN` for unattended subscription authentication. Generate
-  it on the host with `claude setup-token`, then export it in the launch shell.
-- `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` for API authentication.
-
-Treat copied auth state as secret material. Do not commit `.outcall/auth/`.
-Treat setup tokens as long-lived secrets; Outcall forwards them to the managed
-container but does not write their values into the project scaffold.
-
-Declared host resources are exposed only through the tokenized Outcall broker.
-Use `outcall allow claude tool:<id>` or `outcall allow claude file:<id>` before
-accessing them. The container receives `OUTCALL_HOST_BROKER_TOKEN` plus
-`OUTCALL_HOST_BROKER_SOCKET` on Linux or `OUTCALL_HOST_BROKER_URL` on macOS
-when the registry is non-empty. The mounted `.outcall` policy directory is
-read-only inside the agent container.
-"#;
-
-const CODEX_CONTEXT: &str = r#"# Codex Context Transfer
-
-Recommended default: copy selected Codex state into an isolated Docker volume
-or recipe directory, then mount it into the container. Avoid mounting the entire
-home directory.
-
-Transfer candidates:
-
-- `AGENTS.md` from the project root for project instructions.
-- `.codex/config.toml` for trusted project settings.
-- `~/.codex/auth.json` for cached login credentials.
-- `~/.codex/config.toml` and `~/.codex/AGENTS.md` for user defaults.
-- `CODEX_ACCESS_TOKEN` or `CODEX_API_KEY` for non-interactive authentication.
-
-Treat `auth.json` and access tokens as secret material. Do not commit
-`.outcall/auth/`.
-
-Declared host resources are exposed only through the tokenized Outcall broker.
-Use `outcall allow codex tool:<id>` or `outcall allow codex file:<id>` before
-accessing them. The container receives `OUTCALL_HOST_BROKER_TOKEN` plus
-`OUTCALL_HOST_BROKER_SOCKET` on Linux or `OUTCALL_HOST_BROKER_URL` on macOS
-when the registry is non-empty. The mounted `.outcall` policy directory is
-read-only inside the agent container.
-"#;
-
-const CLAUDE_AGENT_CONFIG: &str = r#"# Generated by `outcall recipe init claude`.
-image: outcall-recipe-claude:local
-workspace: /workspace
-network: outcall-default
-detach: false
-auto_pull: false
-entrypoint:
-  - claude
-volumes: []
-env: {}
-"#;
-
-const CODEX_AGENT_CONFIG: &str = r#"# Generated by `outcall recipe init codex`.
-image: outcall-recipe-codex:local
-workspace: /workspace
-network: outcall-default
-detach: false
-auto_pull: false
-entrypoint:
-  - codex
-volumes: []
-env: {}
-"#;
-
-const HOST_RESOURCES_TEMPLATE: &str = r#"# Generated by `outcall recipe init`.
-#
-# Declare host-side resources outside /workspace that an agent may request
-# through Outcall's tokenized host broker.
-#
-# Declaration does not grant access. After adding an entry, allow it explicitly:
-#
-#   outcall allow <recipe> tool:<id>
-#   outcall allow <recipe> file:<id>
-#
-# Every broker request is still evaluated by the daemon rule engine. Undeclared
-# resources and declared resources without a matching allow rule are blocked.
-# When this registry is non-empty, `outcall run` starts the project broker and
-# injects OUTCALL_HOST_BROKER_TOKEN plus OUTCALL_HOST_BROKER_SOCKET on Linux or
-# OUTCALL_HOST_BROKER_URL on macOS. The `.outcall` directory is read-only in the
-# agent container, so the registry and rules cannot be rewritten from within it.
-#
-# From inside an agent container on Linux:
-#
-#   curl --unix-socket "$OUTCALL_HOST_BROKER_SOCKET" \
-#     -H "Authorization: Bearer $OUTCALL_HOST_BROKER_TOKEN" \
-#     -H "Content-Type: application/json" \
-#     -d '{"id":"chrome-mcp","args":["--help"]}' \
-#     http://localhost/v1/tool/exec
-#
-#   curl --unix-socket "$OUTCALL_HOST_BROKER_SOCKET" \
-#     -H "Authorization: Bearer $OUTCALL_HOST_BROKER_TOKEN" \
-#     -H "Content-Type: application/json" \
-#     -d '{"id":"notes","relative_path":"today.md"}' \
-#     http://localhost/v1/file/read
-#
-# On macOS with Docker Desktop, omit `--unix-socket` and use the broker URL:
-#
-#   curl -H "Authorization: Bearer $OUTCALL_HOST_BROKER_TOKEN" \
-#     -H "Content-Type: application/json" \
-#     -d '{"id":"chrome-mcp","args":["--help"]}' \
-#     "$OUTCALL_HOST_BROKER_URL/v1/tool/exec"
-#
-# Resource types:
-# - tools: host-native binaries, CLIs, or wrappers; a grant permits caller-
-#   supplied arguments and cwd, so prefer a narrow wrapper for sensitive tools
-# - files: host file/directory roots outside /workspace
-# - auth/session: provider-specific session handoff notes
-
-version: "1"
-
-tools: []
-# tools:
-#   - id: chrome-mcp
-#     path: ~/bin/chrome-mcp
-#     default_args: []
-#     notes: Host-native tool exposed only after an explicit allow rule.
-
-files: []
-# files:
-#   - id: claude-home
-#     path: ~/.claude
-#     mode: read-only
-#   - id: browser-profile
-#     path: ~/Library/Application Support/Google/Chrome
-#     mode: read-only
-
-auth:
-  notes:
-    - Prefer environment tokens for unattended runs.
-    - Mount only selected auth/config paths, never the entire home directory.
-"#;
-
-pub static RECIPES: &[Recipe] = &[
-    Recipe {
-        id: "claude",
-        name: "Claude Code",
-        summary: "Run Claude Code with explicit project context and Anthropic auth transfer.",
-        manifest: CLAUDE_MANIFEST,
-        dockerfile: CLAUDE_DOCKERFILE,
-        rules: CLAUDE_RULES,
-        readme: CLAUDE_README,
-        context: CLAUDE_CONTEXT,
-        agent_config: CLAUDE_AGENT_CONFIG,
-        policy_templates: CLAUDE_POLICY_TEMPLATES,
-        auth_env: CLAUDE_AUTH_ENV,
-        user_paths: CLAUDE_USER_PATHS,
-        project_paths: CLAUDE_PROJECT_PATHS,
-    },
-    Recipe {
-        id: "codex",
-        name: "Codex CLI",
-        summary: "Run Codex CLI with explicit project instructions and OpenAI auth transfer.",
-        manifest: CODEX_MANIFEST,
-        dockerfile: CODEX_DOCKERFILE,
-        rules: CODEX_RULES,
-        readme: CODEX_README,
-        context: CODEX_CONTEXT,
-        agent_config: CODEX_AGENT_CONFIG,
-        policy_templates: CODEX_POLICY_TEMPLATES,
-        auth_env: CODEX_AUTH_ENV,
-        user_paths: CODEX_USER_PATHS,
-        project_paths: CODEX_PROJECT_PATHS,
-    },
-];
-
 pub fn get_recipe(id: &str) -> Option<&'static Recipe> {
     RECIPES.iter().find(|recipe| recipe.id == id)
 }
@@ -459,12 +57,12 @@ pub fn recipe_ids() -> impl Iterator<Item = &'static str> {
 }
 
 pub fn init_recipe(project_dir: &Path, recipe: &Recipe, force: bool) -> Result<Vec<PathBuf>> {
-    let recipe_dir = project_dir.join(".outcall").join("recipes").join(recipe.id);
-    let rules_dir = project_dir.join(".outcall").join("rules");
-    std::fs::create_dir_all(&recipe_dir)
-        .with_context(|| format!("failed to create {}", recipe_dir.display()))?;
-    std::fs::create_dir_all(&rules_dir)
-        .with_context(|| format!("failed to create {}", rules_dir.display()))?;
+    let outcall_dir = ensure_secure_subdir(project_dir, Path::new(".outcall"))?;
+    let recipe_dir = ensure_secure_subdir(
+        project_dir,
+        &PathBuf::from(".outcall").join("recipes").join(recipe.id),
+    )?;
+    let rules_dir = ensure_secure_subdir(project_dir, Path::new(".outcall/rules"))?;
 
     let mut written = Vec::new();
     write_new(
@@ -498,21 +96,51 @@ pub fn init_recipe(project_dir: &Path, recipe: &Recipe, force: bool) -> Result<V
         &mut written,
     )?;
     write_agent_config(
-        &project_dir.join(".outcall").join("agent.yaml"),
+        &outcall_dir.join("agent.yaml"),
         recipe.agent_config,
         force,
         &mut written,
     )?;
     write_shared_template(
-        &project_dir.join(".outcall").join("host-resources.yaml"),
+        &outcall_dir.join("host-resources.yaml"),
         HOST_RESOURCES_TEMPLATE,
-        force,
         &mut written,
     )?;
     if let Some(path) = ensure_outcall_gitignore(project_dir)? {
         written.push(path);
     }
 
+    Ok(written)
+}
+
+/// Restore missing generated files while preserving every existing real file.
+pub fn ensure_recipe(project_dir: &Path, recipe: &Recipe) -> Result<Vec<PathBuf>> {
+    let outcall_dir = ensure_secure_subdir(project_dir, Path::new(".outcall"))?;
+    let recipe_dir = ensure_secure_subdir(
+        project_dir,
+        &PathBuf::from(".outcall").join("recipes").join(recipe.id),
+    )?;
+    let rules_dir = ensure_secure_subdir(project_dir, Path::new(".outcall/rules"))?;
+
+    let generated = [
+        (recipe_dir.join("recipe.yaml"), recipe.manifest),
+        (recipe_dir.join("Dockerfile"), recipe.dockerfile),
+        (recipe_dir.join("README.md"), recipe.readme),
+        (recipe_dir.join("context.md"), recipe.context),
+        (rules_dir.join(format!("{}.yaml", recipe.id)), recipe.rules),
+        (outcall_dir.join("agent.yaml"), recipe.agent_config),
+        (
+            outcall_dir.join("host-resources.yaml"),
+            HOST_RESOURCES_TEMPLATE,
+        ),
+    ];
+    let mut written = Vec::new();
+    for (path, contents) in generated {
+        write_missing(&path, contents, &mut written)?;
+    }
+    if let Some(path) = ensure_outcall_gitignore(project_dir)? {
+        written.push(path);
+    }
     Ok(written)
 }
 
@@ -528,172 +156,32 @@ pub fn recipe_dockerfile(project_dir: &Path, recipe: &Recipe) -> PathBuf {
         .join("Dockerfile")
 }
 
-pub fn stage_auth_copy(project_dir: &Path, recipe: &Recipe, force: bool) -> Result<AuthStaging> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    stage_auth_copy_with_home(project_dir, recipe, home.as_deref(), force)
-}
-
-fn stage_auth_copy_with_home(
-    project_dir: &Path,
-    recipe: &Recipe,
-    home: Option<&Path>,
-    force: bool,
-) -> Result<AuthStaging> {
-    let home_dir = project_dir
-        .join(".outcall")
-        .join("auth")
-        .join(recipe.id)
-        .join("home");
-    std::fs::create_dir_all(&home_dir)
-        .with_context(|| format!("failed to create {}", home_dir.display()))?;
-    secure_dir(&project_dir.join(".outcall").join("auth"))?;
-    secure_dir(&project_dir.join(".outcall").join("auth").join(recipe.id))?;
-    secure_dir(&home_dir)?;
-
-    let mut copied = Vec::new();
-    let mut missing = Vec::new();
-    for candidate in recipe.user_paths {
-        let src = expanded_path_with_home(candidate, home);
-        if !src.exists() {
-            missing.push(*candidate);
-            continue;
-        }
-        let relative = candidate.strip_prefix("~/").unwrap_or(candidate);
-        let dest = home_dir.join(relative);
-        copy_path(&src, &dest, force)
-            .with_context(|| format!("failed to copy {} to {}", src.display(), dest.display()))?;
-        copied.push((src, dest));
-    }
-
-    Ok(AuthStaging {
-        home_dir,
-        copied,
-        missing,
-    })
-}
-
-pub fn auth_mount_plan(recipe: &Recipe, preserve_home_layout: bool) -> AuthMountPlan {
-    let host_home = std::env::var_os("HOME").map(PathBuf::from);
-    auth_mount_plan_with_home(recipe, preserve_home_layout, host_home.as_deref())
-}
-
-fn auth_mount_plan_with_home(
-    recipe: &Recipe,
-    preserve_home_layout: bool,
-    host_home: Option<&Path>,
-) -> AuthMountPlan {
-    let mut mounts = Vec::new();
-    for candidate in recipe.user_paths {
-        let src = expanded_path_with_home(candidate, host_home);
-        if !src.exists() {
-            continue;
-        }
-        let dest = if preserve_home_layout {
-            if candidate.starts_with("~/") {
-                src.clone()
-            } else {
-                PathBuf::from(candidate)
-            }
-        } else {
-            let relative = candidate.strip_prefix("~/").unwrap_or(candidate);
-            PathBuf::from("/home/node").join(relative)
-        };
-        mounts.push(format!("{}:{}", src.display(), dest.display()));
-    }
-
-    let home_override = if preserve_home_layout {
-        host_home.and_then(|path| path.as_os_str().to_str().map(ToOwned::to_owned))
-    } else {
-        None
-    };
-
-    AuthMountPlan {
-        mounts,
-        home_override,
-    }
-}
-
-fn copy_path(src: &Path, dest: &Path, force: bool) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(src)
-        .with_context(|| format!("failed to stat {}", src.display()))?;
-    if metadata.file_type().is_symlink() {
-        let target = std::fs::read_link(src)
-            .with_context(|| format!("failed to read symlink {}", src.display()))?;
-        let resolved = if target.is_absolute() {
-            target
-        } else {
-            src.parent().unwrap_or_else(|| Path::new(".")).join(target)
-        };
-        if !resolved.exists() {
-            return Ok(());
-        }
-        return copy_path(&resolved, dest, force);
-    }
-
-    if dest.exists() {
-        if force {
-            if dest.is_dir() {
-                std::fs::remove_dir_all(dest)
-                    .with_context(|| format!("failed to remove {}", dest.display()))?;
-            } else {
-                std::fs::remove_file(dest)
-                    .with_context(|| format!("failed to remove {}", dest.display()))?;
-            }
-        } else {
-            return Ok(());
-        }
-    }
-
-    if src.is_dir() {
-        std::fs::create_dir_all(dest)
-            .with_context(|| format!("failed to create {}", dest.display()))?;
-        for entry in
-            std::fs::read_dir(src).with_context(|| format!("failed to read {}", src.display()))?
-        {
-            let entry = entry?;
-            let child_src = entry.path();
-            let child_dest = dest.join(entry.file_name());
-            copy_path(&child_src, &child_dest, force)?;
-        }
-    } else {
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        std::fs::copy(src, dest)
-            .with_context(|| format!("failed to copy {} to {}", src.display(), dest.display()))?;
-    }
-
-    Ok(())
-}
-
-#[cfg(unix)]
-fn secure_dir(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = std::fs::metadata(path)
-        .with_context(|| format!("failed to stat {}", path.display()))?
-        .permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(path, permissions)
-        .with_context(|| format!("failed to chmod {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn secure_dir(_path: &Path) -> Result<()> {
-    Ok(())
+/// Return true when the shared agent config is an unmodified built-in recipe
+/// template rather than a user-authored override.
+pub fn has_generated_agent_config(project_dir: &Path) -> Result<bool> {
+    let path = project_dir.join(".outcall").join("agent.yaml");
+    Ok(read_existing_file(&path)?
+        .is_some_and(|existing| RECIPES.iter().any(|recipe| existing == recipe.agent_config)))
 }
 
 fn write_new(path: &Path, contents: &str, force: bool, written: &mut Vec<PathBuf>) -> Result<()> {
-    if path.exists() && !force {
+    if path_entry(path)?.is_some() && !force {
         anyhow::bail!(
             "{} already exists; pass --force to overwrite generated recipe files",
             path.display()
         );
     }
-    std::fs::write(path, contents)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    write_runtime_file(path, contents.as_bytes())?;
+    written.push(path.to_path_buf());
+    Ok(())
+}
+
+fn write_missing(path: &Path, contents: &str, written: &mut Vec<PathBuf>) -> Result<()> {
+    if path_entry(path)?.is_some() {
+        read_existing_file(path)?;
+        return Ok(());
+    }
+    write_runtime_file(path, contents.as_bytes())?;
     written.push(path.to_path_buf());
     Ok(())
 }
@@ -704,9 +192,7 @@ fn write_agent_config(
     force: bool,
     written: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    if path.exists() && !force {
-        let existing = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+    if !force && let Some(existing) = read_existing_file(path)? {
         if existing == contents {
             return Ok(());
         }
@@ -715,31 +201,46 @@ fn write_agent_config(
         }
     }
 
-    std::fs::write(path, contents)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    write_runtime_file(path, contents.as_bytes())?;
     written.push(path.to_path_buf());
     Ok(())
 }
 
-fn write_shared_template(
-    path: &Path,
-    contents: &str,
-    force: bool,
-    written: &mut Vec<PathBuf>,
-) -> Result<()> {
-    if path.exists() && !force {
+fn write_shared_template(path: &Path, contents: &str, written: &mut Vec<PathBuf>) -> Result<()> {
+    if path_entry(path)?.is_some() {
+        read_existing_file(path)?;
         return Ok(());
     }
 
-    std::fs::write(path, contents)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    write_runtime_file(path, contents.as_bytes())?;
     written.push(path.to_path_buf());
     Ok(())
 }
 
+fn path_entry(path: &Path) -> Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to stat {}", path.display())),
+    }
+}
+
+fn read_existing_file(path: &Path) -> Result<Option<String>> {
+    let Some(metadata) = path_entry(path)? else {
+        return Ok(None);
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("{} must be a real file, not a symlink", path.display());
+    }
+    std::fs::read_to_string(path)
+        .map(Some)
+        .with_context(|| format!("failed to read {}", path.display()))
+}
+
 pub fn ensure_outcall_gitignore(project_dir: &Path) -> Result<Option<PathBuf>> {
-    let path = project_dir.join(".outcall").join(".gitignore");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let outcall_dir = ensure_secure_subdir(project_dir, Path::new(".outcall"))?;
+    let path = outcall_dir.join(".gitignore");
+    let existing = read_existing_file(&path)?.unwrap_or_default();
     let has_auth = existing.lines().any(|line| line.trim() == "auth/");
     let has_home = existing.lines().any(|line| line.trim() == "home/");
     let has_run = existing.lines().any(|line| line.trim() == "run/");
@@ -766,231 +267,9 @@ pub fn ensure_outcall_gitignore(project_dir: &Path) -> Result<Option<PathBuf>> {
     if !has_broker_rule {
         next.push_str("rules/.outcall-host-broker.yaml\n");
     }
-    std::fs::write(&path, next).with_context(|| format!("failed to write {}", path.display()))?;
+    write_runtime_file(&path, next.as_bytes())?;
     Ok(Some(path))
 }
 
-pub fn expanded_path(path: &str) -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    expanded_path_with_home(path, home.as_deref())
-}
-
-fn expanded_path_with_home(path: &str, home: Option<&Path>) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = home
-    {
-        return home.join(rest);
-    }
-    PathBuf::from(path)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn temp_project(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("outcall-recipe-test-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn finds_builtin_recipe() {
-        assert!(get_recipe("claude").is_some());
-        assert!(get_recipe("codex").is_some());
-        assert!(get_recipe("missing").is_none());
-    }
-
-    #[test]
-    fn claude_recipe_supports_official_unattended_auth_variables() {
-        let recipe = get_recipe("claude").unwrap();
-        assert_eq!(
-            recipe.auth_env,
-            &[
-                "CLAUDE_CODE_OAUTH_TOKEN",
-                "ANTHROPIC_API_KEY",
-                "ANTHROPIC_AUTH_TOKEN",
-            ]
-        );
-        assert!(recipe.manifest.contains("default_mode: auto"));
-        assert!(recipe.readme.contains("claude setup-token"));
-        assert!(!recipe.readme.contains("outcall recipe doctor"));
-    }
-
-    #[test]
-    fn recipe_images_verify_agent_binary_during_build() {
-        assert!(
-            get_recipe("claude")
-                .unwrap()
-                .dockerfile
-                .contains("&& claude --version")
-        );
-        assert!(
-            get_recipe("codex")
-                .unwrap()
-                .dockerfile
-                .contains("&& codex --version")
-        );
-    }
-
-    #[test]
-    fn claude_image_uses_anthropic_signed_stable_repository() {
-        let dockerfile = get_recipe("claude").unwrap().dockerfile;
-        assert!(dockerfile.contains("https://downloads.claude.ai/claude-code/apt/stable"));
-        assert!(dockerfile.contains("signed-by=/etc/apt/keyrings/claude-code.asc"));
-        assert!(dockerfile.contains("31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"));
-        assert!(dockerfile.contains("apt-get install -y --no-install-recommends claude-code"));
-        assert!(!dockerfile.contains("@anthropic-ai/claude-code"));
-    }
-
-    #[test]
-    fn init_recipe_writes_expected_files() {
-        let dir = temp_project("init");
-        let recipe = get_recipe("codex").unwrap();
-        let written = init_recipe(&dir, recipe, false).unwrap();
-        assert_eq!(written.len(), 8);
-        assert!(dir.join(".outcall/recipes/codex/recipe.yaml").exists());
-        assert!(dir.join(".outcall/recipes/codex/Dockerfile").exists());
-        assert!(dir.join(".outcall/rules/codex.yaml").exists());
-        assert!(dir.join(".outcall/agent.yaml").exists());
-        assert!(dir.join(".outcall/host-resources.yaml").exists());
-        assert!(dir.join(".outcall/.gitignore").exists());
-        let agent_config = std::fs::read_to_string(dir.join(".outcall/agent.yaml")).unwrap();
-        assert!(
-            !agent_config.contains("name: codex-agent"),
-            "generated agent config should not pin a provider-specific container name"
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn init_recipe_appends_auth_gitignore_entry() {
-        let dir = temp_project("gitignore");
-        std::fs::create_dir_all(dir.join(".outcall")).unwrap();
-        std::fs::write(dir.join(".outcall/.gitignore"), "cache/\n").unwrap();
-
-        let recipe = get_recipe("claude").unwrap();
-        init_recipe(&dir, recipe, false).unwrap();
-
-        let gitignore = std::fs::read_to_string(dir.join(".outcall/.gitignore")).unwrap();
-        assert!(gitignore.contains("cache/\n"));
-        assert!(gitignore.contains("auth/\n"));
-        assert!(gitignore.contains("run/\n"));
-        assert!(gitignore.contains("rules/.outcall-host-broker.yaml\n"));
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn init_recipe_switches_owned_agent_config_and_preserves_host_registry() {
-        let dir = temp_project("switch");
-        let codex = get_recipe("codex").unwrap();
-        let claude = get_recipe("claude").unwrap();
-        init_recipe(&dir, codex, false).unwrap();
-        let registry = dir.join(".outcall/host-resources.yaml");
-        std::fs::write(&registry, "version: \"1\"\ntools: []\nfiles: []\n").unwrap();
-
-        init_recipe(&dir, claude, false).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(dir.join(".outcall/agent.yaml")).unwrap(),
-            claude.agent_config
-        );
-        assert_eq!(
-            std::fs::read_to_string(registry).unwrap(),
-            "version: \"1\"\ntools: []\nfiles: []\n"
-        );
-        assert!(dir.join(".outcall/recipes/codex/recipe.yaml").exists());
-        assert!(dir.join(".outcall/recipes/claude/recipe.yaml").exists());
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn init_recipe_preserves_custom_shared_config() {
-        let dir = temp_project("custom-shared");
-        std::fs::create_dir_all(dir.join(".outcall")).unwrap();
-        let config = dir.join(".outcall/agent.yaml");
-        std::fs::write(&config, "resources:\n  memory: 2g\n").unwrap();
-
-        init_recipe(&dir, get_recipe("codex").unwrap(), false).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(config).unwrap(),
-            "resources:\n  memory: 2g\n"
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn stage_auth_copy_preserves_home_relative_paths() {
-        let dir = temp_project("auth-copy");
-        let home = dir.join("host-home");
-        std::fs::create_dir_all(home.join(".codex")).unwrap();
-        std::fs::write(home.join(".codex/auth.json"), "{}").unwrap();
-
-        let recipe = get_recipe("codex").unwrap();
-        let staged = stage_auth_copy_with_home(&dir, recipe, Some(&home), true).unwrap();
-
-        assert_eq!(staged.copied.len(), 1);
-        assert!(
-            dir.join(".outcall/auth/codex/home/.codex/auth.json")
-                .exists()
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stage_auth_copy_skips_broken_symlinks() {
-        use std::os::unix::fs::symlink;
-
-        let dir = temp_project("auth-copy-broken-symlink");
-        let home = dir.join("host-home");
-        std::fs::create_dir_all(home.join(".claude/agents")).unwrap();
-        symlink(
-            home.join("missing-template.md"),
-            home.join(".claude/agents/README.md"),
-        )
-        .unwrap();
-
-        let recipe = get_recipe("claude").unwrap();
-        let staged = stage_auth_copy_with_home(&dir, recipe, Some(&home), true).unwrap();
-
-        assert_eq!(staged.copied.len(), 1);
-        assert!(
-            dir.join(".outcall/auth/claude/home/.claude/agents")
-                .exists()
-        );
-        assert!(
-            !dir.join(".outcall/auth/claude/home/.claude/agents/README.md")
-                .exists()
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn auth_mount_plan_preserves_home_layout_when_requested() {
-        let home = temp_project("auth-mount-home");
-        std::fs::create_dir_all(home.join(".claude")).unwrap();
-        std::fs::write(home.join(".claude.json"), "{}").unwrap();
-
-        let recipe = get_recipe("claude").unwrap();
-        let plan = auth_mount_plan_with_home(recipe, true, Some(&home));
-
-        assert_eq!(plan.home_override.as_deref(), home.to_str());
-        assert!(plan.mounts.iter().any(|mount| mount
-            == &format!(
-                "{}:{}",
-                home.join(".claude").display(),
-                home.join(".claude").display()
-            )));
-        assert!(plan.mounts.iter().any(|mount| mount
-            == &format!(
-                "{}:{}",
-                home.join(".claude.json").display(),
-                home.join(".claude.json").display()
-            )));
-        let _ = std::fs::remove_dir_all(home);
-    }
-}
+mod tests;

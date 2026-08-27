@@ -1,11 +1,9 @@
 //! Rule engine: YAML loading, CEL compilation, and evaluation (S003).
 
-use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use cel_interpreter::{Context as CelCtx, Value};
 use outcall_api::{
     Decision, DnsContext, DockerContext, EvalContext, EvaluateResult, HttpContext, NetworkContext,
@@ -13,46 +11,94 @@ use outcall_api::{
 };
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
-use walkdir::WalkDir;
 
-use super::model::{CompiledRule, EgressMode, EgressSpec, RuleFile, RuleSet};
+use super::loader::{load_rules, validate_rule_yaml};
+use super::model::{EgressMode, EgressSpec, RuleSet};
 
 /// The rule engine. Holds a hot-swappable compiled rule set.
 #[derive(Debug)]
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct RuleEngine {
     pub rules_dir: String,
     rule_set: Arc<RwLock<Arc<RuleSet>>>,
-    intercept_enabled: bool,
 }
 
-#[allow(dead_code)]
+/// A verdict and its egress metadata from one immutable rule-set snapshot.
+/// Keeping these together prevents a reload from changing a matched rule's
+/// privileges between evaluation and enforcement.
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct RuleEvaluation {
+    pub(crate) result: EvaluateResult,
+    pub(crate) egress: Option<EgressSpec>,
+}
+
+pub(crate) struct PreparedReload {
+    rule_set: RuleSet,
+    files_loaded: usize,
+    warnings: Vec<String>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct RuleSnapshot(Arc<RuleSet>);
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl RuleEngine {
     /// Load rules from `rules_dir`, compile CEL expressions, return the engine.
     /// Returns an error if any P1 static analysis check fails (S003-FR-014/015).
-    /// Rules with `egress.mode: intercept` are rejected if CA is not loaded.
-    pub fn load(rules_dir: &str, intercept_enabled: bool) -> Result<Self> {
-        let rule_set = load_and_compile(rules_dir, intercept_enabled)?;
+    /// Rules with `egress.mode: intercept` are rejected until S011 is implemented.
+    pub fn load(rules_dir: &str) -> Result<Self> {
+        let loaded = load_rules(rules_dir)?;
         Ok(Self {
             rules_dir: rules_dir.to_string(),
-            rule_set: Arc::new(RwLock::new(Arc::new(rule_set))),
-            intercept_enabled,
+            rule_set: Arc::new(RwLock::new(Arc::new(loaded.rule_set))),
         })
     }
 
     /// Evaluate a request context against the current rule set.
     /// Returns the first matching allow/block verdict, or default block.
     pub async fn evaluate(&self, ctx: &EvalContext) -> EvaluateResult {
-        let rule_set = self.rule_set.read().await.clone();
-        let started = Instant::now();
+        let rule_set = self.snapshot().await;
+        Self::evaluate_snapshot(&rule_set, ctx)
+    }
 
-        let cel_ctx = build_cel_context(ctx);
+    /// Evaluate and return the matched rule's egress metadata from the same
+    /// immutable snapshot.
+    pub(crate) async fn evaluate_with_egress(&self, ctx: &EvalContext) -> RuleEvaluation {
+        let rule_set = self.snapshot().await;
+        Self::evaluate_snapshot_with_egress(&rule_set, ctx)
+    }
+
+    /// Capture the current immutable rule set for evaluation on another task.
+    pub(crate) async fn snapshot(&self) -> Arc<RuleSet> {
+        self.rule_set.read().await.clone()
+    }
+
+    pub(crate) async fn rollback_snapshot(&self) -> RuleSnapshot {
+        RuleSnapshot(self.snapshot().await)
+    }
+
+    pub(crate) async fn restore_snapshot(&self, snapshot: RuleSnapshot) {
+        *self.rule_set.write().await = snapshot.0;
+        info!("previous rule snapshot restored");
+    }
+
+    /// Evaluate against a previously captured rule set without awaiting.
+    pub(crate) fn evaluate_snapshot(rule_set: &RuleSet, ctx: &EvalContext) -> EvaluateResult {
+        let started = Instant::now();
 
         let mut result = EvaluateResult {
             decision: Decision::Block,
             matched_rule: None,
             file: None,
             logged: false,
+        };
+        let cel_ctx = match build_cel_context(ctx) {
+            Ok(context) => context,
+            Err(error) => {
+                warn!(%error, "failed to construct CEL context; request blocked");
+                return result;
+            }
         };
 
         for rule in &rule_set.rules {
@@ -83,10 +129,14 @@ impl RuleEngine {
                 continue;
             }
 
-            // Enrich rules don't terminate evaluation
+            // Loader validation rejects enrich rules. Keep evaluation fail-closed
+            // in case an invalid rule set is ever constructed internally.
             if rule.action == RuleAction::Enrich {
-                debug!(rule_id = %rule.id, "enrich rule matched (continuing)");
-                continue;
+                warn!(rule_id = %rule.id, "unsupported enrich rule reached evaluation");
+                result.matched_rule = Some(rule.id.clone());
+                result.file = Some(rule.file.clone());
+                result.logged = true;
+                break;
             }
 
             result.decision = if rule.action == RuleAction::Allow {
@@ -122,17 +172,53 @@ impl RuleEngine {
         result
     }
 
-    /// Reload the rule set from disk atomically (S003-FR-021/022/023).
-    /// Rules with `egress.mode: intercept` are rejected if CA is not loaded.
-    pub async fn reload(&self) -> Result<(usize, usize, Vec<String>)> {
-        let new_set = load_and_compile(&self.rules_dir, self.intercept_enabled)?;
-        let files = count_files(&self.rules_dir);
-        let rules = new_set.rules.len();
-        let warnings = collect_warnings(&self.rules_dir)?;
+    pub(crate) fn evaluate_snapshot_with_egress(
+        rule_set: &RuleSet,
+        ctx: &EvalContext,
+    ) -> RuleEvaluation {
+        let result = Self::evaluate_snapshot(rule_set, ctx);
+        let egress = result.matched_rule.as_deref().and_then(|id| {
+            rule_set
+                .rules
+                .iter()
+                .find(|rule| rule.id == id)
+                .and_then(|rule| rule.egress.clone())
+        });
+        RuleEvaluation { result, egress }
+    }
 
-        *self.rule_set.write().await = Arc::new(new_set);
+    /// Reload the rule set from disk atomically (S003-FR-021/022/023).
+    /// Rules with `egress.mode: intercept` are rejected until S011 is implemented.
+    pub async fn reload(&self) -> Result<(usize, usize, Vec<String>)> {
+        let prepared = self.prepare_reload().await?;
+        Ok(self.commit_reload(prepared).await)
+    }
+
+    /// Parse and compile a replacement rule set without changing live policy.
+    pub(crate) async fn prepare_reload(&self) -> Result<PreparedReload> {
+        let rules_dir = self.rules_dir.clone();
+        let loaded = tokio::task::spawn_blocking(move || load_rules(&rules_dir))
+            .await
+            .map_err(|error| anyhow::anyhow!("rule preparation task failed: {error}"))??;
+        Ok(PreparedReload {
+            rule_set: loaded.rule_set,
+            files_loaded: loaded.files_loaded,
+            warnings: loaded.warnings,
+        })
+    }
+
+    /// Atomically expose a prevalidated rule set.
+    pub(crate) async fn commit_reload(
+        &self,
+        prepared: PreparedReload,
+    ) -> (usize, usize, Vec<String>) {
+        let files = prepared.files_loaded;
+        let rules = prepared.rule_set.rules.len();
+        let warnings = prepared.warnings;
+
+        *self.rule_set.write().await = Arc::new(prepared.rule_set);
         info!(files, rules, "rules reloaded");
-        Ok((files, rules, warnings))
+        (files, rules, warnings)
     }
 
     /// List all loaded rules in evaluation order.
@@ -170,17 +256,6 @@ impl RuleEngine {
             })
     }
 
-    /// Return the optional egress config for a specific rule.
-    pub async fn rule_egress(&self, id: &str) -> Option<EgressSpec> {
-        self.rule_set
-            .read()
-            .await
-            .rules
-            .iter()
-            .find(|r| r.id == id)
-            .and_then(|r| r.egress.clone())
-    }
-
     /// Return true if any loaded rule explicitly requires the L7 proxy.
     pub async fn has_proxy_egress_rules(&self) -> bool {
         self.rule_set.read().await.rules.iter().any(|r| {
@@ -198,22 +273,7 @@ impl RuleEngine {
     /// uses the `definitions` shorthand is validated against its expanded
     /// form, not the raw `$name` placeholder (which would fail CEL parsing).
     pub fn validate_rule_file(rule_yaml: &str) -> Result<(), String> {
-        use super::model::RuleFile;
-        let rf: RuleFile =
-            serde_yaml::from_str(rule_yaml).map_err(|e| format!("YAML parse error: {e}"))?;
-        if rf.version != "1" {
-            return Err(format!("unsupported rule file version: {:?}", rf.version));
-        }
-        for rule in &rf.rules {
-            if rule.id.is_empty() {
-                return Err("rule is missing 'id' field".to_string());
-            }
-            let expanded = expand_definitions(&rule.condition, &rf.definitions, "<input>")
-                .map_err(|e| format!("definition expansion error in rule {:?}: {e}", rule.id))?;
-            cel_interpreter::Program::compile(&expanded)
-                .map_err(|e| format!("CEL compile error in rule {:?}: {e}", rule.id))?;
-        }
-        Ok(())
+        validate_rule_yaml(rule_yaml)
     }
 
     /// Evaluate a single CEL expression against a context (for the test endpoint).
@@ -221,7 +281,12 @@ impl RuleEngine {
         match cel_interpreter::Program::compile(expr) {
             Err(e) => (false, Some(format!("CEL parse error: {e}"))),
             Ok(prog) => {
-                let cel_ctx = build_cel_context(ctx);
+                let cel_ctx = match build_cel_context(ctx) {
+                    Ok(context) => context,
+                    Err(error) => {
+                        return (false, Some(format!("CEL context error: {error}")));
+                    }
+                };
                 match prog.execute(&cel_ctx) {
                     Ok(Value::Bool(b)) => (b, None),
                     Ok(other) => (
@@ -235,201 +300,11 @@ impl RuleEngine {
     }
 }
 
-// ── Rule loading ──────────────────────────────────────────────────────────
-
-/// Load and compile all rules from the given directory.
-/// Rules with `egress.mode: intercept` are rejected if CA is not loaded.
-#[allow(dead_code)]
-fn load_and_compile(rules_dir: &str, intercept_enabled: bool) -> Result<RuleSet> {
-    let path = Path::new(rules_dir);
-
-    // FR-038: missing or empty rules dir = empty rule set (no error)
-    if !path.exists() {
-        warn!(
-            rules_dir,
-            "rules directory does not exist — starting with empty rule set"
-        );
-        return Ok(RuleSet::default());
-    }
-
-    // Collect .yaml/.yml files in lexicographic order (FR-007)
-    let mut yaml_files: Vec<_> = WalkDir::new(path)
-        .max_depth(1)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| is_rule_file(e.path()))
-        .map(|e| e.path().to_path_buf())
-        .collect();
-    yaml_files.sort();
-
-    if yaml_files.is_empty() {
-        warn!(
-            rules_dir,
-            "no .yaml/.yml files found — starting with empty rule set"
-        );
-        return Ok(RuleSet::default());
-    }
-
-    let mut all_rules: Vec<CompiledRule> = Vec::new();
-    let mut seen_ids: HashMap<String, String> = HashMap::new(); // id → first file
-
-    for file_path in &yaml_files {
-        let file_name = file_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
-        let content =
-            std::fs::read_to_string(file_path).with_context(|| format!("reading {file_name}"))?;
-
-        // FR-015.f: malformed YAML = error
-        let rule_file: RuleFile = serde_yaml::from_str(&content)
-            .with_context(|| format!("YAML parse error in {file_name}"))?;
-
-        // FR-002/015.b: version must be "1"
-        if rule_file.version != "1" {
-            anyhow::bail!(
-                "unsupported version {:?} in {file_name} (only \"1\" is supported)",
-                rule_file.version
-            );
-        }
-
-        for spec in &rule_file.rules {
-            // FR-015.c / FR-028: duplicate ID = error
-            if let Some(first_file) = seen_ids.get(&spec.id) {
-                anyhow::bail!(
-                    "duplicate rule ID {:?} in {file_name} (first seen in {first_file})",
-                    spec.id
-                );
-            }
-            seen_ids.insert(spec.id.clone(), file_name.clone());
-
-            // Expand $name definitions
-            let expanded = expand_definitions(&spec.condition, &rule_file.definitions, &file_name)
-                .with_context(|| {
-                    format!("expanding definitions in rule {:?} ({file_name})", spec.id)
-                })?;
-
-            // FR-004/015.a: CEL compile at load time
-            let program = cel_interpreter::Program::compile(&expanded)
-                .with_context(|| format!("CEL parse error in rule {:?} ({file_name})", spec.id))?;
-
-            // Intercept mode requires CA to be loaded — reject at reload time, not runtime.
-            if let Some(ref egress) = spec.egress {
-                if egress.mode == EgressMode::Intercept && !intercept_enabled {
-                    anyhow::bail!(
-                        "rule {:?} ({file_name}) uses egress.mode: intercept but no CA is loaded \
-                         (--ca-cert / --ca-key not provided); set up a CA or use mode: proxy",
-                        spec.id
-                    );
-                }
-            }
-
-            let priority = spec.priority.unwrap_or(100);
-
-            all_rules.push(CompiledRule {
-                id: spec.id.clone(),
-                file: file_name.clone(),
-                condition_expanded: expanded,
-                action: spec.action.clone(),
-                log: spec.log,
-                description: spec.description.clone(),
-                priority,
-                egress: spec.egress.clone(),
-                program,
-            });
-        }
-
-        info!(file = %file_name, rules = rule_file.rules.len(), "loaded rule file");
-    }
-
-    // FR-007/032: sort by priority (ascending), then filename/position as tiebreaker
-    // Rules are already in filename/position order from the loop above.
-    // A stable sort by priority preserves that order within the same priority level.
-    all_rules.sort_by_key(|r| r.priority);
-
-    if all_rules.is_empty() {
-        warn!(
-            rules_dir,
-            files = yaml_files.len(),
-            "rule files loaded but no rules were defined — default-deny will block all traffic"
-        );
-    }
-
-    info!(
-        total_rules = all_rules.len(),
-        files = yaml_files.len(),
-        "rule engine loaded"
-    );
-
-    Ok(RuleSet { rules: all_rules })
-}
-
-/// Expand `$name` references in a CEL expression using the definitions map.
-/// Definitions are applied recursively. Circular references are detected.
-#[allow(dead_code)]
-fn expand_definitions(
-    expr: &str,
-    defs: &HashMap<String, String>,
-    file_name: &str,
-) -> Result<String> {
-    expand_recursive(expr, defs, file_name, &mut Vec::new())
-}
-
-#[allow(dead_code)]
-fn expand_recursive(
-    expr: &str,
-    defs: &HashMap<String, String>,
-    file_name: &str,
-    stack: &mut Vec<String>,
-) -> Result<String> {
-    let mut result = expr.to_string();
-    // Find all $name references
-    let mut i = 0;
-    while i < result.len() {
-        if result.as_bytes()[i] == b'$' {
-            // Read the name after $
-            let name_start = i + 1;
-            let name_end = result[name_start..]
-                .find(|c: char| !c.is_alphanumeric() && c != '_')
-                .map(|n| name_start + n)
-                .unwrap_or(result.len());
-            let name = &result[name_start..name_end];
-
-            if name.is_empty() {
-                i += 1;
-                continue;
-            }
-
-            let def = defs.get(name).ok_or_else(|| {
-                anyhow::anyhow!("undefined $name reference \"${name}\" in {file_name}")
-            })?;
-
-            // FR-006.c: circular reference detection
-            if stack.contains(&name.to_string()) {
-                anyhow::bail!("circular definition reference \"${name}\" in {file_name}");
-            }
-            stack.push(name.to_string());
-            let expanded_def = expand_recursive(def, defs, file_name, stack)?;
-            stack.pop();
-
-            let replacement = format!("({expanded_def})");
-            result.replace_range(i..name_end, &replacement);
-            i += replacement.len();
-        } else {
-            i += 1;
-        }
-    }
-    Ok(result)
-}
-
 // ── CEL context building ──────────────────────────────────────────────────
 
 /// Build a CEL evaluation context from the API EvalContext.
 /// Absent namespaces are injected with zero values (FR-005.f).
-fn build_cel_context(ctx: &EvalContext) -> CelCtx<'static> {
+fn build_cel_context(ctx: &EvalContext) -> std::result::Result<CelCtx<'static>, String> {
     let mut cel = CelCtx::default();
 
     let net = ctx.network.as_ref().cloned().unwrap_or_default();
@@ -439,17 +314,23 @@ fn build_cel_context(ctx: &EvalContext) -> CelCtx<'static> {
     let run = ctx.run.as_ref().cloned().unwrap_or_default();
     let agent = ctx.agent.as_ref().cloned().unwrap_or_default();
 
-    let _ = cel.add_variable("network", network_value(&net));
-    let _ = cel.add_variable("http", http_value(&http));
-    let _ = cel.add_variable("dns", dns_value(&dns));
-    let _ = cel.add_variable("docker", docker_value(&docker));
-    let _ = cel.add_variable("run", run_value(&run));
-    let _ = cel.add_variable("agent", agent_value(&agent));
+    cel.add_variable("network", network_value(&net))
+        .map_err(|error| error.to_string())?;
+    cel.add_variable("http", http_value(&http))
+        .map_err(|error| error.to_string())?;
+    cel.add_variable("dns", dns_value(&dns))
+        .map_err(|error| error.to_string())?;
+    cel.add_variable("docker", docker_value(&docker))
+        .map_err(|error| error.to_string())?;
+    cel.add_variable("run", run_value(&run))
+        .map_err(|error| error.to_string())?;
+    cel.add_variable("agent", agent_value(&agent))
+        .map_err(|error| error.to_string())?;
 
-    cel
+    Ok(cel)
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn network_value(n: &NetworkContext) -> Value {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -460,7 +341,7 @@ fn network_value(n: &NetworkContext) -> Value {
     Value::from(map)
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn http_value(h: &HttpContext) -> Value {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -478,7 +359,7 @@ fn http_value(h: &HttpContext) -> Value {
     Value::from(map)
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn dns_value(d: &DnsContext) -> Value {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -487,7 +368,7 @@ fn dns_value(d: &DnsContext) -> Value {
     Value::from(map)
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn docker_value(d: &DockerContext) -> Value {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -499,7 +380,7 @@ fn docker_value(d: &DockerContext) -> Value {
     Value::from(map)
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn run_value(r: &RunContext) -> Value {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -507,22 +388,20 @@ fn run_value(r: &RunContext) -> Value {
     map.insert("args", Value::from(str_list(&r.args)));
     map.insert("flags", Value::from(str_list(&r.flags)));
     map.insert("cwd", Value::from(r.cwd.as_str()));
-    // run.context is a map — for now we include string-valued keys only
-    let ctx_map: HashMap<&str, Value> = r
-        .context
-        .iter()
-        .filter_map(|(k, v)| v.as_str().map(|s| (k.as_str(), Value::from(s))))
-        .collect();
-    map.insert("context", Value::from(ctx_map));
+    let context = cel_interpreter::to_value(&r.context).unwrap_or_else(|error| {
+        warn!(%error, "failed to convert run.context to a CEL value");
+        Value::from(HashMap::<&str, Value>::new())
+    });
+    map.insert("context", context);
     Value::from(map)
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn str_list(v: &[String]) -> Vec<Value> {
     v.iter().map(|s| Value::from(s.as_str())).collect()
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn agent_value(a: &outcall_api::AgentContext) -> Value {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -530,395 +409,12 @@ fn agent_value(a: &outcall_api::AgentContext) -> Value {
     Value::from(map)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
-
-#[allow(clippy::items_after_test_module)]
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use outcall_api::{Decision, EvalContext, NetworkContext};
-    use std::io::Write;
-
-    /// Write a temporary rule YAML file and return a temp dir.
-    fn tmp_rules_dir(content: &str) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut f = std::fs::File::create(dir.path().join("rules.yaml")).unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        dir
-    }
-
-    fn network_ctx(ip: &str, port: u16, protocol: &str) -> EvalContext {
-        EvalContext {
-            network: Some(NetworkContext {
-                ip: ip.to_string(),
-                port,
-                protocol: protocol.to_string(),
-                hostname: None,
-            }),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn load_empty_dir_gives_empty_rule_set() {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
-        // Can't easily inspect rules_dir length via public API but reload should work.
-        assert!(!engine.rules_dir.is_empty());
-    }
-
-    #[test]
-    fn load_missing_dir_is_not_error() {
-        let engine = RuleEngine::load("/tmp/nonexistent-outcall-rules-9999999", false);
-        assert!(engine.is_ok());
-    }
-
-    #[test]
-    fn load_valid_allow_rule() {
-        let yaml = r#"
-version: "1"
-rules:
-  - id: allow-dns
-    condition: 'network.port == 53'
-    action: allow
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
-        let _ = engine; // compiled without panic
-    }
-
-    #[test]
-    fn load_duplicate_id_is_error() {
-        let yaml = r#"
-version: "1"
-rules:
-  - id: dup
-    condition: 'true'
-    action: allow
-  - id: dup
-    condition: 'false'
-    action: block
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let result = RuleEngine::load(dir.path().to_str().unwrap(), false);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("duplicate rule ID"), "msg: {msg}");
-    }
-
-    #[test]
-    fn load_bad_version_is_error() {
-        let yaml = r#"
-version: "2"
-rules: []
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let result = RuleEngine::load(dir.path().to_str().unwrap(), false);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn load_bad_cel_is_error() {
-        let yaml = r#"
-version: "1"
-rules:
-  - id: bad-cel
-    condition: '((('
-    action: allow
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let result = RuleEngine::load(dir.path().to_str().unwrap(), false);
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn evaluate_allow_rule_matches() {
-        let yaml = r#"
-version: "1"
-rules:
-  - id: allow-dns
-    condition: 'network.port == 53'
-    action: allow
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
-        let ctx = network_ctx("1.1.1.1", 53, "udp");
-        let result = engine.evaluate(&ctx).await;
-        assert_eq!(result.decision, Decision::Allow);
-        assert_eq!(result.matched_rule.as_deref(), Some("allow-dns"));
-    }
-
-    #[tokio::test]
-    async fn evaluate_no_match_defaults_to_block() {
-        let yaml = r#"
-version: "1"
-rules:
-  - id: allow-dns
-    condition: 'network.port == 53'
-    action: allow
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
-        let ctx = network_ctx("1.1.1.1", 443, "tcp");
-        let result = engine.evaluate(&ctx).await;
-        assert_eq!(result.decision, Decision::Block);
-        assert!(result.matched_rule.is_none());
-    }
-
-    #[tokio::test]
-    async fn evaluate_first_match_wins() {
-        let yaml = r#"
-version: "1"
-rules:
-  - id: block-all-tcp
-    condition: 'network.protocol == "tcp"'
-    action: block
-  - id: allow-https
-    condition: 'network.port == 443'
-    action: allow
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
-        let ctx = network_ctx("1.2.3.4", 443, "tcp");
-        let result = engine.evaluate(&ctx).await;
-        // First rule (block-all-tcp) matches before allow-https
-        assert_eq!(result.decision, Decision::Block);
-        assert_eq!(result.matched_rule.as_deref(), Some("block-all-tcp"));
-    }
-
-    #[test]
-    fn test_expression_true() {
-        let ctx = network_ctx("1.1.1.1", 53, "udp");
-        let (result, err) = RuleEngine::test_expression("network.port == 53", &ctx);
-        assert!(err.is_none(), "unexpected error: {err:?}");
-        assert!(result);
-    }
-
-    #[test]
-    fn test_expression_false() {
-        let ctx = network_ctx("1.1.1.1", 53, "udp");
-        let (result, err) = RuleEngine::test_expression("network.port == 443", &ctx);
-        assert!(err.is_none());
-        assert!(!result);
-    }
-
-    #[test]
-    fn test_expression_syntax_error() {
-        let ctx = EvalContext::default();
-        let (result, err) = RuleEngine::test_expression("(((", &ctx);
-        assert!(!result);
-        assert!(err.is_some());
-    }
-
-    fn agent_ctx(name: &str, port: u16) -> EvalContext {
-        EvalContext {
-            agent: Some(outcall_api::AgentContext {
-                name: name.to_string(),
-            }),
-            network: Some(NetworkContext {
-                ip: String::new(),
-                port,
-                protocol: "tcp".to_string(),
-                hostname: None,
-            }),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn definition_expansion() {
-        let yaml = r#"
-version: "1"
-definitions:
-  is_dns: 'network.port == 53'
-rules:
-  - id: allow-dns
-    condition: '$is_dns'
-    action: allow
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
-        let _ = engine; // loaded without error = expansion worked
-    }
-
-    #[tokio::test]
-    async fn evaluate_agent_name_matches() {
-        let yaml = r#"
-version: "1"
-rules:
-  - id: allow-db-admin
-    condition: 'agent.name == "db-agent" && network.port == 5432'
-    action: allow
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
-        let ctx = agent_ctx("db-agent", 5432);
-        // S013-FR-005: agent.name is available as a CEL binding
-        let result = engine.evaluate(&ctx).await;
-        assert_eq!(result.decision, Decision::Allow);
-        assert_eq!(result.matched_rule.as_deref(), Some("allow-db-admin"));
-    }
-
-    #[tokio::test]
-    async fn evaluate_agent_name_no_match() {
-        let yaml = r#"
-version: "1"
-rules:
-  - id: allow-db-admin
-    condition: 'agent.name == "db-agent" && network.port == 5432'
-    action: allow
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
-        let ctx = agent_ctx("web-agent", 5432);
-        let result = engine.evaluate(&ctx).await;
-        assert_eq!(result.decision, Decision::Block);
-        assert!(result.matched_rule.is_none());
-    }
-
-    #[test]
-    fn list_rules_returns_all() {
-        let yaml = r#"
-version: "1"
-rules:
-  - id: r1
-    condition: 'true'
-    action: allow
-  - id: r2
-    condition: 'false'
-    action: block
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let rules = rt.block_on(engine.list_rules());
-        assert_eq!(rules.len(), 2);
-        assert_eq!(rules[0].id, "r1");
-        assert_eq!(rules[1].id, "r2");
-    }
-
-    #[test]
-    fn get_rule_found_and_not_found() {
-        let yaml = r#"
-version: "1"
-rules:
-  - id: my-rule
-    condition: 'true'
-    action: allow
-    description: "Test rule"
-"#;
-        let dir = tmp_rules_dir(yaml);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let found = rt.block_on(engine.get_rule("my-rule"));
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().description.as_deref(), Some("Test rule"));
-
-        let missing = rt.block_on(engine.get_rule("no-such-rule"));
-        assert!(missing.is_none());
-    }
-
-    #[tokio::test]
-    async fn reload_picks_up_new_rules() {
-        let yaml1 = r#"
-version: "1"
-rules:
-  - id: r1
-    condition: 'network.port == 53'
-    action: allow
-"#;
-        let dir = tmp_rules_dir(yaml1);
-        let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).unwrap();
-
-        // Overwrite with a block rule
-        let yaml2 = r#"
-version: "1"
-rules:
-  - id: r1
-    condition: 'network.port == 53'
-    action: block
-"#;
-        std::fs::write(dir.path().join("rules.yaml"), yaml2).unwrap();
-        engine.reload().await.unwrap();
-
-        let ctx = network_ctx("1.1.1.1", 53, "udp");
-        let result = engine.evaluate(&ctx).await;
-        assert_eq!(result.decision, Decision::Block);
-    }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-#[allow(dead_code)]
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        format!("{}…", s.chars().take(max).collect::<String>())
     }
 }
-
-#[allow(dead_code)]
-fn count_files(dir: &str) -> usize {
-    WalkDir::new(dir)
-        .max_depth(1)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| is_rule_file(e.path()))
-        .count()
-}
-
-fn is_rule_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| matches!(ext, "yaml" | "yml"))
-}
-
-/// Collect non-fatal warnings (unused defs, etc.) — FR-016.
-#[allow(dead_code)]
-fn collect_warnings(rules_dir: &str) -> Result<Vec<String>> {
-    let path = Path::new(rules_dir);
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-
-    let mut warnings = Vec::new();
-    let mut yaml_files: Vec<_> = WalkDir::new(path)
-        .max_depth(1)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| is_rule_file(e.path()))
-        .collect();
-    yaml_files.sort_by_key(|e| e.path().to_path_buf());
-
-    for entry in yaml_files {
-        let file_name = entry
-            .path()
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        let content = std::fs::read_to_string(entry.path())?;
-        if let Ok(rule_file) = serde_yaml::from_str::<RuleFile>(&content) {
-            // FR-016.a: warn on unused definitions
-            for def_name in rule_file.definitions.keys() {
-                let used = rule_file
-                    .rules
-                    .iter()
-                    .any(|r| r.condition.contains(&format!("${def_name}")));
-                if !used {
-                    warnings.push(format!("unused definition \"{def_name}\" in {file_name}"));
-                }
-            }
-            // FR-016.c: warn on definitions section with no rules
-            if !rule_file.definitions.is_empty() && rule_file.rules.is_empty() {
-                warnings.push(format!(
-                    "definitions section present but no rules in {file_name}"
-                ));
-            }
-        }
-    }
-
-    Ok(warnings)
-}
+#[cfg(test)]
+mod tests;

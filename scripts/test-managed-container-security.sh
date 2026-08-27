@@ -29,11 +29,14 @@ for container in "$@"; do
   readonly_rootfs=$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container")
   pids_limit=$(docker inspect --format '{{.HostConfig.PidsLimit}}' "$container")
   memory_limit=$(docker inspect --format '{{.HostConfig.Memory}}' "$container")
+  process_user=$(docker inspect --format '{{.Config.User}}' "$container")
   [[ "$privileged" == "false" ]] || fail "$container is privileged"
   [[ "$readonly_rootfs" == "true" ]] || fail "$container root filesystem is writable"
   [[ "$pids_limit" == "256" ]] || fail "$container PID limit is $pids_limit, expected 256"
   [[ "$memory_limit" == "536870912" ]] ||
     fail "$container memory limit is $memory_limit, expected 536870912"
+  [[ "$process_user" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]] ||
+    fail "$container process user is not a numeric non-root UID:GID: ${process_user:-<empty>}"
 
   cap_drop=$(docker inspect --format '{{range .HostConfig.CapDrop}}{{println .}}{{end}}' "$container")
   security_opt=$(docker inspect --format '{{range .HostConfig.SecurityOpt}}{{println .}}{{end}}' "$container")

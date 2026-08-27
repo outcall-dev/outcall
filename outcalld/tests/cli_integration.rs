@@ -163,13 +163,6 @@ fn assert_success(output: &std::process::Output, context: &str) {
     );
 }
 
-fn assert_failure(output: &std::process::Output, context: &str) {
-    assert!(
-        !output.status.success(),
-        "{context}: expected failure, got exit 0",
-    );
-}
-
 // ── Test 1: Bridge subcommand group ──────────────────────────────────────────
 
 #[tokio::test]
@@ -437,18 +430,6 @@ async fn cli_network_lifecycle_succeeds() {
     daemon.kill().expect("daemon kill");
 }
 
-// ── Test 5: Unknown subcommand exits non-zero ─────────────────────────────────
-
-#[tokio::test]
-async fn cli_unknown_subcommand_exits_nonzero() {
-    let tmp = TempDir::new().expect("tempdir");
-    let socket = tmp.path().join("not-running.sock");
-    let sock = socket.to_string_lossy().to_string();
-
-    let out = outcall_exec(&sock, &["foobar"]);
-    assert_failure(&out, "unknown subcommand");
-}
-
 // ── Test 6: Custom socket path is respected ─────────────────────────────────
 
 #[tokio::test]
@@ -467,27 +448,4 @@ async fn cli_custom_socket_path_is_respected() {
     assert_success(&out, "custom socket bridge status");
 
     daemon.kill().expect("daemon kill");
-}
-
-// ── Test 7: CLI fails cleanly when daemon is unreachable ───────────────────
-
-#[tokio::test]
-async fn cli_fails_cleanly_when_daemon_unreachable() {
-    let tmp = TempDir::new().expect("tempdir");
-    let dead_socket = tmp.path().join("not-running.sock");
-
-    let out = Command::new("outcall")
-        .arg("--socket")
-        .arg(dead_socket.to_str().unwrap())
-        .arg("bridge")
-        .arg("status")
-        .output()
-        .expect("outcall exec");
-
-    assert_failure(&out, "daemon unreachable");
-    let s = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        s.contains("cannot connect") || s.contains("running"),
-        "expected connection error, got: {s}",
-    );
 }

@@ -5,6 +5,9 @@ use serde_yaml::{Mapping, Value};
 use std::path::{Path, PathBuf};
 
 use crate::recipes::{PolicyTemplate, Recipe};
+use crate::secure_fs::{
+    ensure_secure_subdir, existing_secure_subdir, read_regular_string, write_runtime_file,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyChange {
@@ -25,7 +28,9 @@ pub struct PolicyRuleSummary {
 /// retained as-is; only the requested managed rule is appended when absent.
 pub fn allow(project_dir: &Path, recipe: &Recipe, target: &str) -> Result<PolicyChange> {
     let path = rule_path(project_dir, recipe);
-    let mut document = load_rule_document(&path, recipe.rules)?;
+    let secure_path = secure_rule_path(project_dir, recipe, true)?
+        .context("created rule directory must exist")?;
+    let mut document = load_rule_document(&secure_path, recipe.rules)?;
     let (rule_id, rule) = policy_rule(project_dir, recipe, target)?;
 
     let rules = rules_mut(&mut document)?;
@@ -41,7 +46,7 @@ pub fn allow(project_dir: &Path, recipe: &Recipe, target: &str) -> Result<Policy
     }
 
     rules.push(rule);
-    write_rule_document(&path, &document)?;
+    write_rule_document(&secure_path, &document)?;
     Ok(PolicyChange {
         path,
         rule_id,
@@ -51,7 +56,10 @@ pub fn allow(project_dir: &Path, recipe: &Recipe, target: &str) -> Result<Policy
 
 pub fn explain(project_dir: &Path, recipe: &Recipe) -> Result<Vec<PolicyRuleSummary>> {
     let path = rule_path(project_dir, recipe);
-    let document = load_rule_document(&path, recipe.rules)?;
+    let document = match secure_rule_path(project_dir, recipe, false)? {
+        Some(secure_path) => load_rule_document(&secure_path, recipe.rules)?,
+        None => parse_rule_document(&path, recipe.rules)?,
+    };
     let rules = rules(&document)?;
     Ok(rules
         .iter()
@@ -93,7 +101,8 @@ fn policy_rule(project_dir: &Path, recipe: &Recipe, target: &str) -> Result<(Str
     let host = normalize_host(target)?;
     let id = format!("{}-host-{}", recipe.id, host.replace('.', "-"));
     let description = format!("{} may access {host} over HTTPS.", recipe.name);
-    let condition = format!("http.host == \"{host}\" || dns.query == \"{host}\"");
+    let condition =
+        format!("(http.host == \"{host}\" && network.port == 443) || dns.query == \"{host}\"");
     Ok((id.clone(), allow_rule(&id, &description, &condition)))
 }
 
@@ -103,7 +112,7 @@ fn host_resource_rule(
     kind: &str,
     id: &str,
 ) -> Result<(String, Value)> {
-    validate_resource_id(id)?;
+    crate::host_resources::validate_resource_id(id)?;
     let registry = crate::host_resources::load_for_project(project_dir)?;
     match kind {
         "tool" => {
@@ -123,7 +132,7 @@ fn host_resource_rule(
                 );
             }
         }
-        _ => unreachable!("validated host resource kind"),
+        _ => anyhow::bail!("unsupported host resource kind {kind:?}"),
     }
 
     let rule_id = format!("{}-host-{}-{}", recipe.id, kind, id);
@@ -135,21 +144,8 @@ fn host_resource_rule(
     let condition = format!("run.tool == \"host.{kind}.{id}\"");
     Ok((
         rule_id.clone(),
-        basic_allow_rule(&rule_id, &description, &condition),
+        Value::Mapping(basic_allow_rule(&rule_id, &description, &condition)),
     ))
-}
-
-fn validate_resource_id(id: &str) -> Result<()> {
-    if id.is_empty()
-        || !id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-    {
-        anyhow::bail!(
-            "host resource IDs must contain only ASCII letters, numbers, dots, underscores, or hyphens"
-        );
-    }
-    Ok(())
 }
 
 fn template_rule(template: &PolicyTemplate) -> Value {
@@ -163,13 +159,11 @@ fn allow_rule(id: &str, description: &str, condition: &str) -> Value {
         Value::String("mode".to_string()),
         Value::String("proxy".to_string()),
     );
-    rule.as_mapping_mut()
-        .expect("allow rule is a mapping")
-        .insert(Value::String("egress".to_string()), Value::Mapping(egress));
-    rule
+    rule.insert(Value::String("egress".to_string()), Value::Mapping(egress));
+    Value::Mapping(rule)
 }
 
-fn basic_allow_rule(id: &str, description: &str, condition: &str) -> Value {
+fn basic_allow_rule(id: &str, description: &str, condition: &str) -> Mapping {
     let mut rule = Mapping::new();
     rule.insert(
         Value::String("id".to_string()),
@@ -187,15 +181,15 @@ fn basic_allow_rule(id: &str, description: &str, condition: &str) -> Value {
         Value::String("action".to_string()),
         Value::String("allow".to_string()),
     );
-    Value::Mapping(rule)
+    rule
 }
 
 fn normalize_host(target: &str) -> Result<String> {
     let trimmed = target.trim();
-    let without_scheme = trimmed
-        .strip_prefix("https://")
-        .or_else(|| trimmed.strip_prefix("http://"))
-        .unwrap_or(trimmed);
+    if trimmed.starts_with("http://") {
+        anyhow::bail!("policy target URLs must use https://");
+    }
+    let without_scheme = trimmed.strip_prefix("https://").unwrap_or(trimmed);
     let host = without_scheme.split('/').next().unwrap_or_default();
     if host.is_empty()
         || host.contains('@')
@@ -213,13 +207,22 @@ fn normalize_host(target: &str) -> Result<String> {
 }
 
 fn load_rule_document(path: &Path, defaults: &str) -> Result<Value> {
-    let contents = if path.exists() {
-        std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display()))?
+    let contents = read_regular_string(path)?.unwrap_or_else(|| defaults.to_string());
+    parse_rule_document(path, &contents)
+}
+
+fn parse_rule_document(path: &Path, contents: &str) -> Result<Value> {
+    serde_yaml::from_str(contents).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn secure_rule_path(project_dir: &Path, recipe: &Recipe, create: bool) -> Result<Option<PathBuf>> {
+    let relative = Path::new(".outcall/rules");
+    let rules_dir = if create {
+        Some(ensure_secure_subdir(project_dir, relative)?)
     } else {
-        defaults.to_string()
+        existing_secure_subdir(project_dir, relative)?
     };
-    serde_yaml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
+    Ok(rules_dir.map(|dir| dir.join(format!("{}.yaml", recipe.id))))
 }
 
 fn rules(document: &Value) -> Result<&Vec<Value>> {
@@ -256,17 +259,8 @@ fn string_field(rule: &Value, field: &str) -> Option<String> {
 }
 
 fn write_rule_document(path: &Path, document: &Value) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("rule file must have a parent directory")?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
     let contents = serde_yaml::to_string(document).context("failed to serialize project rules")?;
-    let temporary = path.with_extension("yaml.tmp");
-    std::fs::write(&temporary, contents)
-        .with_context(|| format!("failed to write {}", temporary.display()))?;
-    std::fs::rename(&temporary, path)
-        .with_context(|| format!("failed to replace {}", path.display()))
+    write_runtime_file(path, contents.as_bytes())
 }
 
 #[cfg(test)]
@@ -296,6 +290,9 @@ mod tests {
         let updated = std::fs::read_to_string(&path).unwrap();
         assert!(updated.contains("codex-github"));
         assert!(updated.contains("codex-host-api-sentry-io"));
+        assert!(updated.contains(
+            r#"(http.host == "api.sentry.io" && network.port == 443) || dns.query == "api.sentry.io""#
+        ));
 
         let repeated = allow(&project, recipe, "api.sentry.io").unwrap();
         assert!(!repeated.changed);
@@ -309,6 +306,7 @@ mod tests {
         init_recipe(&project, recipe, false).unwrap();
         assert!(policy_rule(&project, recipe, "*.example.com").is_err());
         assert!(policy_rule(&project, recipe, "https://example.com:443").is_err());
+        assert!(policy_rule(&project, recipe, "http://example.com").is_err());
         let _ = std::fs::remove_dir_all(project);
     }
 
@@ -380,6 +378,29 @@ files: []
         let rules = std::fs::read_to_string(rule_path(&project, recipe)).unwrap();
         assert!(rules.contains(r#"run.tool == "host.tool.echo.test""#));
         assert!(rules.contains(r#"run.tool == "host.tool.echo_test""#));
+        let _ = std::fs::remove_dir_all(project);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_rule_without_overwriting_target() {
+        use std::os::unix::fs::symlink;
+
+        let project = temp_project("rule-symlink");
+        let recipe = get_recipe("codex").unwrap();
+        init_recipe(&project, recipe, false).unwrap();
+        let rule = rule_path(&project, recipe);
+        std::fs::remove_file(&rule).unwrap();
+        let sentinel = project.join("sentinel");
+        std::fs::write(&sentinel, "untouched").unwrap();
+        symlink(&sentinel, &rule).unwrap();
+
+        let error = allow(&project, recipe, "api.sentry.io")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("must be a real file"));
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "untouched");
         let _ = std::fs::remove_dir_all(project);
     }
 }

@@ -9,6 +9,7 @@ use tempfile::tempdir;
 fn outcall(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_outcall"))
         .args(args)
+        .env("OUTCALL_DAEMON_TRANSPORT", "unix")
         .output()
         .expect("outcall failed")
 }
@@ -17,6 +18,7 @@ fn outcall_in_dir(dir: &std::path::Path, args: &[&str]) -> std::process::Output 
     Command::new(env!("CARGO_BIN_EXE_outcall"))
         .args(args)
         .current_dir(dir)
+        .env("OUTCALL_DAEMON_TRANSPORT", "unix")
         .output()
         .expect("outcall failed")
 }
@@ -26,6 +28,7 @@ fn outcall_in_dir_clean_env(dir: &std::path::Path, args: &[&str]) -> std::proces
         .args(args)
         .current_dir(dir)
         .env("HOME", dir)
+        .env("OUTCALL_DAEMON_TRANSPORT", "unix")
         .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
@@ -45,6 +48,7 @@ fn outcall_in_dir_with_env(
         .args(args)
         .current_dir(dir)
         .env("HOME", dir)
+        .env("OUTCALL_DAEMON_TRANSPORT", "unix")
         .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
@@ -62,8 +66,7 @@ fn assert_connect_or_success(err: &str, status: std::process::ExitStatus, label:
             || err.contains("cannot connect")
             || err.contains("permission denied")
             || err.contains("daemon API request"),
-        "{label}: expected connect or success, got {:?}: {err}",
-        status
+        "{label}: expected connect or success, got {status:?}: {err}"
     );
 }
 
@@ -110,6 +113,21 @@ fn cli_without_subcommand_with_ambiguous_auth_prints_explicit_choices() {
 fn cli_unknown_subcommand_exits_nonzero() {
     let out = outcall(&["--socket", "/tmp/nonexistent.sock", "foobar"]);
     assert!(!out.status.success(), "should fail with unknown subcommand");
+}
+
+#[test]
+fn cli_fails_cleanly_when_daemon_is_unreachable() {
+    let temp = tempdir().expect("tempdir");
+    let socket = temp.path().join("not-running.sock");
+    let socket = socket.to_string_lossy();
+    let out = outcall(&["--socket", socket.as_ref(), "bridge", "status"]);
+
+    assert!(!out.status.success(), "daemon request should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot connect") || stderr.contains("running"),
+        "expected connection error, got: {stderr}",
+    );
 }
 
 #[test]
@@ -249,6 +267,12 @@ fn cli_container_inspect_requires_name() {
 }
 
 #[test]
+fn cli_attach_requires_name() {
+    let out = outcall(&["attach"]);
+    assert!(!out.status.success(), "attach with no name should fail");
+}
+
+#[test]
 fn cli_container_stop_requires_name() {
     let out = outcall(&["--socket", "/tmp/nonexistent.sock", "container", "stop"]);
     assert!(
@@ -328,9 +352,7 @@ fn cli_recipe_subcommands_parse_without_daemon() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             out.status.success(),
-            "recipe command {:?} should not require daemon: {}",
-            args,
-            stderr
+            "recipe command {args:?} should not require daemon: {stderr}"
         );
     }
 }
@@ -351,9 +373,7 @@ fn cli_top_level_doctor_parses_without_daemon() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             out.status.success(),
-            "doctor command {:?} should not require daemon: {}",
-            args,
-            stderr
+            "doctor command {args:?} should not require daemon: {stderr}"
         );
     }
 }
@@ -365,9 +385,7 @@ fn cli_top_level_init_help_parses() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             out.status.success(),
-            "init help {:?} should parse: {}",
-            args,
-            stderr
+            "init help {args:?} should parse: {stderr}"
         );
     }
 }
@@ -384,9 +402,7 @@ fn cli_top_level_setup_help_parses() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             out.status.success(),
-            "setup help {:?} should parse: {}",
-            args,
-            stderr
+            "setup help {args:?} should parse: {stderr}"
         );
     }
 }
@@ -398,14 +414,13 @@ fn cli_top_level_run_help_parses() {
         vec!["run", "claude", "--help"],
         vec!["run", "codex", "--auth", "mount", "--help"],
         vec!["run", "codex", "--name", "review-1", "--help"],
+        vec!["run", "codex", "--keep", "--help"],
     ] {
         let out = outcall(&args);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             out.status.success(),
-            "run help {:?} should parse: {}",
-            args,
-            stderr
+            "run help {args:?} should parse: {stderr}"
         );
     }
 }
@@ -528,15 +543,12 @@ fn cli_first_run_convenience_commands_render_help() {
         vec!["policy", "explain", "--help"],
         vec!["ps", "--help"],
         vec!["logs", "--help"],
+        vec!["attach", "--help"],
         vec!["stop", "--help"],
     ] {
         let out = outcall(&args);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            out.status.success(),
-            "help {:?} should parse: {stderr}",
-            args
-        );
+        assert!(out.status.success(), "help {args:?} should parse: {stderr}");
     }
 }
 

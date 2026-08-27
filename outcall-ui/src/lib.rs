@@ -11,11 +11,13 @@ use axum::{
     Router,
     body::Body,
     extract::Path,
-    http::{Response, StatusCode, header},
+    http::{HeaderValue, Response, StatusCode, header},
     response::IntoResponse,
     routing::get,
 };
 use rust_embed::RustEmbed;
+
+const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
 
 /// Embedded assets from the `assets/` directory at compile time.
 #[derive(RustEmbed)]
@@ -44,23 +46,47 @@ async fn serve_asset(Path(path): Path<String>) -> impl IntoResponse {
 }
 
 fn serve_embedded_file(path: &str) -> Response<Body> {
-    match Assets::get(path) {
+    let mut response = match Assets::get(path) {
         Some(content) => {
             let mime = mime_guess::from_path(path)
                 .first_or_octet_stream()
                 .to_string();
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime)
-                .header(header::CACHE_CONTROL, "no-cache")
-                .body(Body::from(content.data))
-                .unwrap()
+            let mut response = Response::new(Body::from(content.data));
+            if let Ok(content_type) = HeaderValue::from_str(&mime) {
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_TYPE, content_type);
+            }
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response
         }
-        None => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("Not found"))
-            .unwrap(),
-    }
+        None => {
+            let mut response = Response::new(Body::from("Not found"));
+            *response.status_mut() = StatusCode::NOT_FOUND;
+            response
+        }
+    };
+    apply_security_headers(response.headers_mut());
+    response
+}
+
+fn apply_security_headers(headers: &mut axum::http::HeaderMap) {
+    headers.insert(
+        "content-security-policy",
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+    );
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static("same-origin"),
+    );
 }
 
 #[cfg(test)]
@@ -69,7 +95,61 @@ mod tests {
 
     #[test]
     fn index_html_is_embedded() {
-        assert!(Assets::get("index.html").is_some());
+        let asset = Assets::get("index.html").expect("embedded dashboard");
+        let html = std::str::from_utf8(&asset.data).expect("UTF-8 dashboard");
+        assert!(html.contains("/ui/styles.css"));
+        assert!(html.contains("/ui/app.js"));
+        assert!(!html.contains("<style"));
+        assert!(!html.contains("<script>"));
+    }
+
+    #[test]
+    fn dashboard_assets_are_embedded() {
+        let script = Assets::get("app.js").expect("embedded dashboard script");
+        let script = std::str::from_utf8(&script.data).expect("UTF-8 dashboard script");
+        for endpoint in [
+            "/api/v1/bridge",
+            "/api/v1/dns",
+            "/api/v1/proxy",
+            "/api/v1/networks",
+            "/api/v1/containers",
+            "/api/v1/rules/active",
+            "/api/v1/rules",
+            "/api/v1/requests/rules",
+            "/api/v1/dns/cache?entries=true",
+        ] {
+            assert!(script.contains(endpoint), "missing endpoint {endpoint}");
+        }
+        assert!(script.contains("window.location.hash.slice(1)"));
+        assert!(script.contains("headers[\"X-Outcall-Token\"] = token"));
+        assert!(script.contains("history.replaceState"));
+        assert!(!script.contains("innerHTML"));
+        assert!(Assets::get("styles.css").is_some());
+    }
+
+    #[test]
+    fn asset_responses_have_browser_security_headers() {
+        let response = serve_embedded_file("index.html");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            CONTENT_SECURITY_POLICY
+        );
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
+        assert_eq!(
+            response.headers()["cross-origin-resource-policy"],
+            "same-origin"
+        );
+    }
+
+    #[test]
+    fn missing_asset_is_hardened_too() {
+        let response = serve_embedded_file("does_not_exist.js");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
     }
 
     #[test]

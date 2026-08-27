@@ -1,4 +1,7 @@
-pub(crate) fn container_environment(proxy_addr: &str, extra: Option<Vec<String>>) -> Vec<String> {
+pub(crate) fn container_environment(
+    proxy_addr: Option<&str>,
+    extra: Option<Vec<String>>,
+) -> Vec<String> {
     const RESERVED_KEYS: [&str; 6] = [
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -8,15 +11,17 @@ pub(crate) fn container_environment(proxy_addr: &str, extra: Option<Vec<String>>
         "no_proxy",
     ];
 
-    let proxy_url = format!("http://{proxy_addr}");
-    let mut env = vec![
-        format!("HTTP_PROXY={proxy_url}"),
-        format!("HTTPS_PROXY={proxy_url}"),
-        "NO_PROXY=localhost,127.0.0.1".to_string(),
-        format!("http_proxy={proxy_url}"),
-        format!("https_proxy={proxy_url}"),
-        "no_proxy=localhost,127.0.0.1".to_string(),
-    ];
+    let mut env = proxy_addr.map_or_else(Vec::new, |proxy_addr| {
+        let proxy_url = format!("http://{proxy_addr}");
+        vec![
+            format!("HTTP_PROXY={proxy_url}"),
+            format!("HTTPS_PROXY={proxy_url}"),
+            "NO_PROXY=localhost,127.0.0.1".to_string(),
+            format!("http_proxy={proxy_url}"),
+            format!("https_proxy={proxy_url}"),
+            "no_proxy=localhost,127.0.0.1".to_string(),
+        ]
+    });
     env.extend(extra.unwrap_or_default().into_iter().filter(|entry| {
         let key = entry
             .split_once('=')
@@ -34,7 +39,7 @@ mod tests {
     #[test]
     fn enforces_unique_proxy_values() {
         let env = container_environment(
-            "10.200.0.1:8080",
+            Some("10.200.0.1:8080"),
             Some(vec![
                 "HOME=/home/node".to_string(),
                 "HTTP_PROXY=http://untrusted:1234".to_string(),
@@ -60,5 +65,19 @@ mod tests {
                 "CODEX_API_KEY=test",
             ]
         );
+    }
+
+    #[test]
+    fn disabled_proxy_omits_reserved_proxy_variables() {
+        let env = container_environment(
+            None,
+            Some(vec![
+                "HOME=/home/node".to_string(),
+                "HTTP_PROXY=http://untrusted:1234".to_string(),
+                "no_proxy=*".to_string(),
+            ]),
+        );
+
+        assert_eq!(env, vec!["HOME=/home/node"]);
     }
 }

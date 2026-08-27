@@ -55,6 +55,7 @@ ruleset=$(docker exec "$daemon" nft list table inet outcall) ||
 server_script='const http = require("http"); http.createServer((_request, response) => { response.end("outcall-isolation-ok"); }).listen(8080, "0.0.0.0");'
 host_server_script='const http = require("http"); const port = Number(process.argv[1]); http.createServer((_request, response) => { response.end("unauthorized-host-service"); }).listen(port, "0.0.0.0");'
 client_script='const http = require("http"); const timer = setTimeout(() => process.exit(23), 3000); const request = http.get(process.argv[1], (response) => { response.resume(); response.on("end", () => { clearTimeout(timer); process.exit(response.statusCode === 200 ? 0 : 22); }); }); request.on("error", () => { clearTimeout(timer); process.exit(23); });'
+identity_probe_script='const http = require("http"); const timer = setTimeout(() => process.exit(23), 3000); const request = http.get(process.argv[1], (response) => { let body = ""; response.setEncoding("utf8"); response.on("data", (chunk) => { body += chunk; }); response.on("end", () => { clearTimeout(timer); process.exit(response.statusCode === 403 && body.includes("Managed container identity required") ? 0 : 22); }); }); request.on("error", () => { clearTimeout(timer); process.exit(23); });'
 
 expect_source_blocked() {
   local label=$1
@@ -133,8 +134,8 @@ docker run --rm \
   --network "$network" \
   --entrypoint node \
   "$image" \
-  -e "$client_script" "http://$gateway:8080/outcall-health" ||
-  fail "source container cannot reach the Outcall proxy on the bridge gateway"
+  -e "$identity_probe_script" "http://$gateway:8080/outcall-health" ||
+  fail "unmanaged source did not receive the proxy identity denial"
 
 expect_source_blocked "host service $gateway:$host_port" "http://$gateway:$host_port"
 

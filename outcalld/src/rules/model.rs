@@ -15,6 +15,7 @@ pub enum EgressMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EgressSpec {
     pub mode: EgressMode,
     #[serde(default)]
@@ -29,6 +30,7 @@ pub struct EgressSpec {
 
 /// Top-level structure of a rule YAML file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuleFile {
     /// Must be "1".
     pub version: String,
@@ -42,7 +44,8 @@ pub struct RuleFile {
 
 /// A single rule entry within a rule file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[serde(deny_unknown_fields)]
 pub struct RuleSpec {
     /// Unique identifier across all loaded rule files.
     pub id: String,
@@ -65,7 +68,8 @@ pub struct RuleSpec {
 
 /// Configuration for an enrich hook script.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[serde(deny_unknown_fields)]
 pub struct EnrichSpec {
     /// Script path relative to the rules directory.
     pub script: String,

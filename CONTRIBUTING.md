@@ -8,7 +8,7 @@ infrastructure — code style and review depth reflect that.
 ```sh
 git clone https://github.com/outcall-dev/outcall
 cd outcall
-cargo test --workspace --all-targets
+cargo test --workspace --all-targets --locked
 ```
 
 Linux is required for full integration testing — most of `outcalld`
@@ -49,26 +49,38 @@ the trust surface (e.g. operator-supplied scripts in the daemon path).
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --lib --bins --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::let_underscore_must_use -D clippy::let_underscore_future -D clippy::zombie_processes -D clippy::unused_io_amount
+cargo test --workspace --all-targets --locked
+make spec-check
+make coverage       # requires cargo-llvm-cov
 cargo audit         # if installed
 cargo deny check    # if installed
 ```
+
+Install the coverage command once with `cargo install cargo-llvm-cov`, or use
+the CI artifact when local LLVM coverage tooling is unavailable. The current
+workspace floor is a regression guard; subsystem targets remain tracked in
+S012 and should be raised as integration coverage improves.
 
 For security-sensitive changes (the rule engine, the proxy, the DNS
 filter, nftables, agent identity resolution), also run:
 
 ```sh
-./scripts/test-bypass.sh
-./scripts/e2e/run.sh
+scripts/test-container-isolation.sh
+scripts/test-managed-container-security.sh <container> [container...]
+scripts/test-egress-policy.sh
+scripts/test-netfilter-preflight.sh <project-dir> <recipe>
 ```
 
-These require Docker and root.
+These require Linux, Docker, and the capabilities documented by each script.
+They are also exercised by the privileged CI jobs.
 
 ## Code style
 
 - Rust 2024 edition. Format on save with `rustfmt`.
-- No `unsafe` without a comment explaining why.
+- First-party crates forbid `unsafe` code. A policy change requires explicit
+  security review before implementation.
 - No `unwrap()` in production code paths (tests are fine). Use `?` or
   explicit error handling.
 - Logs go through `tracing::info!`, `warn!`, `error!`. No `println!` in
@@ -82,6 +94,10 @@ Outcall has a numbered spec corpus in the [specs](https://github.com/outcall-dev
 repository. For non-trivial features, write or update the spec first,
 land it, then implement. Bug fixes don't need a new spec; behavior
 changes do.
+
+Keep [`spec-traceability.tsv`](./spec-traceability.tsv) aligned with subsystem
+ownership and primary tests. `make spec-check` validates the map; detailed
+requirement and acceptance status remains in the specs repository.
 
 ## Security-sensitive paths
 
