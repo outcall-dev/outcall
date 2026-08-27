@@ -195,3 +195,19 @@ jobs:
           if [ "$elapsed_seconds" -gt "$WARN_AFTER_SECONDS" ]; then
             echo "::warning title=Slow container release::Container publish and archive export took ${elapsed_minutes} minutes (threshold: 45 minutes)."
           fi
+
+  finalize:
+    name: finalize release
+    needs: [build, container]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh release edit "$RELEASE_TAG"
+          --repo "$GITHUB_REPOSITORY"
+          --prerelease=false
+          --latest
