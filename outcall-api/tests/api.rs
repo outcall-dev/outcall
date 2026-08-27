@@ -286,6 +286,7 @@ mod serde_roundtrips {
             image: "outcall-dev/agent:latest".into(),
             network: Some("outcall-default".into()),
             name: Some("my-agent".into()),
+            user: Some("1000:1000".into()),
             memory_limit: Some(256 * 1024 * 1024),
             cpu_shares: None,
             env: Some(vec!["FOO=bar".into()]),
@@ -301,6 +302,7 @@ mod serde_roundtrips {
         let back: ContainerCreateRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.image, "outcall-dev/agent:latest");
         assert_eq!(back.memory_limit, Some(256 * 1024 * 1024));
+        assert_eq!(back.user.as_deref(), Some("1000:1000"));
         assert_eq!(back.entrypoint, Some(vec!["codex".into()]));
         assert_eq!(back.working_dir.as_deref(), Some("/workspace"));
         assert_eq!(back.include_outcall_helper_mounts, Some(false));
@@ -316,11 +318,13 @@ mod serde_roundtrips {
             destination: "github.com".into(),
             protocol: Some("tcp".into()),
             port: Some(443),
+            expires_in_secs: Some(60),
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: AllowRuleRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.destination, "github.com");
         assert_eq!(back.port, Some(443));
+        assert_eq!(back.expires_in_secs, Some(60));
     }
 
     #[test]
@@ -333,10 +337,12 @@ mod serde_roundtrips {
             port: Some(443),
             nft_handle: 12345,
             inserted_at: "2026-05-05T12:00:00Z".into(),
+            expires_in_secs: Some(59),
         };
         let json = serde_json::to_string(&rule).unwrap();
         let back: ActiveRule = serde_json::from_str(&json).unwrap();
         assert_eq!(back.nft_handle, 12345);
+        assert_eq!(back.expires_in_secs, Some(59));
     }
 
     #[test]
@@ -357,6 +363,24 @@ mod serde_roundtrips {
         let json = serde_json::to_string(&result).unwrap();
         let back: ReloadResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.rules_loaded, 17);
+    }
+
+    #[test]
+    fn approve_rule_result_uses_rule_count_and_accepts_legacy_field() {
+        let result = ApproveRuleResult {
+            id: "rr-aabbcc112233".into(),
+            rules_loaded: 17,
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["rules_loaded"], 17);
+        assert!(json.get("nft_handle").is_none());
+
+        let legacy: ApproveRuleResult = serde_json::from_value(serde_json::json!({
+            "id": "rr-aabbcc112233",
+            "nft_handle": 17
+        }))
+        .unwrap();
+        assert_eq!(legacy.rules_loaded, 17);
     }
 
     #[test]
@@ -532,13 +556,61 @@ mod constants {
 
     #[test]
     fn container_constants() {
-        assert_eq!(CONTAINER_PREFIX, "outcall-agent-");
+        assert_eq!(CONTAINER_PREFIX, "outcall-");
         assert_eq!(AGENT_SOCKET_CONTAINER_PATH, "/run/outcall/agent.sock");
         assert_eq!(SHIM_CONTAINER_PATH, "/usr/local/bin/outcall");
         assert_eq!(DEFAULT_STOP_TIMEOUT_SECS, 10);
+        assert_eq!(MAX_STOP_TIMEOUT_SECS, 300);
+        assert_eq!(MAX_CONTAINER_NAME_BYTES, 128);
         assert_eq!(DEFAULT_MEMORY_LIMIT, 512 * 1024 * 1024);
+        assert_eq!(MIN_MEMORY_LIMIT, 6 * 1024 * 1024);
         assert_eq!(DEFAULT_CPU_SHARES, 1024);
+        assert_eq!(MIN_CPU_SHARES, 2);
         assert_eq!(DEFAULT_PID_LIMIT, 256);
+        assert!(valid_memory_limit(MIN_MEMORY_LIMIT));
+        assert!(!valid_memory_limit(MIN_MEMORY_LIMIT - 1));
+        assert!(valid_cpu_shares(MIN_CPU_SHARES));
+        assert!(valid_cpu_shares(MAX_CPU_SHARES));
+        assert!(!valid_cpu_shares(MIN_CPU_SHARES - 1));
+        assert!(!valid_cpu_shares(MAX_CPU_SHARES + 1));
+        assert!(valid_container_name("project-1"));
+        assert!(!valid_container_name("/project-1"));
+        assert!(!valid_container_name(
+            &"a".repeat(MAX_CONTAINER_NAME_BYTES + 1)
+        ));
+        assert!(valid_stop_timeout(0));
+        assert!(valid_stop_timeout(MAX_STOP_TIMEOUT_SECS));
+        assert!(!valid_stop_timeout(-1));
+        assert!(!valid_stop_timeout(MAX_STOP_TIMEOUT_SECS + 1));
+    }
+
+    #[test]
+    fn managed_container_users_are_numeric_and_non_root() {
+        assert!(valid_container_user(DEFAULT_CONTAINER_USER));
+        assert!(valid_container_user("501:20"));
+        for invalid in [
+            "",
+            "root",
+            "0:0",
+            "0:20",
+            "501:0",
+            "501",
+            "501:20:1",
+            "+501:20",
+            "501:+20",
+            " 501:20",
+            "501:20 ",
+        ] {
+            assert!(!valid_container_user(invalid), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn rule_identifiers_are_safe_and_bounded() {
+        assert!(valid_rule_id("allow-api.example_1"));
+        assert!(!valid_rule_id(""));
+        assert!(!valid_rule_id("allow\r\nX-Injected: yes"));
+        assert!(!valid_rule_id(&"a".repeat(MAX_RULE_ID_BYTES + 1)));
     }
 
     #[test]
@@ -692,11 +764,20 @@ mod edge_cases {
             destination: "0.0.0.0/0".into(),
             protocol: None,
             port: None,
+            expires_in_secs: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: AllowRuleRequest = serde_json::from_str(&json).unwrap();
         assert!(back.protocol.is_none());
         assert!(back.port.is_none());
+        assert!(back.expires_in_secs.is_none());
+        assert!(!json.contains("expires_in_secs"));
+
+        let legacy: AllowRuleRequest = serde_json::from_str(
+            r#"{"container":"legacy","src_ip":"10.0.0.2","destination":"1.1.1.1","protocol":null,"port":null}"#,
+        )
+        .unwrap();
+        assert!(legacy.expires_in_secs.is_none());
     }
 
     #[test]

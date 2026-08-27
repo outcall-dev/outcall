@@ -23,10 +23,6 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 ignore = [
-    # paste 1.0.15 — unmaintained; pulled in transitively by netlink-packet-core
-    # and cel-interpreter. No replacement upstream yet. Re-evaluate when a
-    # netlink-packet-core release switches off paste.
-    "RUSTSEC-2024-0436",
 ]
 
 # ─── Licenses ──────────────────────────────────────────────────────────────────
@@ -35,13 +31,11 @@ ignore = [
 # Reject GPL/AGPL/SSPL — they would force a relicense if linked statically.
 allow = [
     "Apache-2.0",
-    "BSD-2-Clause",
     "BSD-3-Clause",
     "MIT",
     "ISC",
     "Unicode-3.0",
     "Zlib",
-    "CC0-1.0",
 ]
 confidence-threshold = 0.93
 exceptions = [
@@ -59,8 +53,10 @@ deny = [
     # we don't want to accidentally take.
 ]
 skip = [
-    # Allowed duplicates — list specific (name, version) when transitive
-    # deps force a duplicate that's not worth fighting.
+    # sha2/rust-embed remain on cpufeatures 0.2 while rand uses 0.3.
+    { name = "cpufeatures", version = "0.2.17" },
+    # ring remains on getrandom 0.2 while rand/tempfile use 0.4.
+    { name = "getrandom", version = "0.2.17" },
 ]
 skip-tree = []
 

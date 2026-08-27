@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 
 use outcalld::proxy::ProxyServer;
 use outcalld::rules::RuleEngine;
@@ -68,17 +68,19 @@ fn craft_client_hello(sni_hostname: &str) -> Vec<u8> {
 
     // ── SNI extension (0x0000) ──
     let sni_bytes = sni_hostname.as_bytes();
+    let mut sni_data = Vec::new();
+    sni_data.extend_from_slice(&((3 + sni_bytes.len()) as u16).to_be_bytes());
+    sni_data.push(0x00); // name_type: host_name (RFC 6066)
+    sni_data.extend_from_slice(&(sni_bytes.len() as u16).to_be_bytes());
+    sni_data.extend_from_slice(sni_bytes);
+
     let mut sni_ext = Vec::new();
     sni_ext.extend_from_slice(&[0x00, 0x00]); // extension type: SNI
-    let inner_len = 1 + 2 + sni_bytes.len() + 3; // list(1) + name_type(1) + name_len(2) + name
-    sni_ext.extend_from_slice(&(inner_len as u16).to_be_bytes()); // extension data length
-    sni_ext.push(0x00); // name_type: host_name (RFC 6066)
-    sni_ext.extend_from_slice(&(sni_bytes.len() as u16).to_be_bytes());
-    sni_ext.extend_from_slice(sni_bytes);
+    sni_ext.extend_from_slice(&(sni_data.len() as u16).to_be_bytes());
+    sni_ext.extend_from_slice(&sni_data);
 
     // Write actual SNI extension into handshake.
-    let ext_total_len = sni_ext.len() - 4; // subtract ext header (type + len)
-    let _after_ext_len = handshake.len();
+    let ext_total_len = sni_ext.len();
     handshake.splice(
         ext_len_offset..ext_len_offset + 2,
         (ext_total_len as u16).to_be_bytes(),
@@ -109,7 +111,7 @@ fn rule_engine_from_yaml(yaml: &str) -> (tempfile::TempDir, Arc<RuleEngine>) {
     let mut f = std::fs::File::create(dir.path().join("test.yaml")).expect("create yaml");
     f.write_all(yaml.as_bytes()).expect("write yaml");
     drop(f);
-    let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).expect("load rules");
+    let engine = RuleEngine::load(dir.path().to_str().unwrap()).expect("load rules");
     (dir, Arc::new(engine))
 }
 
@@ -188,16 +190,21 @@ rules:
 /// then waits for the client to send TLS bytes (which we never send — test ends).
 #[tokio::test]
 async fn https_connect_allowed_host_returns_200() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
     let yaml = r#"version: "1"
 rules:
-  - id: allow-example-com
-    condition: 'http.host == "allowed.example.com"'
+  - id: allow-loopback
+    condition: 'http.host == "127.0.0.1"'
     action: allow
+    egress:
+      mode: proxy
+      allow_private_ips: true
 "#;
     let (_keep_dir, rules) = rule_engine_from_yaml(yaml);
     let (proxy, proxy_addr) = spawn_proxy(rules).await;
 
-    let req = "CONNECT allowed.example.com:443 HTTP/1.1\r\nHost: allowed.example.com\r\n\r\n";
+    let req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
     let resp = raw_request(proxy_addr, req.as_bytes()).await;
 
     assert_eq!(
@@ -224,11 +231,16 @@ rules:
 /// re-evaluates on SNI, finds it's blocked, and closes the connection.
 #[tokio::test]
 async fn https_connect_allowed_host_but_sni_blocked_closes() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
     let yaml = r#"version: "1"
 rules:
-  - id: allow-proxy-host
-    condition: 'http.host == "proxy.example.com"'
+  - id: allow-loopback
+    condition: 'http.host == "127.0.0.1"'
     action: allow
+    egress:
+      mode: proxy
+      allow_private_ips: true
   - id: block-evil-host
     condition: 'http.host == "evil.example.com"'
     action: block
@@ -236,8 +248,7 @@ rules:
     let (_keep_dir, rules) = rule_engine_from_yaml(yaml);
     let (proxy, proxy_addr) = spawn_proxy(rules).await;
 
-    // CONNECT to proxy.example.com (allowed) then send ClientHello with SNI=evil.example.com (blocked).
-    let connect_req = "CONNECT proxy.example.com:443 HTTP/1.1\r\nHost: proxy.example.com\r\n\r\n";
+    let connect_req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
     let mut sock = TcpStream::connect(proxy_addr).await.expect("connect proxy");
     sock.write_all(connect_req.as_bytes())
         .await
@@ -263,30 +274,32 @@ rules:
     let mut close_buf = [0u8; 1];
     let read_result = tokio::time::timeout(Duration::from_secs(2), sock.read(&mut close_buf)).await;
     assert!(
-        read_result.is_err() // timeout = server closed (expected after SNI block)
-            || matches!(read_result, Ok(Ok(0))),
+        matches!(read_result, Ok(Ok(0))),
         "expected server to close connection after SNI block"
     );
 
     proxy.shutdown().await;
 }
 
-// ─── Test 4: No SNI in ClientHello — preliminary decision stands ────────────
+// ─── Test 4: Malformed ClientHello fails closed ─────────────────────────────
 
-/// Client sends a TLS ClientHello with no SNI extension (empty/bad).
-/// Proxy peeks, can't extract SNI, falls back to CONNECT host as eval target.
 #[tokio::test]
-async fn https_connect_allowed_host_no_sni_uses_preliminary_decision() {
+async fn https_connect_malformed_client_hello_closes() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
     let yaml = r#"version: "1"
 rules:
-  - id: allow-example-com
-    condition: 'http.host == "example.com"'
+  - id: allow-loopback
+    condition: 'http.host == "127.0.0.1"'
     action: allow
+    egress:
+      mode: proxy
+      allow_private_ips: true
 "#;
     let (_keep_dir, rules) = rule_engine_from_yaml(yaml);
     let (proxy, proxy_addr) = spawn_proxy(rules).await;
 
-    let connect_req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    let connect_req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
     let mut sock = TcpStream::connect(proxy_addr).await.expect("connect proxy");
     sock.write_all(connect_req.as_bytes())
         .await
@@ -299,21 +312,17 @@ rules:
         .expect("read 200")
         .expect("read 200");
     let resp = String::from_utf8_lossy(&buf[..n]).to_string();
-    assert!(
-        resp.contains("200"),
-        "expected 200 (prelim decision), got: {resp}"
-    );
+    assert!(resp.contains("200"), "expected 200, got: {resp}");
 
-    // Send a raw TLS record that is too short to parse (no SNI).
-    // Proxy reads SNI_PEEK_BYTES (4096), gets nothing useful, eval_host = CONNECT host.
-    let short_record: Vec<u8> = vec![0x16, 0x03, 0x01, 0x00, 0x10]; // incomplete record
+    let short_record = [0x16, 0x03, 0x01, 0x00, 0x10];
     sock.write_all(&short_record)
         .await
         .expect("send short record");
     sock.shutdown().await.ok();
 
-    // Should still be allowed (preliminary decision based on CONNECT host stands).
-    // Nothing should go wrong — proxy should either tunnel or time out, not crash.
+    let mut close_buf = [0u8; 1];
+    let read_result = tokio::time::timeout(Duration::from_secs(2), sock.read(&mut close_buf)).await;
+    assert!(matches!(read_result, Ok(Ok(0))));
     proxy.shutdown().await;
 }
 
@@ -323,11 +332,16 @@ rules:
 /// This is the happy path: 200 sent, peeked ClientHello re-evaluated, ALLOW.
 #[tokio::test]
 async fn https_connect_allowed_host_and_sni_establishes_tunnel() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
     let yaml = r#"version: "1"
 rules:
-  - id: allow-proxy-host
-    condition: 'http.host == "proxy.example.com"'
+  - id: allow-loopback
+    condition: 'http.host == "127.0.0.1"'
     action: allow
+    egress:
+      mode: proxy
+      allow_private_ips: true
   - id: allow-upstream-host
     condition: 'http.host == "upstream.example.com"'
     action: allow
@@ -335,9 +349,7 @@ rules:
     let (_keep_dir, rules) = rule_engine_from_yaml(yaml);
     let (proxy, proxy_addr) = spawn_proxy(rules).await;
 
-    // CONNECT to proxy.example.com, then send ClientHello with SNI=upstream.example.com.
-    // Both are allowed → tunnel should be established.
-    let connect_req = "CONNECT proxy.example.com:443 HTTP/1.1\r\nHost: proxy.example.com\r\n\r\n";
+    let connect_req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
     let mut sock = TcpStream::connect(proxy_addr).await.expect("connect proxy");
     sock.write_all(connect_req.as_bytes())
         .await
@@ -354,13 +366,22 @@ rules:
 
     // Send ClientHello with allowed SNI.
     let client_hello = craft_client_hello("upstream.example.com");
+    let expected = client_hello.clone();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let mut received = vec![0u8; expected.len()];
+        stream.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, expected);
+    });
     sock.write_all(&client_hello)
         .await
         .expect("send ClientHello");
     sock.shutdown().await.ok();
 
-    // Connection should stay open (tunnel established, proxy tries to connect upstream).
-    // We didn't set up an upstream, so it'll eventually time out — but no crash/403.
+    tokio::time::timeout(Duration::from_secs(2), upstream_task)
+        .await
+        .expect("proxy should establish the validated tunnel")
+        .unwrap();
     proxy.shutdown().await;
 }
 

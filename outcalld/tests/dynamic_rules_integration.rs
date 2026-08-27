@@ -173,6 +173,7 @@ async fn dynamic_insert_rule_returns_valid_handle() {
         destination: "1.2.3.4".to_string(),
         protocol: Some("tcp".to_string()),
         port: Some(443),
+        expires_in_secs: None,
     };
 
     let mut s = UnixStream::connect(&sock).expect("connect");
@@ -212,6 +213,7 @@ async fn dynamic_insert_then_list_includes_new_rule() {
         destination: "github.com".to_string(),
         protocol: Some("tcp".to_string()),
         port: Some(443),
+        expires_in_secs: None,
     };
 
     // Insert
@@ -232,8 +234,7 @@ async fn dynamic_insert_then_list_includes_new_rule() {
 
     assert!(
         rules.iter().any(|r| r.container == "test-container-2"),
-        "inserted rule should appear in active list: {:?}",
-        rules
+        "inserted rule should appear in active list: {rules:?}"
     );
 
     daemon.kill().expect("daemon kill");
@@ -257,6 +258,7 @@ async fn dynamic_insert_idempotent_returns_same_handle() {
         destination: "1.1.1.1".to_string(),
         protocol: None,
         port: None,
+        expires_in_secs: None,
     };
 
     let handle1 = {
@@ -303,6 +305,7 @@ async fn dynamic_flush_removes_all_rules_reports_count() {
             destination: format!("10.60.0.{}", 10 + i),
             protocol: Some("tcp".to_string()),
             port: Some(443),
+            expires_in_secs: None,
         };
         let mut s = UnixStream::connect(&sock).expect("connect");
         let resp = http_post_json::<_, AllowRuleResult>(&mut s, "/api/v1/rule/allow", &req);

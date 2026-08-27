@@ -17,9 +17,10 @@ name = "outcalld"
 path = "src/main.rs"
 
 [dependencies]
-outcall-api = { path = "../outcall-api", version = "0.1.25" }
-outcall-ui = { path = "../outcall-ui", version = "0.1.25" }
+outcall-api = { path = "../outcall-api", version = "0.1.35" }
+outcall-ui = { path = "../outcall-ui", version = "0.1.35" }
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -29,13 +30,18 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-cel-interpreter = "0.8"
-walkdir = "2"
-regex = "1"
+cel-interpreter = { package = "cel", version = "0.14.3" }
+x509-parser = "0.18"
+httparse = "1"
+url = "2"
+ipnet = "2"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["fs"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }
-rtnetlink = "0.21"
+rtnetlink = "0.23"
 futures = "0.3"
 hickory-server = { version = "=0.26.1", features = ["resolver"] }
 hickory-resolver = "=0.26.1"
@@ -49,3 +55,13 @@ getrandom = "0.2"
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
+rcgen = "0.14"
+bollard = "0.18"
+futures = "0.3"
+getrandom = "0.2"
+hickory-proto = "=0.26.1"
+hickory-server = { version = "=0.26.1", features = ["resolver"] }
+hickory-resolver = "=0.26.1"
+hickory-net = "=0.26.1"
+lru = "0.18.2"
+async-trait = "0.1"

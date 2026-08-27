@@ -71,7 +71,7 @@ fn rule_engine_from_yaml(yaml: &str) -> (tempfile::TempDir, Arc<RuleEngine>) {
     let mut f = std::fs::File::create(dir.path().join("test.yaml")).expect("create yaml");
     f.write_all(yaml.as_bytes()).expect("write yaml");
     drop(f);
-    let engine = RuleEngine::load(dir.path().to_str().unwrap(), false).expect("load rules");
+    let engine = RuleEngine::load(dir.path().to_str().unwrap()).expect("load rules");
     (dir, Arc::new(engine))
 }
 
@@ -125,13 +125,15 @@ rules:
   - id: allow-loopback
     condition: 'http.host == "127.0.0.1" || http.host.startsWith("127.0.0.1")'
     action: allow
+    egress:
+      mode: proxy
+      allow_private_ips: true
 "#;
     let (_keep_dir, rules) = rule_engine_from_yaml(yaml);
     let (proxy, proxy_addr) = spawn_proxy(rules).await;
 
     let req = format!(
-        "GET http://{}/hello HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        upstream, upstream
+        "GET http://{upstream}/hello HTTP/1.1\r\nHost: {upstream}\r\nConnection: close\r\n\r\n"
     );
     let resp = request(proxy_addr, req.as_bytes()).await;
 
@@ -168,8 +170,7 @@ rules:
     let (proxy, proxy_addr) = spawn_proxy(rules).await;
 
     let req = format!(
-        "GET http://{}/hello HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        upstream, upstream
+        "GET http://{upstream}/hello HTTP/1.1\r\nHost: {upstream}\r\nConnection: close\r\n\r\n"
     );
     let resp = request(proxy_addr, req.as_bytes()).await;
 

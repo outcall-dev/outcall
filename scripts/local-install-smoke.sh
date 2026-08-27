@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo_root="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+repo_root="$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)"
 release_root="${OUTCALL_LOCAL_RELEASE_DIR:-$repo_root/release-smoke-local}"
 smoke_home="${OUTCALL_SMOKE_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/outcall-local-home.XXXXXX")}"
 bin_dir="${OUTCALL_BIN_DIR:-$smoke_home/.local/bin}"

@@ -51,8 +51,16 @@ jobs:
           shared-key: "outcall-unit"
           cache-on-failure: false
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: cargo test
         run: cargo test --workspace --lib --bins --locked
+
+      - name: Dashboard asset tests
+        run: make ui-test
 
   test-integration:
     name: cargo test (integration)
@@ -78,6 +86,63 @@ jobs:
         run: |
           export PATH="$PWD/target/debug:$PATH"
           cargo test --workspace --tests --locked
+
+  coverage:
+    name: cargo llvm-cov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "outcall-coverage"
+          cache-on-failure: false
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Measure coverage and enforce baseline
+        run: make coverage
+
+      - name: Upload LCOV report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: target/coverage/lcov.info
+          if-no-files-found: warn
+
+  spec-traceability:
+    name: specification traceability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate implementation and test mappings
+        run: make spec-check
+
+  shell-quality:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y shellcheck
+
+      - name: Check shell scripts
+        run: |
+          shellcheck scripts/*.sh
+          for script in scripts/*.sh; do
+            sh -n "$script"
+          done
 
   test-privileged-sudo:
     name: cargo test (privileged e2e - sudo)
@@ -209,7 +274,7 @@ jobs:
           mkdir -p "$project_dir"
           cd "$project_dir"
           set +e
-          timeout 300 outcall run claude -- --version
+          timeout 300 outcall run claude --keep -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -249,7 +314,7 @@ jobs:
           mkdir -p "$project_dir"
           cd "$project_dir"
           set +e
-          timeout 300 outcall run codex -- --version
+          timeout 300 outcall run codex --keep -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -360,7 +425,7 @@ jobs:
           cd "$PROJECT_DIR"
 
           set +e
-          timeout 300 outcall run claude -- --version
+          timeout 300 outcall run claude --keep -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -394,7 +459,7 @@ jobs:
           cd "$PROJECT_DIR"
 
           set +e
-          timeout 300 outcall run codex -- --version
+          timeout 300 outcall run codex --keep -- --version
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -421,6 +486,14 @@ jobs:
           scripts/test-managed-container-security.sh \
             outcall-smoke-claude-1 \
             outcall-smoke-codex-1
+
+      - name: Security integration (egress policy)
+        run: |
+          OUTCALL_BIN="$RUNNER_TEMP/outcall-bin/outcall" \
+            scripts/test-egress-policy.sh
+
+      - name: Security integration (daemon outage fails closed)
+        run: scripts/test-daemon-outage-fail-closed.sh
 
       - name: Verify preflight hard-fails when netfilter is disabled
         run: |
@@ -461,6 +534,9 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Production targets do not panic on recoverable errors
+        run: cargo clippy --workspace --lib --bins --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::let_underscore_must_use -D clippy::let_underscore_future -D clippy::zombie_processes -D clippy::unused_io_amount
 
   audit:
     name: cargo audit

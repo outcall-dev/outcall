@@ -15,18 +15,40 @@
 //!   active dynamic rules survive (FR-010) since they are stored in memory only.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::process::Command;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tokio::time::Instant;
+use tracing::{info, warn};
 
-use outcall_api::{ActiveRule, AllowRuleRequest, AllowRuleResult, FlushDynamicResult};
+use outcall_api::{
+    ActiveRule, AllowRuleRequest, AllowRuleResult, FlushDynamicResult, MAX_DYNAMIC_RULE_TTL_SECS,
+};
 
-use crate::docker::{ContainerEvent, ContainerEventKind, DockerManager};
+use crate::background_task::BackgroundTask;
+#[cfg(target_os = "linux")]
+use crate::bridge::BridgeManager;
+use crate::docker::DockerManager;
+
+mod destination;
+mod events;
+mod expiry;
+mod nft;
+
+#[cfg(target_os = "linux")]
+use nft::SystemNftController;
+use nft::{NftController, TestNftController};
 
 const MAX_DYNAMIC_RULES_PER_CONTAINER: usize = 256;
+
+#[derive(Clone, Copy)]
+enum SourcePolicy {
+    OperatorMayPrestage,
+    RequireManaged,
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -39,6 +61,7 @@ struct DynamicRuleRecord {
     port: Option<u16>,
     nft_handle: u64,
     inserted_at: String,
+    expires_at: Option<Instant>,
 }
 
 /// Serialized state protected by a Mutex.
@@ -52,22 +75,49 @@ struct DynState {
 pub struct DynamicRuleManager {
     state: Mutex<DynState>,
     docker: Arc<DockerManager>,
+    nft: Arc<dyn NftController>,
+    event_task: BackgroundTask,
+    expiration_task: BackgroundTask,
 }
 
 impl DynamicRuleManager {
     /// Create the manager and spawn the Docker event watcher.
-    pub fn new(docker: Arc<DockerManager>) -> Arc<Self> {
+    #[cfg(target_os = "linux")]
+    pub fn new(docker: Arc<DockerManager>, bridge: Arc<Mutex<BridgeManager>>) -> Arc<Self> {
+        Self::with_nft_controller(docker, Arc::new(SystemNftController { bridge }))
+    }
+
+    #[doc(hidden)]
+    pub fn new_without_policy_reset_for_tests(docker: Arc<DockerManager>) -> Arc<Self> {
+        Self::with_nft_controller(docker, Arc::new(TestNftController))
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn new_with_noop_nft_for_tests(docker: Arc<DockerManager>) -> Arc<Self> {
+        Self::with_nft_controller(docker, Arc::new(nft::NoopNftController))
+    }
+
+    fn with_nft_controller(docker: Arc<DockerManager>, nft: Arc<dyn NftController>) -> Arc<Self> {
+        let event_task = BackgroundTask::new();
+        let event_cancellation = event_task.cancellation_token();
+        let expiration_task = BackgroundTask::new();
+        let expiration_cancellation = expiration_task.cancellation_token();
         let mgr = Arc::new(Self {
             state: Mutex::new(DynState {
                 rules: HashMap::new(),
             }),
             docker: docker.clone(),
+            nft,
+            event_task,
+            expiration_task,
         });
 
         // Background task: watch for container death events → clean up rules.
-        let mgr_clone = mgr.clone();
         let rx = docker.subscribe_events();
-        tokio::spawn(container_event_loop(mgr_clone, rx));
+        mgr.event_task
+            .spawn(events::run(Arc::downgrade(&mgr), rx, event_cancellation));
+        mgr.expiration_task
+            .spawn(expiry::run(Arc::downgrade(&mgr), expiration_cancellation));
 
         mgr
     }
@@ -78,44 +128,63 @@ impl DynamicRuleManager {
     ///
     /// Returns the nftables handle of the newly inserted rule (FR-007).
     pub async fn insert_rule(&self, req: AllowRuleRequest) -> Result<AllowRuleResult> {
+        self.insert_rule_with_source_policy(req, SourcePolicy::OperatorMayPrestage)
+            .await
+    }
+
+    /// Insert a rule only while the source IP belongs to the named container.
+    pub async fn insert_managed_rule(&self, req: AllowRuleRequest) -> Result<AllowRuleResult> {
+        self.insert_rule_with_source_policy(req, SourcePolicy::RequireManaged)
+            .await
+    }
+
+    async fn insert_rule_with_source_policy(
+        &self,
+        req: AllowRuleRequest,
+        source_policy: SourcePolicy,
+    ) -> Result<AllowRuleResult> {
         // Validate protocol field to prevent malformed nftables expressions (DoS vector).
         // Protocol must be 'tcp' or 'udp' — invalid values cause `nft insert rule` to fail.
         if let Some(ref proto) = req.protocol {
             match proto.as_str() {
                 "tcp" | "udp" => {}
-                _ => anyhow::bail!("invalid protocol '{}': must be 'tcp' or 'udp'", proto),
+                _ => anyhow::bail!("invalid protocol '{proto}': must be 'tcp' or 'udp'"),
             }
         }
-
-        // Validate that the named container actually owns src_ip. Prevents a
-        // container from requesting allow rules for another container's IP
-        // via a compromised operator API call. If the lookup returns None,
-        // no container currently claims the IP and the request passes through
-        // — operator-API callers can pre-stage rules for not-yet-launched
-        // containers (api.rs:471).
-        if let Some(actual_name) = self.docker.lookup_container_name_by_ip(&req.src_ip).await {
-            if actual_name != req.container {
-                anyhow::bail!(
-                    "src_ip {} does not belong to container '{}' (belongs to '{}')",
-                    req.src_ip,
-                    req.container,
-                    actual_name
-                );
-            }
+        if req.port.is_some() && req.protocol.is_none() {
+            anyhow::bail!("a destination port requires protocol 'tcp' or 'udp'");
         }
+        let expires_at = expiration_deadline(req.expires_in_secs, Instant::now())?;
 
-        let dst_ip = resolve_destination(&req.destination).await?;
+        let src_ip: IpAddr = req
+            .src_ip
+            .parse()
+            .with_context(|| format!("invalid source IP address \"{}\"", req.src_ip))?;
+
+        // The operator API may pre-stage a rule for an address that is not yet
+        // assigned. Once Docker reports an owner, however, the requested name
+        // must match; lookup failures are not treated as an absent owner.
+        let initial_owner = self.docker.lookup_container_name_by_ip(&req.src_ip).await?;
+        let initially_assigned = validate_source_owner(
+            initial_owner.as_deref(),
+            &req.container,
+            source_policy,
+            &req.src_ip,
+        )?;
+
+        let dst_ip = destination::resolve(&req.destination).await?;
 
         // Serialize duplicate checks, per-container caps, nftables mutation, and
         // in-memory recording so a DNS flood cannot race past the cap.
         let mut state = self.state.lock().await;
         let container_rules = state.rules.entry(req.container.clone()).or_default();
-        if let Some(existing) = container_rules.iter().find(|r| {
+        if let Some(existing) = container_rules.iter_mut().find(|r| {
             r.src_ip == req.src_ip
                 && r.destination == req.destination
                 && r.protocol == req.protocol
                 && r.port == req.port
         }) {
+            renew_expiration(&mut existing.expires_at, expires_at, source_policy);
             return Ok(AllowRuleResult {
                 nft_handle: existing.nft_handle,
             });
@@ -129,52 +198,133 @@ impl DynamicRuleManager {
             );
         }
 
-        let handle = nft_insert(&req.src_ip, &dst_ip, req.protocol.as_deref(), req.port).await?;
+        // Prepare all fallible record metadata before mutating nftables so a
+        // clock error cannot leave an untracked allow rule behind.
+        let inserted_at = crate::timestamp::now_iso8601()?;
+        let handle = self
+            .nft
+            .insert(src_ip, &dst_ip, req.protocol.as_deref(), req.port)
+            .await?;
         let record = DynamicRuleRecord {
             container: req.container.clone(),
-            src_ip: req.src_ip,
-            destination: req.destination,
-            protocol: req.protocol,
+            src_ip: req.src_ip.clone(),
+            destination: req.destination.clone(),
+            protocol: req.protocol.clone(),
             port: req.port,
             nft_handle: handle,
-            inserted_at: now_iso8601(),
+            inserted_at,
+            expires_at,
         };
         container_rules.push(record);
+
+        let current_owner = self.docker.lookup_container_name_by_ip(&req.src_ip).await;
+        let ownership = current_owner.and_then(|owner| {
+            let currently_assigned = validate_source_owner(
+                owner.as_deref(),
+                &req.container,
+                source_policy,
+                &req.src_ip,
+            )?;
+            if initially_assigned && !currently_assigned {
+                anyhow::bail!(
+                    "source IP {} became unassigned while inserting a rule for '{}'",
+                    req.src_ip,
+                    req.container
+                );
+            }
+            Ok(())
+        });
+        if let Err(ownership_error) = ownership {
+            warn!(
+                container = %req.container,
+                src_ip = %req.src_ip,
+                handle,
+                error = %ownership_error,
+                "source ownership changed after dynamic rule insertion; rolling back"
+            );
+            let rollback = self
+                .rollback_inserted_rule(&mut state, &req.container, handle)
+                .await;
+            return match rollback {
+                Ok(()) => Err(ownership_error),
+                Err(rollback_error) => Err(rollback_error.context(format!(
+                    "source ownership changed after nft insertion: {ownership_error}"
+                ))),
+            };
+        }
 
         Ok(AllowRuleResult { nft_handle: handle })
     }
 
-    pub async fn container_name_for_ip(&self, ip: &str) -> Option<String> {
+    async fn rollback_inserted_rule(
+        &self,
+        state: &mut DynState,
+        container: &str,
+        handle: u64,
+    ) -> Result<()> {
+        let delete_error = match self.nft.delete(handle).await {
+            Ok(()) => {
+                remove_tracked_handle(state, container, handle);
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+
+        self.nft.reset_to_base_policy().await.with_context(|| {
+            format!(
+                "failed to delete unverified dynamic rule {handle} ({delete_error}) and emergency base-policy reset also failed"
+            )
+        })?;
+        state.rules.clear();
+        warn!(
+            handle,
+            "restored base policy after source ownership changed"
+        );
+        Ok(())
+    }
+
+    pub async fn container_name_for_ip(&self, ip: &str) -> Result<Option<String>> {
         self.docker.lookup_container_name_by_ip(ip).await
     }
 
     /// Remove all dynamic rules for a container (called on container death).
-    pub async fn remove_container_rules(&self, container_name: &str) -> usize {
+    pub async fn remove_container_rules(&self, container_name: &str) -> Result<usize> {
         let mut state = self.state.lock().await;
-        let rules = match state.rules.remove(container_name) {
-            Some(r) => r,
-            None => return 0,
+        let handles: Vec<u64> = match state.rules.get(container_name) {
+            Some(rules) => rules.iter().map(|rule| rule.nft_handle).collect(),
+            None => return Ok(0),
         };
 
-        let count = rules.len();
-        for rule in rules {
-            if let Err(e) = nft_delete(rule.nft_handle).await {
+        let count = handles.len();
+        for handle in handles {
+            if let Err(error) = self.nft.delete(handle).await {
                 warn!(
                     container = %container_name,
-                    handle = rule.nft_handle,
-                    "failed to delete nft rule: {e}"
+                    handle,
+                    %error,
+                    "failed to delete nft rule; restoring fail-closed base policy"
                 );
+                self.nft.reset_to_base_policy().await.with_context(|| {
+                    format!(
+                        "failed to delete dynamic rule {handle} and emergency base-policy reset also failed"
+                    )
+                })?;
+                state.rules.clear();
+                info!("base policy restored; all dynamic rule records cleared");
+                return Ok(count);
             }
         }
+        state.rules.remove(container_name);
         if count > 0 {
             info!(container = %container_name, removed = count, "dynamic rules removed");
         }
-        count
+        Ok(count)
     }
 
     /// List all currently active dynamic rules (FR-006, S009-IF-001).
     pub async fn list_rules(&self) -> Vec<ActiveRule> {
         let state = self.state.lock().await;
+        let now = Instant::now();
         state
             .rules
             .values()
@@ -187,325 +337,560 @@ impl DynamicRuleManager {
                     port: r.port,
                     nft_handle: r.nft_handle,
                     inserted_at: r.inserted_at.clone(),
+                    expires_in_secs: r
+                        .expires_at
+                        .map(|deadline| remaining_secs(deadline.saturating_duration_since(now))),
                 })
             })
             .collect()
     }
 
-    /// Remove all dynamic rules while preserving base drop rules (FR-009, S009-IF-002).
-    pub async fn flush_all(&self) -> FlushDynamicResult {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn seed_rule_for_tests(&self, container: &str, handle: u64) {
+        self.state
+            .lock()
+            .await
+            .rules
+            .entry(container.to_string())
+            .or_default()
+            .push(DynamicRuleRecord {
+                container: container.to_string(),
+                src_ip: "10.200.0.2".to_string(),
+                destination: "1.1.1.1".to_string(),
+                protocol: Some("tcp".to_string()),
+                port: Some(443),
+                nft_handle: handle,
+                inserted_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+            });
+    }
+
+    pub(super) async fn prune_expired(&self) -> Result<usize> {
+        let now = Instant::now();
         let mut state = self.state.lock().await;
-        let mut removed = 0usize;
-        for rules in state.rules.values() {
-            for rule in rules {
-                if let Err(e) = nft_delete(rule.nft_handle).await {
-                    warn!(
-                        handle = rule.nft_handle,
-                        "flush: failed to delete nft rule: {e}"
-                    );
-                } else {
-                    removed += 1;
-                }
+        let expired: Vec<(String, u64)> = state
+            .rules
+            .iter()
+            .flat_map(|(container, rules)| {
+                rules.iter().filter_map(|rule| {
+                    rule.expires_at
+                        .filter(|deadline| *deadline <= now)
+                        .map(|_| (container.clone(), rule.nft_handle))
+                })
+            })
+            .collect();
+        let total_tracked = state.rules.values().map(Vec::len).sum();
+
+        for (container, handle) in &expired {
+            if let Err(error) = self.nft.delete(*handle).await {
+                warn!(
+                    %container,
+                    handle,
+                    %error,
+                    "failed to delete expired nft rule; restoring fail-closed base policy"
+                );
+                self.nft.reset_to_base_policy().await.with_context(|| {
+                    format!(
+                        "failed to delete expired dynamic rule {handle} and emergency base-policy reset also failed"
+                    )
+                })?;
+                state.rules.clear();
+                info!(
+                    removed = total_tracked,
+                    "base policy restored after dynamic rule expiry"
+                );
+                return Ok(total_tracked);
+            }
+            remove_tracked_handle(&mut state, container, *handle);
+        }
+
+        Ok(expired.len())
+    }
+
+    /// Remove all dynamic rules while preserving base drop rules (FR-009, S009-IF-002).
+    pub async fn flush_all(&self) -> Result<FlushDynamicResult> {
+        let mut state = self.state.lock().await;
+        let handles: Vec<u64> = state
+            .rules
+            .values()
+            .flatten()
+            .map(|rule| rule.nft_handle)
+            .collect();
+        let total = handles.len();
+        for handle in handles {
+            if let Err(error) = self.nft.delete(handle).await {
+                warn!(
+                    handle,
+                    %error,
+                    "flush: failed to delete nft rule; restoring fail-closed base policy"
+                );
+                self.nft.reset_to_base_policy().await.with_context(|| {
+                        format!(
+                            "failed to delete dynamic rule {handle} and emergency base-policy reset also failed"
+                        )
+                    })?;
+                state.rules.clear();
+                info!(
+                    removed = total,
+                    "base policy restored; dynamic rules flushed"
+                );
+                return Ok(FlushDynamicResult { removed: total });
             }
         }
         state.rules.clear();
-        info!(removed, "dynamic rules flushed");
-        FlushDynamicResult { removed }
+        info!(removed = total, "dynamic rules flushed");
+        Ok(FlushDynamicResult { removed: total })
+    }
+
+    pub async fn shutdown(&self) -> Result<FlushDynamicResult> {
+        self.expiration_task
+            .shutdown(Duration::from_secs(10), "dynamic rule expiry watcher")
+            .await;
+        self.event_task
+            .shutdown(Duration::from_secs(10), "dynamic rule watcher")
+            .await;
+        self.flush_all().await
     }
 }
 
-// ── Container event watcher ────────────────────────────────────────────────────
+fn expiration_deadline(ttl_secs: Option<u64>, now: Instant) -> Result<Option<Instant>> {
+    let Some(ttl_secs) = ttl_secs else {
+        return Ok(None);
+    };
+    if ttl_secs == 0 || ttl_secs > MAX_DYNAMIC_RULE_TTL_SECS {
+        anyhow::bail!("expires_in_secs must be between 1 and {MAX_DYNAMIC_RULE_TTL_SECS} seconds");
+    }
+    now.checked_add(Duration::from_secs(ttl_secs))
+        .context("dynamic rule expiration deadline overflowed")
+        .map(Some)
+}
 
-async fn container_event_loop(
-    mgr: Arc<DynamicRuleManager>,
-    mut rx: tokio::sync::broadcast::Receiver<ContainerEvent>,
+fn renew_expiration(
+    current: &mut Option<Instant>,
+    requested: Option<Instant>,
+    source_policy: SourcePolicy,
 ) {
-    loop {
-        match rx.recv().await {
-            Ok(ev) => match ev.kind {
-                ContainerEventKind::Die
-                | ContainerEventKind::Oom
-                | ContainerEventKind::Kill
-                | ContainerEventKind::Destroy => {
-                    // Container is gone — remove all its dynamic rules.
-                    let removed = mgr.remove_container_rules(&ev.container_name).await;
-                    if removed > 0 {
-                        info!(
-                            container = %ev.container_name,
-                            removed,
-                            "cleaned up dynamic rules on container death"
-                        );
-                    }
-                }
-                ContainerEventKind::Pause => {
-                    // Container is paused but not gone — rules remain but no traffic.
-                    // Log for visibility; rules stay in place for when container unpauses.
-                    info!(container = %ev.container_name, "container paused — dynamic rules preserved");
-                }
-                ContainerEventKind::Unpause => {
-                    // Container resumed — rules still valid, nothing to do.
-                    debug!(container = %ev.container_name, "container resumed");
-                }
-            },
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                warn!(
-                    "dynamic rule event receiver lagged by {n} messages — some container deaths may have been missed"
-                );
-                // Continue — don't exit on lag.
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                info!("Docker event channel closed — stopping dynamic rule watcher");
-                return;
+    match source_policy {
+        SourcePolicy::OperatorMayPrestage => *current = requested,
+        SourcePolicy::RequireManaged => {
+            if let (Some(_), Some(deadline)) = (*current, requested) {
+                *current = Some(deadline);
             }
         }
     }
 }
 
-// ── nftables helpers ──────────────────────────────────────────────────────────
+fn remaining_secs(remaining: Duration) -> u64 {
+    remaining
+        .as_secs()
+        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+}
 
-const NFT_TABLE: &str = "inet";
-const NFT_CHAIN_TABLE: &str = "outcall";
-const NFT_CHAIN: &str = "forward";
-
-/// Insert a rule at position 0 (before base drop rules) and return its handle.
-async fn nft_insert(
-    src_ip: &str,
-    dst_ip: &str,
-    protocol: Option<&str>,
-    port: Option<u16>,
-) -> Result<u64> {
-    let is_ipv6 = is_ipv6_addr(dst_ip);
-    let ip_prefix = if is_ipv6 { "ip6" } else { "ip" };
-
-    // When emitting ip6 rules with an IPv4 source address, nftables requires
-    // IPv4-mapped IPv6 form (::ffff:x.x.x.x). Without this conversion, nft
-    // rejects "ip6 saddr 10.0.0.1" with "Could not resolve hostname".
-    let src_ip_str = if is_ipv6 && !is_ipv6_addr(src_ip) {
-        format!("::ffff:{src_ip}")
-    } else {
-        src_ip.to_string()
-    };
-
-    // Build the match expression.
-    let mut parts: Vec<String> = vec![
-        format!("{ip_prefix} saddr {src_ip_str}"),
-        format!("{ip_prefix} daddr {dst_ip}"),
-    ];
-
-    match (protocol, port) {
-        (Some(proto), Some(p)) => {
-            parts.push(format!("{proto} dport {p}"));
+fn validate_source_owner(
+    actual: Option<&str>,
+    requested: &str,
+    policy: SourcePolicy,
+    source_ip: &str,
+) -> Result<bool> {
+    match actual {
+        Some(actual) if actual == requested => Ok(true),
+        Some(actual) => anyhow::bail!(
+            "src_ip {source_ip} does not belong to container '{requested}' (belongs to '{actual}')"
+        ),
+        None if matches!(policy, SourcePolicy::RequireManaged) => {
+            anyhow::bail!("src_ip {source_ip} is not assigned to managed container '{requested}'")
         }
-        (Some(proto), None) => {
-            // Match all ports for a specific protocol.
-            parts.push(format!("meta l4proto {proto}"));
-        }
-        _ => {} // all protocols, all ports
+        None => Ok(false),
     }
-    parts.push("accept".to_string());
-
-    let rule_expr: Vec<&str> = parts.iter().map(String::as_str).collect();
-
-    // `nft insert rule` inserts at position 0 (head of chain) by default.
-    // `--handle --echo` causes nft to print the inserted rule with its handle.
-    let output = Command::new("nft")
-        .arg("--handle")
-        .arg("--echo")
-        .arg("insert")
-        .arg("rule")
-        .arg(NFT_TABLE)
-        .arg(NFT_CHAIN_TABLE)
-        .arg(NFT_CHAIN)
-        .args(&rule_expr)
-        .output()
-        .await
-        .context("failed to run nft")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("nft insert failed: {stderr}");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_nft_handle(&stdout).with_context(|| format!("could not parse nft handle from: {stdout}"))
 }
 
-/// Delete a rule by its nftables handle.
-async fn nft_delete(handle: u64) -> Result<()> {
-    let output = Command::new("nft")
-        .arg("delete")
-        .arg("rule")
-        .arg(NFT_TABLE)
-        .arg(NFT_CHAIN_TABLE)
-        .arg(NFT_CHAIN)
-        .arg("handle")
-        .arg(handle.to_string())
-        .output()
-        .await
-        .context("failed to run nft")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("nft delete handle {handle} failed: {stderr}");
+fn remove_tracked_handle(state: &mut DynState, container: &str, handle: u64) {
+    let remove_container = state.rules.get_mut(container).is_some_and(|rules| {
+        rules.retain(|rule| rule.nft_handle != handle);
+        rules.is_empty()
+    });
+    if remove_container {
+        state.rules.remove(container);
     }
-    Ok(())
-}
-
-/// Parse the nftables rule handle from `nft --handle --echo` output.
-///
-/// `nft --handle --echo insert ...` echoes the inserted rule followed by
-/// `# handle N` on the same line, e.g.:
-/// ```text
-///     ip saddr 10.0.0.1 ip daddr 1.2.3.4 tcp dport 443 accept # handle 42
-/// ```
-fn parse_nft_handle(output: &str) -> Option<u64> {
-    for line in output.lines() {
-        if let Some(pos) = line.find("# handle ") {
-            let tail = line[pos + 9..].trim();
-            // The handle may be followed by other text; take the first token.
-            if let Some(handle_str) = tail.split_whitespace().next() {
-                if let Ok(h) = handle_str.parse::<u64>() {
-                    return Some(h);
-                }
-            }
-        }
-    }
-    None
-}
-
-// ── Destination resolution ─────────────────────────────────────────────────────
-
-/// Resolve a destination to a string usable in nftables rules.
-///
-/// - IP address → returned as-is
-/// - CIDR → returned as-is
-/// - Hostname → resolved via DNS; first IPv4 address used; falls back to IPv6
-async fn resolve_destination(destination: &str) -> Result<String> {
-    // If it looks like an IP or CIDR, use directly.
-    if is_ip_or_cidr(destination) {
-        return Ok(destination.to_string());
-    }
-
-    // Hostname — resolve to IP.
-    let addrs: Vec<_> = tokio::net::lookup_host(format!("{destination}:0"))
-        .await
-        .with_context(|| format!("DNS resolution failed for \"{destination}\""))?
-        .collect();
-
-    for addr in &addrs {
-        if addr.is_ipv4() {
-            return Ok(addr.ip().to_string());
-        }
-    }
-
-    // No IPv4 found — try IPv6.
-    for addr in &addrs {
-        if addr.is_ipv6() {
-            return Ok(addr.ip().to_string());
-        }
-    }
-
-    anyhow::bail!("no IP address found for \"{destination}\" — nftables requires an IP address")
-}
-
-fn is_ip_or_cidr(s: &str) -> bool {
-    // Check for CIDR notation first.
-    let s = match s.split_once('/') {
-        Some((ip, mask)) => {
-            if mask.parse::<u8>().is_err() {
-                return false;
-            }
-            ip
-        }
-        None => s,
-    };
-    // Check if it's a valid IPv4 address (4 octets).
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() == 4 {
-        return parts.iter().all(|p| p.parse::<u8>().is_ok());
-    }
-    // IPv6 — starts with ':'
-    s.contains(':')
-}
-
-fn is_ipv6_addr(s: &str) -> bool {
-    s.contains(':')
-}
-
-// ── Time helpers ──────────────────────────────────────────────────────────────
-
-fn now_iso8601() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format_unix_ts(secs)
-}
-
-fn format_unix_ts(secs: u64) -> String {
-    let days = secs / 86400;
-    let tod = secs % 86400;
-    let hh = tod / 3600;
-    let mm = (tod % 3600) / 60;
-    let ss = tod % 60;
-    let (y, mo, d) = days_to_ymd(days);
-    format!("{y:04}-{mo:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
-}
-
-fn days_to_ymd(z: u64) -> (u64, u64, u64) {
-    let z = z + 719_468;
-    let era = z / 146_097;
-    let doe = z % 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if mo <= 2 { y + 1 } else { y };
-    (y, mo, d)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+
     use super::*;
 
-    #[test]
-    fn parse_nft_handle_from_echo_output() {
-        let output = "\ttable inet outcall {\n\t\tchain forward {\n\t\t\tip saddr 10.0.0.1 ip daddr 1.2.3.4 tcp dport 443 accept # handle 42\n\t\t}\n\t}\n";
-        assert_eq!(parse_nft_handle(output), Some(42));
+    struct MockNftController {
+        fail_delete: bool,
+        fail_reset: bool,
+        reset_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl NftController for MockNftController {
+        async fn insert(
+            &self,
+            _src_ip: IpAddr,
+            _dst_ip: &str,
+            _protocol: Option<&str>,
+            _port: Option<u16>,
+        ) -> Result<u64> {
+            Ok(1)
+        }
+
+        async fn delete(&self, _handle: u64) -> Result<()> {
+            if self.fail_delete {
+                anyhow::bail!("injected delete failure");
+            }
+            Ok(())
+        }
+
+        async fn reset_to_base_policy(&self) -> Result<()> {
+            self.reset_count.fetch_add(1, Ordering::SeqCst);
+            if self.fail_reset {
+                anyhow::bail!("injected reset failure");
+            }
+            Ok(())
+        }
+    }
+
+    struct FailSecondDeleteNft {
+        delete_count: AtomicUsize,
+        reset_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl NftController for FailSecondDeleteNft {
+        async fn insert(
+            &self,
+            _src_ip: IpAddr,
+            _dst_ip: &str,
+            _protocol: Option<&str>,
+            _port: Option<u16>,
+        ) -> Result<u64> {
+            Ok(1)
+        }
+
+        async fn delete(&self, _handle: u64) -> Result<()> {
+            if self.delete_count.fetch_add(1, Ordering::SeqCst) == 1 {
+                anyhow::bail!("injected second-delete failure");
+            }
+            Ok(())
+        }
+
+        async fn reset_to_base_policy(&self) -> Result<()> {
+            self.reset_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn manager_with_mock(nft: Arc<dyn NftController>) -> Arc<DynamicRuleManager> {
+        DynamicRuleManager::with_nft_controller(Arc::new(DockerManager::new_unavailable()), nft)
+    }
+
+    async fn seed_rule(manager: &DynamicRuleManager, container: &str, handle: u64) {
+        seed_rule_with_expiration(manager, container, handle, None).await;
+    }
+
+    async fn seed_rule_with_expiration(
+        manager: &DynamicRuleManager,
+        container: &str,
+        handle: u64,
+        expires_at: Option<Instant>,
+    ) {
+        manager
+            .state
+            .lock()
+            .await
+            .rules
+            .entry(container.to_string())
+            .or_default()
+            .push(DynamicRuleRecord {
+                container: container.to_string(),
+                src_ip: "10.200.0.2".to_string(),
+                destination: "1.1.1.1".to_string(),
+                protocol: Some("tcp".to_string()),
+                port: Some(443),
+                nft_handle: handle,
+                inserted_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at,
+            });
     }
 
     #[test]
-    fn parse_nft_handle_missing() {
-        assert_eq!(parse_nft_handle("no handle here\n"), None);
+    fn expiration_deadlines_are_bounded() {
+        let now = Instant::now();
+
+        assert_eq!(expiration_deadline(None, now).unwrap(), None);
+        assert!(expiration_deadline(Some(0), now).is_err());
+        assert!(expiration_deadline(Some(MAX_DYNAMIC_RULE_TTL_SECS), now).is_ok());
+        assert!(expiration_deadline(Some(MAX_DYNAMIC_RULE_TTL_SECS + 1), now).is_err());
     }
 
     #[test]
-    fn is_ip_or_cidr_variants() {
-        assert!(is_ip_or_cidr("10.0.0.1"));
-        assert!(is_ip_or_cidr("192.168.0.0/24"));
-        assert!(!is_ip_or_cidr("example.com"));
-        assert!(!is_ip_or_cidr("github.com"));
-        assert!(is_ip_or_cidr("::1"));
-        assert!(is_ip_or_cidr("2001:db8::1"));
-        assert!(is_ip_or_cidr("fe80::1%eth0"));
+    fn duplicate_expiration_respects_rule_source() {
+        let now = Instant::now();
+        let first = now + Duration::from_secs(10);
+        let renewed = now + Duration::from_secs(20);
+
+        let mut expiration = Some(first);
+        renew_expiration(&mut expiration, Some(renewed), SourcePolicy::RequireManaged);
+        assert_eq!(expiration, Some(renewed));
+
+        renew_expiration(&mut expiration, None, SourcePolicy::RequireManaged);
+        assert_eq!(expiration, Some(renewed));
+
+        expiration = None;
+        renew_expiration(&mut expiration, Some(first), SourcePolicy::RequireManaged);
+        assert_eq!(expiration, None);
+
+        renew_expiration(
+            &mut expiration,
+            Some(first),
+            SourcePolicy::OperatorMayPrestage,
+        );
+        assert_eq!(expiration, Some(first));
+        renew_expiration(&mut expiration, None, SourcePolicy::OperatorMayPrestage);
+        assert_eq!(expiration, None);
+    }
+
+    #[tokio::test]
+    async fn pruning_removes_only_expired_rules() {
+        let nft = Arc::new(MockNftController {
+            fail_delete: false,
+            fail_reset: false,
+            reset_count: AtomicUsize::new(0),
+        });
+        let manager = manager_with_mock(nft);
+        seed_rule_with_expiration(
+            &manager,
+            "agent-expired",
+            10,
+            Some(Instant::now() - Duration::from_secs(1)),
+        )
+        .await;
+        seed_rule_with_expiration(
+            &manager,
+            "agent-active",
+            20,
+            Some(Instant::now() + Duration::from_secs(60)),
+        )
+        .await;
+        seed_rule(&manager, "agent-persistent", 30).await;
+
+        assert_eq!(manager.prune_expired().await.unwrap(), 1);
+        let active = manager.list_rules().await;
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().any(|rule| rule.nft_handle == 20));
+        assert!(active.iter().any(|rule| rule.nft_handle == 30));
+    }
+
+    #[tokio::test]
+    async fn expiration_delete_failure_restores_base_policy() {
+        let nft = Arc::new(MockNftController {
+            fail_delete: true,
+            fail_reset: false,
+            reset_count: AtomicUsize::new(0),
+        });
+        let manager = manager_with_mock(nft.clone());
+        seed_rule_with_expiration(
+            &manager,
+            "agent-expired",
+            10,
+            Some(Instant::now() - Duration::from_secs(1)),
+        )
+        .await;
+        seed_rule(&manager, "agent-persistent", 20).await;
+
+        assert_eq!(manager.prune_expired().await.unwrap(), 2);
+        assert!(manager.list_rules().await.is_empty());
+        assert_eq!(nft.reset_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn expiration_reset_reports_prior_deletions_and_remaining_rules() {
+        let nft = Arc::new(FailSecondDeleteNft {
+            delete_count: AtomicUsize::new(0),
+            reset_count: AtomicUsize::new(0),
+        });
+        let manager = manager_with_mock(nft.clone());
+        for (container, handle) in [("agent-a", 10), ("agent-b", 20)] {
+            seed_rule_with_expiration(
+                &manager,
+                container,
+                handle,
+                Some(Instant::now() - Duration::from_secs(1)),
+            )
+            .await;
+        }
+        seed_rule(&manager, "agent-persistent", 30).await;
+
+        assert_eq!(manager.prune_expired().await.unwrap(), 3);
+        assert!(manager.list_rules().await.is_empty());
+        assert_eq!(nft.delete_count.load(Ordering::SeqCst), 2);
+        assert_eq!(nft.reset_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expiration_watcher_removes_rules_after_deadline() {
+        let nft = Arc::new(MockNftController {
+            fail_delete: false,
+            fail_reset: false,
+            reset_count: AtomicUsize::new(0),
+        });
+        let manager = manager_with_mock(nft);
+        tokio::task::yield_now().await;
+        seed_rule_with_expiration(
+            &manager,
+            "agent-expiring",
+            10,
+            Some(Instant::now() + Duration::from_secs(1)),
+        )
+        .await;
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+
+        assert!(manager.list_rules().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deletion_failure_resets_all_rules_to_fail_closed_policy() {
+        let nft = Arc::new(MockNftController {
+            fail_delete: true,
+            fail_reset: false,
+            reset_count: AtomicUsize::new(0),
+        });
+        let manager = manager_with_mock(nft.clone());
+        seed_rule(&manager, "agent-a", 10).await;
+        seed_rule(&manager, "agent-b", 20).await;
+
+        let removed = manager
+            .remove_container_rules("agent-a")
+            .await
+            .expect("emergency policy reset should recover deletion failure");
+
+        assert_eq!(removed, 1);
+        assert!(manager.list_rules().await.is_empty());
+        assert_eq!(nft.reset_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_emergency_reset_returns_error_and_retains_tracking_state() {
+        let nft = Arc::new(MockNftController {
+            fail_delete: true,
+            fail_reset: true,
+            reset_count: AtomicUsize::new(0),
+        });
+        let manager = manager_with_mock(nft.clone());
+        seed_rule(&manager, "agent-a", 10).await;
+
+        let error = manager
+            .remove_container_rules("agent-a")
+            .await
+            .expect_err("failed emergency reset must be reported");
+
+        assert!(error.to_string().contains("emergency base-policy reset"));
+        assert_eq!(manager.list_rules().await.len(), 1);
+        assert_eq!(nft.reset_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn flush_uses_emergency_reset_after_deletion_failure() {
+        let nft = Arc::new(MockNftController {
+            fail_delete: true,
+            fail_reset: false,
+            reset_count: AtomicUsize::new(0),
+        });
+        let manager = manager_with_mock(nft.clone());
+        seed_rule(&manager, "agent-a", 10).await;
+        seed_rule(&manager, "agent-b", 20).await;
+
+        let result = manager
+            .flush_all()
+            .await
+            .expect("emergency reset should flush all rules");
+
+        assert_eq!(result.removed, 2);
+        assert!(manager.list_rules().await.is_empty());
+        assert_eq!(nft.reset_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn event_gap_discards_all_derived_rules() {
+        let nft = Arc::new(MockNftController {
+            fail_delete: false,
+            fail_reset: false,
+            reset_count: AtomicUsize::new(0),
+        });
+        let manager = manager_with_mock(nft);
+        seed_rule(&manager, "agent-a", 10).await;
+        seed_rule(&manager, "agent-b", 20).await;
+
+        events::reset(&manager, "test event gap").await;
+
+        assert!(manager.list_rules().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn event_watcher_does_not_retain_manager() {
+        let nft = Arc::new(MockNftController {
+            fail_delete: false,
+            fail_reset: false,
+            reset_count: AtomicUsize::new(0),
+        });
+        let manager = manager_with_mock(nft);
+        let weak = Arc::downgrade(&manager);
+
+        assert_eq!(Arc::strong_count(&manager), 1);
+        drop(manager);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_watcher_and_flushes_rules() {
+        let nft = Arc::new(MockNftController {
+            fail_delete: false,
+            fail_reset: false,
+            reset_count: AtomicUsize::new(0),
+        });
+        let manager = manager_with_mock(nft);
+        seed_rule(&manager, "agent-a", 10).await;
+
+        let result = manager.shutdown().await.unwrap();
+
+        assert_eq!(result.removed, 1);
+        assert!(manager.list_rules().await.is_empty());
     }
 
     #[test]
-    fn is_ipv6_addr_variants() {
-        assert!(is_ipv6_addr("::1"));
-        assert!(is_ipv6_addr("2001:db8::1"));
-        assert!(is_ipv6_addr("fe80::1%eth0"));
-        assert!(is_ipv6_addr("2001:470:0:284::1"));
-        assert!(!is_ipv6_addr("10.0.0.1"));
-        assert!(!is_ipv6_addr("192.168.0.0/24"));
-        assert!(!is_ipv6_addr("example.com"));
-    }
-
-    #[test]
-    fn format_unix_ts_epoch() {
-        assert_eq!(format_unix_ts(0), "1970-01-01T00:00:00Z");
+    fn managed_source_policy_rejects_unassigned_or_mismatched_owners() {
+        assert!(validate_source_owner(
+            Some("agent-a"),
+            "agent-a",
+            SourcePolicy::RequireManaged,
+            "10.200.0.2"
+        )
+        .is_ok());
+        assert!(
+            validate_source_owner(None, "agent-a", SourcePolicy::RequireManaged, "10.200.0.2")
+                .is_err()
+        );
+        assert!(validate_source_owner(
+            Some("agent-b"),
+            "agent-a",
+            SourcePolicy::OperatorMayPrestage,
+            "10.200.0.2"
+        )
+        .is_err());
+        assert!(!validate_source_owner(
+            None,
+            "agent-a",
+            SourcePolicy::OperatorMayPrestage,
+            "10.200.0.2"
+        )
+        .unwrap());
     }
 }

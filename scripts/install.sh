@@ -34,12 +34,18 @@ verify_checksum() {
   checksum_path="$2"
   expected=""
   read -r expected _ < "$checksum_path" || true
-  if [ -z "$expected" ]; then
+  if [ "${#expected}" -ne 64 ]; then
     echo "error: checksum file $checksum_path does not contain a SHA-256 digest" >&2
     exit 1
   fi
-  set -- $(checksum "$archive_path")
-  actual="$1"
+  case "$expected" in
+    *[!0-9A-Fa-f]*)
+      echo "error: checksum file $checksum_path does not contain a SHA-256 digest" >&2
+      exit 1
+      ;;
+  esac
+  actual="$(checksum "$archive_path")"
+  actual="${actual%%[[:space:]]*}"
   if [ "$actual" != "$expected" ]; then
     echo "error: SHA-256 verification failed for $(basename "$archive_path")" >&2
     exit 1
