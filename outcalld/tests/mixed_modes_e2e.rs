@@ -51,6 +51,7 @@ async fn spawn_daemon(
     host_socket: &Path,
     agent_socket: &Path,
     rules_dir: &Path,
+    no_proxy: bool,
 ) -> Result<(Child, String, String)> {
     let mut cmd = Command::new("outcalld");
     cmd.env("RUST_LOG", "outcalld=warn")
@@ -59,8 +60,10 @@ async fn spawn_daemon(
         .arg("--agent-socket-host-path")
         .arg(agent_socket.as_os_str())
         .arg("--rules-dir")
-        .arg(rules_dir.as_os_str())
-        .arg("--no-proxy");
+        .arg(rules_dir.as_os_str());
+    if no_proxy {
+        cmd.arg("--no-proxy");
+    }
     let mut child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -129,7 +132,7 @@ rules:
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir, true)
         .await
         .expect("daemon spawned");
 
@@ -177,24 +180,24 @@ rules:
   - id: block-evil
     condition: 'dns.query == "evil.example.com"'
     action: block
-    egress: { mode: proxy }          # S006 mode (explicit)
-  - id: allow-all
+  - id: allow-proxy
     condition: 'true'
     action: allow
+    egress: { mode: proxy }          # S006 mode (explicit)
 "#;
     std::fs::write(rules_dir.join("test.yaml"), yaml).expect("write rules");
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir, false)
         .await
         .expect("daemon spawned");
 
-    // Test that `block-evil` with explicit `mode: proxy` works correctly.
+    // Test that the explicit proxy-mode allow rule loads and evaluates.
     let req = outcall_api::EvaluateRequest {
         context: outcall_api::EvalContext {
             dns: Some(outcall_api::DnsContext {
-                query: "evil.example.com".to_string(),
+                query: "allowed.example.com".to_string(),
                 record_type: "A".to_string(),
             }),
             ..Default::default()
@@ -212,8 +215,8 @@ rules:
     assert!(resp.success);
     let result = resp.data.expect("missing data");
     assert!(
-        matches!(result.decision, outcall_api::Decision::Block),
-        "explicit mode:proxy block rule should work, got {:?}",
+        matches!(result.decision, outcall_api::Decision::Allow),
+        "explicit mode:proxy allow rule should work, got {:?}",
         result.decision
     );
 
@@ -242,7 +245,7 @@ rules:
 
     let host_sock = tmp.path().join("host.sock");
     let agent_sock = tmp.path().join("agent.sock");
-    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir)
+    let (mut daemon, host, _agent) = spawn_daemon(&host_sock, &agent_sock, &rules_dir, true)
         .await
         .expect("daemon spawned");
 
