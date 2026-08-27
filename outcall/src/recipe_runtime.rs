@@ -105,12 +105,9 @@ where
     } = outcome;
     if completed_container_should_be_removed(completed, keep) {
         match remove(&name) {
-            Ok(_) => println!("Removed completed agent '{}'.", name),
+            Ok(_) => println!("Removed completed agent '{name}'."),
             Err(error) => {
-                eprintln!(
-                    "warning: failed to remove completed agent {}: {error}",
-                    name
-                );
+                eprintln!("warning: failed to remove completed agent {name}: {error}");
             }
         }
     }

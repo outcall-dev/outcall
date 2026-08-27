@@ -311,10 +311,7 @@ pub(super) fn recipe_smoke_test(
     }
 
     if let Err(error) = container_remove_request(socket, &name, true) {
-        eprintln!(
-            "warning: failed to remove smoke container {}: {error}",
-            name
-        );
+        eprintln!("warning: failed to remove smoke container {name}: {error}");
     }
     if let Some(error) = completion_error {
         return Err(error);

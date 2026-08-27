@@ -160,7 +160,7 @@ where
         copied = copied
             .checked_add(read as u64)
             .ok_or_else(|| std::io::Error::other("relay byte count overflow"))?;
-        let _ = activity.try_send(());
+        let _activity_notification = activity.try_send(());
     }
 }
 
