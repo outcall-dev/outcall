@@ -73,8 +73,10 @@ scripts/test-egress-policy.sh
 scripts/test-netfilter-preflight.sh <project-dir> <recipe>
 ```
 
-These require Linux, Docker, and the capabilities documented by each script.
-They are also exercised by the privileged CI jobs.
+These require Docker's Linux runtime and the capabilities documented by each
+script. The netfilter preflight uses `sudo sysctl` on Linux and a temporary,
+restore-on-exit privileged helper on Docker Desktop. They are also exercised
+by the privileged CI jobs.
 
 ## Code style
 
