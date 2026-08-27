@@ -141,7 +141,11 @@ jobs:
         run: |
           shellcheck scripts/*.sh
           for script in scripts/*.sh; do
-            sh -n "$script"
+            case "$(head -n 1 "$script")" in
+              '#!/usr/bin/env bash'|'#!/bin/bash') bash -n "$script" ;;
+              '#!/usr/bin/env sh'|'#!/bin/sh') sh -n "$script" ;;
+              *) echo "Unsupported shell shebang: $script" >&2; exit 1 ;;
+            esac
           done
 
   test-privileged-sudo:

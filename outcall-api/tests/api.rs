@@ -589,16 +589,7 @@ mod constants {
         assert!(valid_container_user(DEFAULT_CONTAINER_USER));
         assert!(valid_container_user("501:20"));
         for invalid in [
-            "",
-            "root",
-            "0:0",
-            "0:20",
-            "501:0",
-            "501",
-            "501:20:1",
-            "+501:20",
-            "501:+20",
-            " 501:20",
+            "", "root", "0:0", "0:20", "501:0", "501", "501:20:1", "+501:20", "501:+20", " 501:20",
             "501:20 ",
         ] {
             assert!(!valid_container_user(invalid), "accepted {invalid}");
