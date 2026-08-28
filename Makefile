@@ -1,4 +1,4 @@
-.PHONY: build coverage spec-check ui-test stop install-smoke install-smoke-doctor-codex install-smoke-doctor-claude
+.PHONY: build coverage spec-check ui-test stop install-smoke install-smoke-doctor-codex install-smoke-doctor-claude release-security-gate
 
 COVERAGE_MIN_LINES ?= 50
 
@@ -32,3 +32,6 @@ install-smoke-doctor-codex:
 
 install-smoke-doctor-claude:
 	sh scripts/local-install-smoke.sh outcall doctor claude
+
+release-security-gate:
+	scripts/verify-release-security-gate.sh

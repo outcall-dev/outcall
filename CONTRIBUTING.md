@@ -70,6 +70,7 @@ filter, nftables, agent identity resolution), also run:
 scripts/test-container-isolation.sh
 scripts/test-managed-container-security.sh <container> [container...]
 scripts/test-egress-policy.sh
+scripts/test-daemon-outage-fail-closed.sh
 scripts/test-netfilter-preflight.sh <project-dir> <recipe>
 ```
 
@@ -77,6 +78,33 @@ These require Docker's Linux runtime and the capabilities documented by each
 script. The netfilter preflight uses `sudo sysctl` on Linux and a temporary,
 restore-on-exit privileged helper on Docker Desktop. They are also exercised
 by the privileged CI jobs.
+
+## Release and provider gates
+
+The release workflow does not publish artifacts until the exact tagged commit
+has a successful `secure install + runtime + security validation` check.
+`scripts/verify-release-security-gate.sh` implements the bounded wait and is
+also available through `make release-security-gate` when its documented
+environment variables are set.
+
+Each release publishes `outcalld`, `outcall-recipe-codex`, and
+`outcall-recipe-claude` manifests for Linux amd64 and arm64. GitHub creates new
+organization packages as private. An organization package administrator must
+make each package public in its Package settings; this visibility change is
+irreversible. Verify each image with an empty temporary `DOCKER_CONFIG` so an
+existing GHCR login cannot hide an anonymous-access failure.
+
+The manually dispatched `Live Provider Smoke` workflow runs only from
+protected `main` and uses the `provider-smoke` environment. Configure these
+environment secrets:
+
+- `OUTCALL_CODEX_SMOKE_ACCESS_TOKEN`: an expiring Codex service-account token
+- `OUTCALL_CLAUDE_SMOKE_API_KEY`: a dedicated, low-limit Anthropic test key
+
+Enter an expiry no more than 24 hours away when dispatching the workflow.
+Revoke the Claude key by that time; Codex rejects its token after its provider
+expiration. The secret-bearing job does not check out repository content, and
+both provider containers are removed even when a smoke fails.
 
 ## Code style
 

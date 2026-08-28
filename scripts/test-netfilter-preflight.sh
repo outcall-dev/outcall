@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+root_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=scripts/lib/recipe-image.sh
+source "$root_dir/scripts/lib/recipe-image.sh"
 project_dir=${1:-$PWD}
 recipe=${2:-codex}
 outcall_bin=${OUTCALL_BIN:-outcall}
 daemon=${OUTCALL_DAEMON_CONTAINER:-outcall-daemon}
 network=${OUTCALL_NETWORK:-outcall-default}
-image=${OUTCALL_PREFLIGHT_IMAGE:-outcall-recipe-codex:local}
+image=${OUTCALL_PREFLIGHT_IMAGE:-$(outcall_recipe_image "$root_dir" codex)}
 control=${OUTCALL_NETFILTER_CONTROL:-auto}
 test_container="outcall-disabled-netfilter-must-not-start-$$"
 helper_container="outcall-netfilter-toggle-$$"

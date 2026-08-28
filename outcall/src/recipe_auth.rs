@@ -31,7 +31,9 @@ pub(crate) fn recipe_agent_config(
     detach: bool,
 ) -> Result<outcall::agent_config::AgentConfig> {
     let mut config = outcall::agent_config::AgentConfig::load(project_dir)?;
-    let defaults: outcall::agent_config::AgentConfig = serde_yaml::from_str(recipe.agent_config)?;
+    let mut defaults: outcall::agent_config::AgentConfig =
+        serde_yaml::from_str(recipe.agent_config)?;
+    defaults.image = Some(image.to_string());
     if outcall::recipes::has_generated_agent_config(project_dir)? {
         config = defaults;
     } else {
@@ -323,8 +325,13 @@ resources:
         .unwrap();
         let recipe = outcall::recipes::get_recipe("codex").unwrap();
 
-        let config =
-            recipe_agent_config(temp.path(), recipe, "outcall-recipe-codex:local", true).unwrap();
+        let config = recipe_agent_config(
+            temp.path(),
+            recipe,
+            &outcall::recipes::recipe_image_name(recipe),
+            true,
+        )
+        .unwrap();
 
         assert_eq!(config.image.as_deref(), Some("custom/agent:1"));
         assert_eq!(config.name.as_deref(), Some("custom-agent"));
@@ -351,8 +358,13 @@ resources:
         .unwrap();
         let recipe = outcall::recipes::get_recipe("codex").unwrap();
 
-        let config =
-            recipe_agent_config(temp.path(), recipe, "outcall-recipe-codex:local", false).unwrap();
+        let config = recipe_agent_config(
+            temp.path(),
+            recipe,
+            &outcall::recipes::recipe_image_name(recipe),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(config.entrypoint, Some(vec!["custom-launcher".to_string()]));
     }
@@ -363,14 +375,15 @@ resources:
         let codex = outcall::recipes::get_recipe("codex").unwrap();
         let claude = outcall::recipes::get_recipe("claude").unwrap();
 
-        for (initialized, requested, expected_image, expected_entrypoint) in [
-            (claude, codex, "outcall-recipe-codex:local", "outcall-codex"),
-            (codex, claude, "outcall-recipe-claude:local", "claude"),
-        ] {
+        for (initialized, requested, expected_entrypoint) in
+            [(claude, codex, "outcall-codex"), (codex, claude, "claude")]
+        {
             outcall::recipes::init_recipe(temp.path(), initialized, true).unwrap();
+            let expected_image = outcall::recipes::recipe_image_name(requested);
             let config =
-                recipe_agent_config(temp.path(), requested, expected_image, false).unwrap();
-            assert_eq!(config.image.as_deref(), Some(expected_image));
+                recipe_agent_config(temp.path(), requested, &expected_image, false).unwrap();
+            assert_eq!(config.image.as_deref(), Some(expected_image.as_str()));
+            assert!(config.auto_pull);
             assert_eq!(
                 config.entrypoint.as_deref(),
                 Some([expected_entrypoint.to_string()].as_slice())

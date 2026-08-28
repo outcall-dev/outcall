@@ -97,10 +97,12 @@ configuration.
 
 `outcall run <recipe>` is the only agent launch command. It writes the
 project-local `.outcall/` scaffold, checks Docker and generated files, stages
-selected authentication, builds the recipe image when needed, ensures the
-daemon and managed network exist, and then starts the isolated agent container.
-It persists the selected recipe for policy and setup commands, but every launch
-remains explicit.
+selected authentication, pulls the version-matched prebuilt recipe image,
+ensures the daemon and managed network exist, and then starts the isolated
+agent container. If the published image is unavailable, Outcall falls back to
+the bundled Dockerfile unless `--no-build` was requested. It persists the
+selected recipe for policy and setup commands, but every launch remains
+explicit.
 
 Managed agent processes run as the invoking user's numeric non-root UID/GID so
 project and staged-auth bind mounts remain usable on Linux and macOS. The
@@ -144,6 +146,12 @@ Ctrl+P, then Ctrl+Q; use `outcall logs <name> --follow` and
 Top-level `stop` removes the stopped agent so its numeric name can be reused;
 pass `--keep` to retain it for postmortem logs or inspection.
 
+Built-in images are versioned with the CLI and published for Linux amd64 and
+arm64 as `ghcr.io/outcall-dev/outcall-recipe-<recipe>:v<version>`. Editing a
+generated `.outcall/recipes/<recipe>/Dockerfile` automatically switches that
+recipe to `outcall-recipe-<recipe>:local` and restores fingerprinted local
+builds. An explicit image in `.outcall/agent.yaml` remains the final override.
+
 Recipes do not mount your whole home directory. Auto auth uses non-empty
 provider environment credentials when present. Otherwise it copies only the
 portable credential into ignored `.outcall/home/<id>` state. Pass
@@ -174,6 +182,10 @@ Claude API users can instead set `ANTHROPIC_API_KEY` or
 `ANTHROPIC_AUTH_TOKEN`. Treat every credential as a secret; Outcall forwards
 environment credentials to the managed container without writing their values
 into the project scaffold.
+
+Codex unattended runs accept an expiring `CODEX_ACCESS_TOKEN` or an API key in
+`CODEX_API_KEY` or `OPENAI_API_KEY`. Prefer a short-lived access token for
+trusted automation and scope any API key to the individual invocation.
 
 Each project scaffold also includes `.outcall/host-resources.yaml` as the
 explicit registry for host tools, host file roots, and auth/session handoff
@@ -271,6 +283,7 @@ Outcall is security-critical infrastructure. Before deploying it, read:
 - [Threat model](https://github.com/outcall-dev/docs/blob/main/security/threat-model.md) — what Outcall protects against, what it does not, and the trust boundaries you rely on.
 - [Most recent audit](https://github.com/outcall-dev/docs/blob/main/security/audit-2026-05-14.md) — findings, severities, and what's fixed.
 - [`SECURITY.md`](./SECURITY.md) — how to report a vulnerability.
+- [Outcall security review skill](./.agents/skills/outcall-security-review/SKILL.md) — the repeatable release and runtime checklist used by maintainers and agents.
 
 For a worked example of a tightly-scoped agent ruleset (Sentry → GitHub PR
 agent), see [`outcall-dev/root/rules.d/examples/sentry-github-agent/`](https://github.com/outcall-dev/root/tree/main/rules.d/examples/sentry-github-agent).

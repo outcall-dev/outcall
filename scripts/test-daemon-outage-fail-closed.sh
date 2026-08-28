@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+root_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=scripts/lib/recipe-image.sh
+source "$root_dir/scripts/lib/recipe-image.sh"
 network=${OUTCALL_NETWORK:-outcall-default}
 bridge=${OUTCALL_BRIDGE:-outcall0}
 daemon=${OUTCALL_DAEMON_CONTAINER:-outcall-daemon}
-probe_image=${OUTCALL_ISOLATION_IMAGE:-outcall-recipe-codex:local}
+probe_image=${OUTCALL_ISOLATION_IMAGE:-$(outcall_recipe_image "$root_dir" codex)}
 suffix="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$$"
 source_container="outcall-outage-source-$suffix"
 target_container="outcall-outage-target-$suffix"
