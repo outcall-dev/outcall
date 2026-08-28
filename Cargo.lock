@@ -1521,7 +1521,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "outcall"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "anyhow",
  "clap",
@@ -1542,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "outcall-agent"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "anyhow",
  "http-body-util",
@@ -1558,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "outcall-api"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "serde",
  "serde_json",
@@ -1566,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "outcall-ui"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "outcalld"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "anyhow",
  "async-trait",
