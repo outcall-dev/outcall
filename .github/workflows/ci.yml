@@ -139,8 +139,9 @@ jobs:
 
       - name: Check shell scripts
         run: |
-          shellcheck scripts/*.sh
-          for script in scripts/*.sh; do
+          mapfile -t scripts < <(find scripts -type f -name '*.sh' -print | sort)
+          shellcheck -x "${scripts[@]}"
+          for script in "${scripts[@]}"; do
             case "$(head -n 1 "$script")" in
               '#!/usr/bin/env bash'|'#!/bin/bash') bash -n "$script" ;;
               '#!/usr/bin/env sh'|'#!/bin/sh') sh -n "$script" ;;
@@ -349,6 +350,34 @@ jobs:
           test -f .outcall/recipes/codex/recipe.yaml
           test -f .outcall/agent.yaml
           docker inspect "$agent_name" >/dev/null
+
+  recipe-image:
+    name: recipe image (${{ matrix.recipe }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: [claude, codex]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build current recipe image
+        uses: docker/build-push-action@v7
+        with:
+          context: recipe-images/${{ matrix.recipe }}
+          file: recipe-images/${{ matrix.recipe }}/Dockerfile
+          load: true
+          tags: outcall-recipe-${{ matrix.recipe }}:ci
+          cache-from: type=gha,scope=recipe-${{ matrix.recipe }}-ci
+          cache-to: type=gha,scope=recipe-${{ matrix.recipe }}-ci,mode=max,ignore-error=true
+
+      - name: Verify agent binary
+        run: docker run --rm outcall-recipe-${{ matrix.recipe }}:ci --version
 
   secure-install-runtime:
     name: secure install + runtime + security validation

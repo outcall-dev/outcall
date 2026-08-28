@@ -2,6 +2,8 @@
 set -euo pipefail
 
 root_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=scripts/lib/recipe-image.sh
+source "$root_dir/scripts/lib/recipe-image.sh"
 if [[ -n "${OUTCALL_BIN:-}" ]]; then
   outcall_bin=$OUTCALL_BIN
 elif [[ -x "$root_dir/target/release/outcall" ]]; then
@@ -10,7 +12,7 @@ else
   outcall_bin=outcall
 fi
 network=${OUTCALL_NETWORK:-outcall-default}
-base_image=${OUTCALL_EGRESS_BASE_IMAGE:-outcall-recipe-codex:local}
+base_image=${OUTCALL_EGRESS_BASE_IMAGE:-$(outcall_recipe_image "$root_dir" codex)}
 probe_image=${OUTCALL_EGRESS_IMAGE:-outcall-egress-policy:local}
 allowed_host=${OUTCALL_EGRESS_ALLOWED_HOST:-github.com}
 denied_host=${OUTCALL_EGRESS_DENIED_HOST:-example.com}

@@ -44,3 +44,18 @@ days we'll communicate before the window expires and ask for an
 extension.
 
 We will credit reporters in the release notes unless asked not to.
+
+## Release assurance
+
+Every release is gated on the exact commit's full secure install, runtime, and
+network-policy CI check. The release also verifies daemon and provider recipe
+images for Linux amd64 and arm64 before publishing the GitHub release.
+
+Live Codex and Claude inference is kept out of pull-request CI. Maintainers can
+run the protected `Live Provider Smoke` workflow with temporary provider
+credentials and a declared expiry of at most 24 hours. The credential-bearing
+job has no repository checkout and removes its containers on every exit.
+
+The repeatable maintainer and agent checklist lives in
+`.agents/skills/outcall-security-review/SKILL.md` and references the same
+security probes used by CI.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Outcall Security Review"
+  short_description: "Run Outcall release and container security checks"
+  default_prompt: "Review Outcall security and release readiness using the canonical local and CI gates."

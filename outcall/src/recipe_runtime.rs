@@ -40,7 +40,7 @@ pub(crate) fn cmd_recipe_run(
     let recipe = recipe_or_bail(id)?;
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
     ensure_recipe_initialized(&project_dir, recipe)?;
-    let image = outcall::recipes::recipe_image_name(recipe);
+    let image = selected_recipe_image(&project_dir, recipe)?;
     let mut config = recipe_agent_config(&project_dir, recipe, &image, detach)?;
     if let Some(name) = name {
         config.name = Some(name);
@@ -132,7 +132,7 @@ pub(crate) fn cmd_recipe_test(
     let recipe = recipe_or_bail(id)?;
     let project_dir = std::env::current_dir().context("failed to get current directory")?;
     ensure_recipe_initialized(&project_dir, recipe)?;
-    let image = outcall::recipes::recipe_image_name(recipe);
+    let image = selected_recipe_image(&project_dir, recipe)?;
     let mut config = recipe_agent_config(&project_dir, recipe, &image, true)?;
 
     let auth_result = stage_recipe_auth(
@@ -159,6 +159,21 @@ pub(crate) fn cmd_recipe_test(
     recipe_smoke_test(socket, &project_dir, &config)?;
     println!("Recipe test passed: {}", recipe.id);
     Ok(())
+}
+
+fn selected_recipe_image(
+    project_dir: &std::path::Path,
+    recipe: &outcall::recipes::Recipe,
+) -> Result<String> {
+    if outcall::recipes::recipe_dockerfile_is_custom(project_dir, recipe)? {
+        let image = outcall::recipes::recipe_local_image_name(recipe);
+        println!(
+            "Recipe Dockerfile differs from the built-in {}; using local image {image}.",
+            recipe.id
+        );
+        return Ok(image);
+    }
+    Ok(outcall::recipes::recipe_image_name(recipe))
 }
 
 pub(crate) fn recipe_command_requires_credential(

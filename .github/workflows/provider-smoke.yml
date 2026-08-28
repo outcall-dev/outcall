@@ -1,0 +1,158 @@
+name: Live Provider Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      credentials_expire_at:
+        description: 'UTC expiry, no more than 24 hours away (example: 2026-08-29T12:00:00Z)'
+        required: true
+        type: string
+
+concurrency:
+  group: live-provider-smoke
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build trusted smoke binaries
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Require protected main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo 'Live provider smoke may run only from main.' >&2
+          exit 1
+
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: outcall-provider-smoke
+          cache-on-failure: false
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --locked
+
+      - name: Package smoke binaries
+        run: |
+          install -d -m 0755 "$RUNNER_TEMP/outcall-smoke-bin"
+          install -m 0755 \
+            target/release/outcall \
+            target/release/outcalld \
+            target/release/outcall-agent \
+            "$RUNNER_TEMP/outcall-smoke-bin/"
+
+      - name: Upload smoke binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: provider-smoke-binaries
+          path: ${{ runner.temp }}/outcall-smoke-bin
+          if-no-files-found: error
+          retention-days: 1
+
+  smoke:
+    name: live Codex and Claude inference
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    environment: provider-smoke
+    permissions:
+      actions: read
+      contents: none
+      packages: read
+    steps:
+      - name: Validate credential expiry
+        env:
+          CREDENTIALS_EXPIRE_AT: ${{ inputs.credentials_expire_at }}
+        run: |
+          set -eu
+          now=$(date -u +%s)
+          expiry=$(date -u -d "$CREDENTIALS_EXPIRE_AT" +%s)
+          max_expiry=$((now + 86400))
+          if [ "$expiry" -le "$now" ] || [ "$expiry" -gt "$max_expiry" ]; then
+            echo 'credentials_expire_at must be in the future and no more than 24 hours away.' >&2
+            exit 1
+          fi
+
+      - name: Download smoke binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: provider-smoke-binaries
+          path: ${{ runner.temp }}/outcall-smoke-bin
+
+      - name: Prepare runtime
+        run: |
+          set -eu
+          chmod 0755 "$RUNNER_TEMP/outcall-smoke-bin/"*
+          sudo modprobe br_netfilter
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run bounded live inference
+        env:
+          CODEX_ACCESS_TOKEN: ${{ secrets.OUTCALL_CODEX_SMOKE_ACCESS_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.OUTCALL_CLAUDE_SMOKE_API_KEY }}
+        run: |
+          set -eu
+          [ -n "$CODEX_ACCESS_TOKEN" ] || {
+            echo 'OUTCALL_CODEX_SMOKE_ACCESS_TOKEN is not configured.' >&2
+            exit 1
+          }
+          [ -n "$ANTHROPIC_API_KEY" ] || {
+            echo 'OUTCALL_CLAUDE_SMOKE_API_KEY is not configured.' >&2
+            exit 1
+          }
+
+          export PATH="$RUNNER_TEMP/outcall-smoke-bin:$PATH"
+          export HOME="$RUNNER_TEMP/outcall-provider-smoke-home"
+          install -d -m 0700 "$HOME"
+
+          codex_project="$RUNNER_TEMP/outcall-provider-smoke-codex"
+          claude_project="$RUNNER_TEMP/outcall-provider-smoke-claude"
+          mkdir -p "$codex_project" "$claude_project"
+
+          codex_marker=OUTCALL_CODEX_PROVIDER_SMOKE_OK
+          claude_marker=OUTCALL_CLAUDE_PROVIDER_SMOKE_OK
+
+          cd "$codex_project"
+          timeout 300 outcall run codex \
+            --name outcall-provider-smoke-codex -- \
+            exec --skip-git-repo-check --color never \
+            "Reply with exactly: $codex_marker" \
+            >"$RUNNER_TEMP/outcall-codex-smoke.log" 2>&1
+          grep -Fx "$codex_marker" "$RUNNER_TEMP/outcall-codex-smoke.log" >/dev/null
+
+          cd "$claude_project"
+          timeout 300 outcall run claude \
+            --name outcall-provider-smoke-claude -- \
+            -p "Reply with exactly: $claude_marker" --max-turns 1 \
+            >"$RUNNER_TEMP/outcall-claude-smoke.log" 2>&1
+          grep -Fx "$claude_marker" "$RUNNER_TEMP/outcall-claude-smoke.log" >/dev/null
+
+          echo 'Codex and Claude returned their exact smoke markers.'
+
+      - name: Remove smoke runtime resources
+        if: always()
+        run: |
+          docker rm -f \
+            outcall-provider-smoke-codex \
+            outcall-provider-smoke-claude \
+            outcall-daemon >/dev/null 2>&1 || true
+          docker network rm outcall-default >/dev/null 2>&1 || true

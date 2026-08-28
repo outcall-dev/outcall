@@ -120,7 +120,7 @@ pub(crate) enum Commands {
         /// Overwrite existing generated files
         #[arg(long)]
         force: bool,
-        /// Skip docker build and use the local recipe image as-is
+        /// Do not pull or build; require the selected image to exist locally
         #[arg(long)]
         no_build: bool,
         /// How to transfer provider auth/config into the container
@@ -140,7 +140,7 @@ pub(crate) enum Commands {
         /// Overwrite existing generated files
         #[arg(long)]
         force: bool,
-        /// Skip docker build and use the local recipe image as-is
+        /// Do not pull or build; require the selected image to exist locally
         #[arg(long)]
         no_build: bool,
         /// How to transfer provider auth/config into the container
@@ -247,7 +247,7 @@ pub(crate) enum RecipeAction {
     Test {
         /// Recipe ID, e.g. claude or codex
         id: String,
-        /// Skip docker build and use the local recipe image as-is
+        /// Do not pull or build; require the selected image to exist locally
         #[arg(long)]
         no_build: bool,
         /// How to transfer provider auth/config into the container

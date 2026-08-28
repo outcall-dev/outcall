@@ -121,11 +121,12 @@ fn build_help_supports_plain_progress(stdout: &[u8], stderr: &[u8]) -> bool {
 enum RecipeImageAction {
     BuildLocal,
     UseExisting,
-    Pull,
+    Pull { fallback_to_build: bool },
 }
 
 fn recipe_image_action(
     local_recipe_image: bool,
+    built_in_recipe_image: bool,
     image_exists: bool,
     no_build: bool,
     auto_pull: bool,
@@ -142,7 +143,12 @@ fn recipe_image_action(
         );
     }
     if auto_pull {
-        return Ok(RecipeImageAction::Pull);
+        return Ok(RecipeImageAction::Pull {
+            fallback_to_build: built_in_recipe_image && !no_build,
+        });
+    }
+    if built_in_recipe_image && !no_build {
+        return Ok(RecipeImageAction::BuildLocal);
     }
     anyhow::bail!("configured image is missing and auto_pull is false")
 }
@@ -154,18 +160,35 @@ pub(crate) fn prepare_recipe_image(
     no_build: bool,
 ) -> Result<()> {
     let image = config.effective_image();
-    let local_image = outcall::recipes::recipe_image_name(recipe);
+    let built_in_image = outcall::recipes::recipe_image_name(recipe);
+    let local_image = outcall::recipes::recipe_local_image_name(recipe);
     let exists = docker_image_exists(&image)?;
-    match recipe_image_action(image == local_image, exists, no_build, config.auto_pull)? {
+    match recipe_image_action(
+        image == local_image,
+        image == built_in_image,
+        exists,
+        no_build,
+        config.auto_pull,
+    )? {
         RecipeImageAction::BuildLocal => build_recipe_image(project_dir, recipe, &image),
         RecipeImageAction::UseExisting => Ok(()),
-        RecipeImageAction::Pull => {
+        RecipeImageAction::Pull { fallback_to_build } => {
             println!("Pulling configured recipe image {image}...");
-            run_interactive_docker(
+            let pulled = run_interactive_docker(
                 Command::new("docker").args(["pull", &image]),
                 IMAGE_PULL_TIMEOUT,
                 &format!("pull configured recipe image {image}"),
-            )
+            );
+            match (pulled, fallback_to_build) {
+                (Ok(()), _) => Ok(()),
+                (Err(error), true) => {
+                    eprintln!(
+                        "warning: prebuilt recipe image could not be pulled ({error}); building the bundled recipe locally"
+                    );
+                    build_recipe_image(project_dir, recipe, &image)
+                }
+                (Err(error), false) => Err(error),
+            }
         }
     }
 }
@@ -308,21 +331,33 @@ mod tests {
     #[test]
     fn recipe_image_action_is_explicit_and_fail_closed() {
         assert_eq!(
-            recipe_image_action(true, true, false, false).unwrap(),
+            recipe_image_action(true, false, true, false, false).unwrap(),
             RecipeImageAction::BuildLocal
         );
         assert_eq!(
-            recipe_image_action(true, true, true, false).unwrap(),
+            recipe_image_action(true, false, true, true, false).unwrap(),
             RecipeImageAction::UseExisting
         );
-        assert!(recipe_image_action(true, false, true, false).is_err());
+        assert!(recipe_image_action(true, false, false, true, false).is_err());
         assert_eq!(
-            recipe_image_action(false, false, false, true).unwrap(),
-            RecipeImageAction::Pull
+            recipe_image_action(false, true, false, false, true).unwrap(),
+            RecipeImageAction::Pull {
+                fallback_to_build: true
+            }
         );
-        assert!(recipe_image_action(false, false, false, false).is_err());
         assert_eq!(
-            recipe_image_action(false, true, false, false).unwrap(),
+            recipe_image_action(false, true, false, true, true).unwrap(),
+            RecipeImageAction::Pull {
+                fallback_to_build: false
+            }
+        );
+        assert_eq!(
+            recipe_image_action(false, true, false, false, false).unwrap(),
+            RecipeImageAction::BuildLocal
+        );
+        assert!(recipe_image_action(false, false, false, false, false).is_err());
+        assert_eq!(
+            recipe_image_action(false, false, true, false, false).unwrap(),
             RecipeImageAction::UseExisting
         );
     }

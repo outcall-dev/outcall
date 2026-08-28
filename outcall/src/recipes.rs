@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::secure_fs::{ensure_secure_subdir, write_runtime_file};
+use crate::secure_fs::{ensure_secure_subdir, read_regular_string, write_runtime_file};
 
 mod auth;
 mod catalog;
@@ -31,6 +31,7 @@ pub struct Recipe {
     pub readme: &'static str,
     pub context: &'static str,
     pub agent_config: &'static str,
+    pub legacy_agent_configs: &'static [&'static str],
     pub policy_templates: &'static [PolicyTemplate],
     pub auth_env: &'static [&'static str],
     pub credential_paths: &'static [&'static str],
@@ -145,6 +146,14 @@ pub fn ensure_recipe(project_dir: &Path, recipe: &Recipe) -> Result<Vec<PathBuf>
 }
 
 pub fn recipe_image_name(recipe: &Recipe) -> String {
+    format!(
+        "ghcr.io/outcall-dev/outcall-recipe-{}:v{}",
+        recipe.id,
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+pub fn recipe_local_image_name(recipe: &Recipe) -> String {
     format!("outcall-recipe-{}:local", recipe.id)
 }
 
@@ -156,12 +165,21 @@ pub fn recipe_dockerfile(project_dir: &Path, recipe: &Recipe) -> PathBuf {
         .join("Dockerfile")
 }
 
+pub fn recipe_dockerfile_is_custom(project_dir: &Path, recipe: &Recipe) -> Result<bool> {
+    let path = recipe_dockerfile(project_dir, recipe);
+    Ok(read_regular_string(&path)?.is_some_and(|contents| contents != recipe.dockerfile))
+}
+
 /// Return true when the shared agent config is an unmodified built-in recipe
 /// template rather than a user-authored override.
 pub fn has_generated_agent_config(project_dir: &Path) -> Result<bool> {
     let path = project_dir.join(".outcall").join("agent.yaml");
-    Ok(read_existing_file(&path)?
-        .is_some_and(|existing| RECIPES.iter().any(|recipe| existing == recipe.agent_config)))
+    Ok(read_existing_file(&path)?.is_some_and(|existing| {
+        RECIPES.iter().any(|recipe| {
+            existing == recipe.agent_config
+                || recipe.legacy_agent_configs.contains(&existing.as_str())
+        })
+    }))
 }
 
 fn write_new(path: &Path, contents: &str, force: bool, written: &mut Vec<PathBuf>) -> Result<()> {
@@ -196,7 +214,10 @@ fn write_agent_config(
         if existing == contents {
             return Ok(());
         }
-        if !RECIPES.iter().any(|recipe| existing == recipe.agent_config) {
+        if !RECIPES.iter().any(|recipe| {
+            existing == recipe.agent_config
+                || recipe.legacy_agent_configs.contains(&existing.as_str())
+        }) {
             return Ok(());
         }
     }

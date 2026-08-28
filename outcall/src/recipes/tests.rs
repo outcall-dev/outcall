@@ -16,6 +16,22 @@ fn finds_builtin_recipe() {
 }
 
 #[test]
+fn builtin_recipe_images_are_versioned_and_custom_build_names_stay_local() {
+    let recipe = get_recipe("codex").unwrap();
+    assert_eq!(
+        recipe_image_name(recipe),
+        format!(
+            "ghcr.io/outcall-dev/outcall-recipe-codex:v{}",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+    assert_eq!(
+        recipe_local_image_name(recipe),
+        "outcall-recipe-codex:local"
+    );
+}
+
+#[test]
 fn claude_recipe_supports_official_unattended_auth_variables() {
     let recipe = get_recipe("claude").unwrap();
     assert_eq!(
@@ -36,6 +52,15 @@ fn claude_recipe_supports_official_unattended_auth_variables() {
     assert!(recipe.manifest.contains("default_mode: auto"));
     assert!(recipe.readme.contains("claude setup-token"));
     assert!(!recipe.readme.contains("outcall recipe doctor"));
+}
+
+#[test]
+fn codex_recipe_supports_access_token_and_api_key_authentication() {
+    let recipe = get_recipe("codex").unwrap();
+    assert_eq!(
+        recipe.auth_env,
+        &["CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"]
+    );
 }
 
 #[test]
@@ -155,10 +180,33 @@ fn init_recipe_writes_expected_files() {
     assert!(dir.join(".outcall/host-resources.yaml").exists());
     assert!(dir.join(".outcall/.gitignore").exists());
     let agent_config = std::fs::read_to_string(dir.join(".outcall/agent.yaml")).unwrap();
+    assert!(!agent_config.contains("image:"));
+    assert!(agent_config.contains("auto_pull: true"));
     assert!(
         !agent_config.contains("name: codex-agent"),
         "generated agent config should not pin a provider-specific container name"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn generated_legacy_agent_config_migrates_to_prebuilt_image_defaults() {
+    let dir = temp_project("legacy-agent-config");
+    let recipe = get_recipe("codex").unwrap();
+    std::fs::create_dir_all(dir.join(".outcall")).unwrap();
+    std::fs::write(
+        dir.join(".outcall/agent.yaml"),
+        recipe.legacy_agent_configs[0],
+    )
+    .unwrap();
+
+    assert!(has_generated_agent_config(&dir).unwrap());
+    init_recipe(&dir, recipe, false).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".outcall/agent.yaml")).unwrap(),
+        recipe.agent_config
+    );
+
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -180,6 +228,23 @@ fn ensure_recipe_repairs_missing_files_and_preserves_existing_content() {
         recipe.dockerfile
     );
     assert_eq!(written, vec![std::fs::canonicalize(dockerfile).unwrap()]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn recipe_dockerfile_customization_is_detected_without_following_symlinks() {
+    let dir = temp_project("custom-dockerfile");
+    let recipe = get_recipe("codex").unwrap();
+    init_recipe(&dir, recipe, false).unwrap();
+
+    assert!(!recipe_dockerfile_is_custom(&dir, recipe).unwrap());
+    std::fs::write(
+        recipe_dockerfile(&dir, recipe),
+        format!("{}\nRUN echo custom\n", recipe.dockerfile),
+    )
+    .unwrap();
+    assert!(recipe_dockerfile_is_custom(&dir, recipe).unwrap());
+
     let _ = std::fs::remove_dir_all(dir);
 }
 
